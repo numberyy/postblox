@@ -55,8 +55,6 @@ pub async fn touch_last_used(pool: &PgPool, id: Uuid) -> Result<(), sqlx::Error>
 mod tests {
     use super::*;
 
-    // Integration tests — require DATABASE_URL with migrations applied
-
     #[tokio::test]
     #[ignore]
     async fn test_api_key_create_and_find_by_prefix() {

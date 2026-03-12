@@ -1,13 +1,14 @@
 use std::net::SocketAddr;
 
-use axum::{extract::State, routing::get, Json, Router};
-use sqlx::PgPool;
 use tracing_subscriber::EnvFilter;
 
+mod api;
 mod config;
 mod db;
+mod events;
 mod mail;
 mod models;
+mod stalwart;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -18,7 +19,29 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::load()?;
     let pool = db::connect(&config.database_url).await?;
 
-    let app = Router::new().route("/health", get(health)).with_state(pool);
+    let stalwart_client = match (&config.stalwart_url, &config.stalwart_admin_token) {
+        (Some(url), Some(token)) => {
+            tracing::info!("stalwart client configured at {url}");
+            Some(stalwart::StalwartClient::new(url, token))
+        }
+        _ => {
+            tracing::info!("stalwart not configured, email delivery disabled");
+            None
+        }
+    };
+
+    let webhook_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("failed to build webhook client");
+
+    let state = api::AppState {
+        pool,
+        stalwart: stalwart_client,
+        webhook_client,
+        inbound_token: config.stalwart_inbound_token,
+    };
+    let app = api::router(state);
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
     tracing::info!("postblox listening on {addr}");
@@ -27,13 +50,4 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-async fn health(State(pool): State<PgPool>) -> Json<serde_json::Value> {
-    let db_ok = sqlx::query("SELECT 1").execute(&pool).await.is_ok();
-
-    Json(serde_json::json!({
-        "status": if db_ok { "ok" } else { "degraded" },
-        "database": db_ok,
-    }))
 }

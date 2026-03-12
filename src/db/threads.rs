@@ -67,8 +67,6 @@ pub async fn increment_message_count(
 mod tests {
     use super::*;
 
-    // Integration tests — require DATABASE_URL with migrations applied
-
     async fn setup_inbox(pool: &sqlx::PgPool) -> crate::models::Inbox {
         let org = crate::db::organizations::create(pool, "Thread Test Org")
             .await

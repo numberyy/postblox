@@ -50,7 +50,8 @@ pub async fn list_active_for_event(
 ) -> Result<Vec<Webhook>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, org_id, url, events, secret, active, created_at \
-         FROM webhooks WHERE org_id = $1 AND active = true AND events @> $2::jsonb",
+         FROM webhooks WHERE org_id = $1 AND active = true AND events @> $2::jsonb \
+         LIMIT 20",
     )
     .bind(org_id)
     .bind(serde_json::json!([event_name]))
@@ -71,8 +72,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // Integration tests — require DATABASE_URL with migrations applied
-
     #[tokio::test]
     #[ignore]
     async fn test_webhook_create_and_get() {
@@ -81,7 +80,7 @@ mod tests {
             .await
             .unwrap();
 
-        let events = json!(["message.inbound"]);
+        let events = json!(["message.received"]);
         let wh = create(
             &pool,
             org.id,
@@ -141,7 +140,7 @@ mod tests {
             &pool,
             org.id,
             "https://a.com",
-            &json!(["message.inbound", "message.outbound"]),
+            &json!(["message.received", "message.sent"]),
             "s1",
         )
         .await
@@ -150,19 +149,19 @@ mod tests {
             &pool,
             org.id,
             "https://b.com",
-            &json!(["message.outbound"]),
+            &json!(["message.sent"]),
             "s2",
         )
         .await
         .unwrap();
 
-        let inbound = list_active_for_event(&pool, org.id, "message.inbound")
+        let inbound = list_active_for_event(&pool, org.id, "message.received")
             .await
             .unwrap();
         assert_eq!(inbound.len(), 1);
         assert_eq!(inbound[0].url, "https://a.com");
 
-        let outbound = list_active_for_event(&pool, org.id, "message.outbound")
+        let outbound = list_active_for_event(&pool, org.id, "message.sent")
             .await
             .unwrap();
         assert_eq!(outbound.len(), 2);
@@ -179,7 +178,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = list_active_for_event(&pool, org.id, "message.inbound")
+        let result = list_active_for_event(&pool, org.id, "message.received")
             .await
             .unwrap();
         assert!(result.is_empty());

@@ -78,6 +78,29 @@ pub async fn list_by_thread(pool: &PgPool, thread_id: Uuid) -> Result<Vec<Messag
     .await
 }
 
+/// Fetches (thread_id, message_id_header) pairs for an inbox in a single query.
+/// Used by inbound pipeline to build ThreadRef list without N+1.
+pub async fn message_id_headers_by_inbox(
+    pool: &PgPool,
+    inbox_id: Uuid,
+) -> Result<std::collections::HashMap<Uuid, Vec<String>>, sqlx::Error> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT thread_id, message_id_header \
+         FROM messages \
+         WHERE inbox_id = $1 AND thread_id IS NOT NULL AND message_id_header IS NOT NULL",
+    )
+    .bind(inbox_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut map: std::collections::HashMap<Uuid, Vec<String>> =
+        std::collections::HashMap::with_capacity(rows.len());
+    for (thread_id, mid) in rows {
+        map.entry(thread_id).or_default().push(mid);
+    }
+    Ok(map)
+}
+
 pub async fn find_by_message_id_header(
     pool: &PgPool,
     inbox_id: Uuid,
@@ -99,8 +122,6 @@ pub async fn find_by_message_id_header(
 mod tests {
     use super::*;
     use serde_json::json;
-
-    // Integration tests — require DATABASE_URL with migrations applied
 
     async fn setup_inbox(pool: &sqlx::PgPool) -> crate::models::Inbox {
         let org = crate::db::organizations::create(pool, "Msg Test Org")

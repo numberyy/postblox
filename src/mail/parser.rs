@@ -14,6 +14,7 @@ pub struct ParsedEmail {
     pub subject: Option<String>,
     pub text_body: Option<String>,
     pub html_body: Option<String>,
+    #[allow(dead_code)] // populated by parser, consumed when we add date-based sorting
     pub date: Option<DateTime<Utc>>,
     pub raw_headers: serde_json::Value,
 }
@@ -229,11 +230,7 @@ mod tests {
     #[test]
     fn test_parse_empty_bytes_returns_error() {
         let result = parse(b"");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            MailError::Parse(_) => {}
-            other => panic!("expected Parse error, got: {other}"),
-        }
+        assert!(matches!(result.unwrap_err(), MailError::Parse(_)));
     }
 
     #[test]

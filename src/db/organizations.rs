@@ -27,9 +27,6 @@ pub async fn list(pool: &PgPool) -> Result<Vec<Organization>, sqlx::Error> {
 mod tests {
     use super::*;
 
-    // Integration tests — require DATABASE_URL pointing to a Postgres instance
-    // with migrations applied. Run with: DATABASE_URL=... cargo test -- --ignored
-
     #[tokio::test]
     #[ignore]
     async fn test_organization_create_and_get() {

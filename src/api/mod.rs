@@ -1,0 +1,82 @@
+use axum::extract::State;
+use axum::routing::{get, post};
+use axum::Json;
+use serde::Deserialize;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+pub mod auth;
+pub mod error;
+pub mod inbound;
+pub mod inboxes;
+pub mod messages;
+pub mod threads;
+pub mod webhooks;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub pool: PgPool,
+    pub stalwart: Option<crate::stalwart::StalwartClient>,
+    pub webhook_client: reqwest::Client,
+    pub inbound_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PaginationParams {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+pub fn clamp_pagination(params: &PaginationParams) -> (i64, i64) {
+    let limit = params.limit.unwrap_or(50).clamp(1, 100);
+    let offset = params.offset.unwrap_or(0).max(0);
+    (limit, offset)
+}
+
+pub async fn get_inbox_for_org(
+    pool: &PgPool,
+    inbox_id: Uuid,
+    org_id: Uuid,
+) -> Result<crate::models::Inbox, error::ApiError> {
+    let inbox = crate::db::inboxes::get_by_id(pool, inbox_id)
+        .await
+        .map_err(|e| error::ApiError::Internal(e.to_string()))?
+        .ok_or(error::ApiError::NotFound)?;
+    if inbox.org_id != org_id {
+        return Err(error::ApiError::NotFound);
+    }
+    Ok(inbox)
+}
+
+pub fn router(state: AppState) -> axum::Router {
+    let api_routes = axum::Router::new()
+        .route("/inboxes", get(inboxes::list).post(inboxes::create))
+        .route("/inboxes/{id}", get(inboxes::get).delete(inboxes::delete))
+        .route("/inboxes/{inbox_id}/threads", get(threads::list))
+        .route("/inboxes/{inbox_id}/threads/{id}", get(threads::get))
+        .route("/webhooks", get(webhooks::list).post(webhooks::create))
+        .route(
+            "/webhooks/{id}",
+            get(webhooks::get).delete(webhooks::delete),
+        )
+        .route(
+            "/inboxes/{inbox_id}/messages",
+            get(messages::list).post(messages::send),
+        )
+        .route("/inboxes/{inbox_id}/messages/{id}", get(messages::get));
+
+    axum::Router::new()
+        .route("/health", get(health))
+        .route("/internal/stalwart/inbound", post(inbound::receive_inbound))
+        .nest("/api/v1", api_routes)
+        .with_state(state)
+}
+
+async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let db_ok = sqlx::query("SELECT 1").execute(&state.pool).await.is_ok();
+
+    Json(serde_json::json!({
+        "status": if db_ok { "ok" } else { "degraded" },
+        "database": db_ok,
+    }))
+}

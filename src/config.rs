@@ -9,6 +9,9 @@ pub struct Config {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    pub stalwart_url: Option<String>,
+    pub stalwart_admin_token: Option<String>,
+    pub stalwart_inbound_token: Option<String>,
 }
 
 fn default_host() -> String {
@@ -37,6 +40,9 @@ impl Config {
                     .unwrap_or_else(default_port),
                 database_url: std::env::var("DATABASE_URL")
                     .map_err(|_| anyhow::anyhow!("DATABASE_URL or postblox.toml required"))?,
+                stalwart_url: std::env::var("STALWART_URL").ok(),
+                stalwart_admin_token: std::env::var("STALWART_ADMIN_TOKEN").ok(),
+                stalwart_inbound_token: std::env::var("STALWART_INBOUND_TOKEN").ok(),
             })
         }
     }

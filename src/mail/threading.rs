@@ -16,7 +16,6 @@ pub enum ThreadMatch {
 }
 
 pub fn assign_thread(message: &ParsedEmail, existing_threads: &[ThreadRef]) -> ThreadMatch {
-    // 1. In-Reply-To match
     if let Some(ref reply_to) = message.in_reply_to {
         for thread in existing_threads {
             if thread.message_ids.iter().any(|id| id == reply_to) {
@@ -25,7 +24,7 @@ pub fn assign_thread(message: &ParsedEmail, existing_threads: &[ThreadRef]) -> T
         }
     }
 
-    // 2. References match (prefer later IDs — iterate in reverse)
+    // Prefer later reference IDs — most likely to be the direct parent
     for ref_id in message.references.iter().rev() {
         for thread in existing_threads {
             if thread.message_ids.iter().any(|id| id == ref_id) {
@@ -34,7 +33,6 @@ pub fn assign_thread(message: &ParsedEmail, existing_threads: &[ThreadRef]) -> T
         }
     }
 
-    // 3. Subject match within 7 days
     if let Some(ref subject) = message.subject {
         let normalized = normalize_subject(subject);
         if !normalized.is_empty() {
@@ -58,23 +56,21 @@ pub fn assign_thread(message: &ParsedEmail, existing_threads: &[ThreadRef]) -> T
 }
 
 pub fn normalize_subject(subject: &str) -> String {
-    let mut s = subject.trim().to_string();
+    let mut s = subject.trim();
     loop {
-        let trimmed = s.trim_start().to_string();
-        let lower = trimmed.to_lowercase();
-        let mut stripped = false;
-        for prefix in &["re:", "fwd:", "fw:"] {
-            if lower.starts_with(prefix) {
-                s = trimmed[prefix.len()..].to_string();
-                stripped = true;
-                break;
-            }
-        }
-        if !stripped {
+        let b = s.as_bytes();
+        let skip = if b.len() >= 3 && b[..3].eq_ignore_ascii_case(b"re:") {
+            3
+        } else if b.len() >= 4 && b[..4].eq_ignore_ascii_case(b"fwd:") {
+            4
+        } else if b.len() >= 3 && b[..3].eq_ignore_ascii_case(b"fw:") {
+            3
+        } else {
             break;
-        }
+        };
+        s = s[skip..].trim_start();
     }
-    s.trim().to_lowercase()
+    s.to_lowercase()
 }
 
 #[cfg(test)]
@@ -130,7 +126,6 @@ mod tests {
             &["msg001@ex.com"],
             Some("Re: Hello"),
         );
-        // Should fall through to references and match
         match assign_thread(&msg, &threads) {
             ThreadMatch::Existing(id) => assert_eq!(id, tid),
             ThreadMatch::New => panic!("expected Existing via references"),
@@ -270,7 +265,6 @@ mod tests {
     fn test_assign_thread_empty_references_no_panic() {
         let threads = vec![make_thread(Uuid::new_v4(), &["x@ex.com"], "Test", 1)];
         let msg = make_message(None, &[], Some("Unrelated"));
-        // Should not panic, just return New
         match assign_thread(&msg, &threads) {
             ThreadMatch::New => {}
             ThreadMatch::Existing(_) => panic!("expected New"),
@@ -317,7 +311,6 @@ mod tests {
         let tid = Uuid::new_v4();
         let threads = vec![make_thread(tid, &[], "", 1)];
         let msg = make_message(None, &[], Some(""));
-        // Empty normalized subject → skip subject matching
         match assign_thread(&msg, &threads) {
             ThreadMatch::New => {}
             ThreadMatch::Existing(_) => panic!("empty subject should not match"),

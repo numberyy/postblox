@@ -65,8 +65,6 @@ pub async fn delete(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
 mod tests {
     use super::*;
 
-    // Integration tests — require DATABASE_URL with migrations applied
-
     #[tokio::test]
     #[ignore]
     async fn test_inbox_create_and_get() {
