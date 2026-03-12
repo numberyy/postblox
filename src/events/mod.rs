@@ -3,11 +3,13 @@ pub mod webhooks;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-pub const KNOWN_EVENTS: &[&str] = &["message.received", "message.sent"];
+pub const KNOWN_EVENTS: &[&str] = &["message.received", "message.sent", "message.classified"];
 
+#[allow(clippy::enum_variant_names)]
 pub enum PostbloxEvent {
     MessageReceived { message_id: Uuid, inbox_id: Uuid },
     MessageSent { message_id: Uuid, inbox_id: Uuid },
+    MessageClassified { message_id: Uuid, inbox_id: Uuid },
 }
 
 impl PostbloxEvent {
@@ -15,6 +17,7 @@ impl PostbloxEvent {
         match self {
             Self::MessageReceived { .. } => "message.received",
             Self::MessageSent { .. } => "message.sent",
+            Self::MessageClassified { .. } => "message.classified",
         }
     }
 
@@ -25,6 +28,10 @@ impl PostbloxEvent {
                 inbox_id,
             }
             | Self::MessageSent {
+                message_id,
+                inbox_id,
+            }
+            | Self::MessageClassified {
                 message_id,
                 inbox_id,
             } => serde_json::json!({

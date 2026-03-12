@@ -4,12 +4,14 @@ use tracing_subscriber::EnvFilter;
 
 mod api;
 mod config;
+mod core;
 mod db;
 mod embeddings;
 mod events;
 mod mail;
 mod models;
 mod stalwart;
+mod sync;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

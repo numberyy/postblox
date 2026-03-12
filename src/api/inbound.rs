@@ -66,14 +66,12 @@ pub async fn receive_inbound(
         .as_ref()
         .map(|t| crate::mail::reply_extract::extract_reply(t));
 
-    let threads = crate::db::threads::list_by_inbox(&state.pool, inbox.id, 100, 0)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    // Single query for all message_id_headers, grouped by thread — avoids N+1.
-    let mid_map = crate::db::messages::message_id_headers_by_inbox(&state.pool, inbox.id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let (threads_result, mid_map_result) = tokio::join!(
+        crate::db::threads::list_by_inbox(&state.pool, inbox.id, 100, 0),
+        crate::db::messages::message_id_headers_by_inbox(&state.pool, inbox.id),
+    );
+    let threads = threads_result.map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mid_map = mid_map_result.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let thread_refs: Vec<_> = threads
         .iter()
@@ -106,34 +104,55 @@ pub async fn receive_inbound(
         }
     };
 
-    let cm = crate::models::CreateMessage {
-        inbox_id: inbox.id,
-        thread_id: Some(thread_id),
-        message_id_header: parsed.message_id.clone(),
-        in_reply_to: parsed.in_reply_to.clone(),
-        references_header: if parsed.references.is_empty() {
-            None
-        } else {
-            Some(parsed.references.join(" "))
-        },
-        from_addr: parsed.from.clone(),
-        to_addrs: serde_json::json!(parsed.to),
-        cc_addrs: if parsed.cc.is_empty() {
-            None
-        } else {
-            Some(serde_json::json!(parsed.cc))
-        },
-        subject: parsed.subject.clone(),
-        text_body: parsed.text_body.clone(),
-        html_body: parsed.html_body.clone(),
-        extracted_text,
-        direction: "inbound".into(),
-        raw_headers: Some(parsed.raw_headers.clone()),
-    };
+    let cm =
+        crate::mail::parsed_to_create_message(&parsed, inbox.id, Some(thread_id), extracted_text);
 
     let msg = crate::db::messages::create(&state.pool, &cm)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let sender_rep =
+        match crate::db::slop::get_sender_reputation(&state.pool, inbox.org_id, &parsed.from).await
+        {
+            Ok(rep) => rep,
+            Err(e) => {
+                tracing::warn!(message_id = %msg.id, "failed to fetch sender reputation: {e}");
+                None
+            }
+        };
+    let slop_ratio = sender_rep.map(|r| r.slop_ratio());
+    let classifier_input = crate::core::slop::ClassifierInput {
+        from_addr: &parsed.from,
+        subject: parsed.subject.as_deref(),
+        text_body: parsed.text_body.as_deref(),
+        raw_headers: Some(&parsed.raw_headers),
+        sender_slop_ratio: slop_ratio,
+    };
+    let slop_result = crate::core::slop::classify(&classifier_input);
+    let signals_json = serde_json::json!(slop_result.signals);
+    let slop_fields = crate::db::slop::SlopFields {
+        score: slop_result.score,
+        signals: &signals_json,
+        category: slop_result.category.as_deref(),
+        priority: &slop_result.priority,
+        triage_status: slop_result.triage_action.as_str(),
+        requires_action: slop_result.requires_action,
+    };
+    let (slop_update, rep_update) = tokio::join!(
+        crate::db::slop::update_slop_fields(&state.pool, msg.id, &slop_fields),
+        crate::db::slop::upsert_sender_reputation(
+            &state.pool,
+            inbox.org_id,
+            &parsed.from,
+            slop_result.is_slop()
+        ),
+    );
+    if let Err(e) = slop_update {
+        tracing::warn!(message_id = %msg.id, "failed to update slop fields: {e}");
+    }
+    if let Err(e) = rep_update {
+        tracing::warn!(message_id = %msg.id, "failed to upsert sender reputation: {e}");
+    }
 
     let pool = state.pool.clone();
     let webhook_client = state.webhook_client.clone();
@@ -145,6 +164,16 @@ pub async fn receive_inbound(
             &pool,
             org_id,
             crate::events::PostbloxEvent::MessageReceived {
+                message_id: msg_id,
+                inbox_id,
+            },
+            &webhook_client,
+        )
+        .await;
+        crate::events::dispatch(
+            &pool,
+            org_id,
+            crate::events::PostbloxEvent::MessageClassified {
                 message_id: msg_id,
                 inbox_id,
             },

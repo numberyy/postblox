@@ -11,9 +11,11 @@ pub mod briefing;
 pub mod domains;
 pub mod drafts;
 pub mod error;
+pub mod feedback;
 pub mod inbound;
 pub mod inboxes;
 pub mod labels;
+pub mod linked_accounts;
 pub mod messages;
 pub mod organizations;
 pub mod search;
@@ -109,9 +111,19 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/api-keys/{id}", axum::routing::delete(api_keys::delete))
         .route("/briefing", get(briefing::get))
         .route("/search", get(search::search))
+        .route("/feedback", post(feedback::submit))
         .route("/domains", get(domains::list).post(domains::create))
         .route("/domains/{id}", get(domains::get).delete(domains::delete))
-        .route("/domains/{id}/verify", post(domains::verify));
+        .route("/domains/{id}/verify", post(domains::verify))
+        .route(
+            "/linked-accounts",
+            get(linked_accounts::list).post(linked_accounts::create),
+        )
+        .route(
+            "/linked-accounts/{id}",
+            get(linked_accounts::get).delete(linked_accounts::delete),
+        )
+        .route("/linked-accounts/{id}/sync", post(linked_accounts::sync));
 
     axum::Router::new()
         .route("/health", get(health))

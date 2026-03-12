@@ -3,45 +3,48 @@ use uuid::Uuid;
 
 use crate::models::{CreateMessage, Message};
 
+pub const SELECT_COLS: &str = "\
+    id, inbox_id, thread_id, message_id_header, in_reply_to, \
+    references_header, from_addr, to_addrs, cc_addrs, subject, text_body, html_body, \
+    extracted_text, direction, raw_headers, created_at";
+
+const SELECT_COLS_WITH_SLOP: &str = "\
+    id, inbox_id, thread_id, message_id_header, in_reply_to, \
+    references_header, from_addr, to_addrs, cc_addrs, subject, text_body, html_body, \
+    extracted_text, direction, raw_headers, created_at, \
+    slop_score, slop_signals, category, priority, triage_status, requires_action";
+
 pub async fn create(pool: &PgPool, msg: &CreateMessage) -> Result<Message, sqlx::Error> {
-    sqlx::query_as(
+    let query = format!(
         "INSERT INTO messages \
          (inbox_id, thread_id, message_id_header, in_reply_to, references_header, \
           from_addr, to_addrs, cc_addrs, subject, text_body, html_body, \
           extracted_text, direction, raw_headers) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) \
-         RETURNING id, inbox_id, thread_id, message_id_header, in_reply_to, \
-         references_header, from_addr, to_addrs, cc_addrs, subject, text_body, html_body, \
-         extracted_text, direction, raw_headers, created_at",
-    )
-    .bind(msg.inbox_id)
-    .bind(msg.thread_id)
-    .bind(&msg.message_id_header)
-    .bind(&msg.in_reply_to)
-    .bind(&msg.references_header)
-    .bind(&msg.from_addr)
-    .bind(&msg.to_addrs)
-    .bind(&msg.cc_addrs)
-    .bind(&msg.subject)
-    .bind(&msg.text_body)
-    .bind(&msg.html_body)
-    .bind(&msg.extracted_text)
-    .bind(&msg.direction)
-    .bind(&msg.raw_headers)
-    .fetch_one(pool)
-    .await
+         RETURNING {SELECT_COLS}"
+    );
+    sqlx::query_as(&query)
+        .bind(msg.inbox_id)
+        .bind(msg.thread_id)
+        .bind(&msg.message_id_header)
+        .bind(&msg.in_reply_to)
+        .bind(&msg.references_header)
+        .bind(&msg.from_addr)
+        .bind(&msg.to_addrs)
+        .bind(&msg.cc_addrs)
+        .bind(&msg.subject)
+        .bind(&msg.text_body)
+        .bind(&msg.html_body)
+        .bind(&msg.extracted_text)
+        .bind(&msg.direction)
+        .bind(&msg.raw_headers)
+        .fetch_one(pool)
+        .await
 }
 
 pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Message>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, inbox_id, thread_id, message_id_header, in_reply_to, \
-         references_header, from_addr, to_addrs, cc_addrs, subject, text_body, html_body, \
-         extracted_text, direction, raw_headers, created_at \
-         FROM messages WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    let query = format!("SELECT {SELECT_COLS} FROM messages WHERE id = $1");
+    sqlx::query_as(&query).bind(id).fetch_optional(pool).await
 }
 
 pub async fn list_by_inbox(
@@ -50,32 +53,41 @@ pub async fn list_by_inbox(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Message>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, inbox_id, thread_id, message_id_header, in_reply_to, \
-         references_header, from_addr, to_addrs, cc_addrs, subject, text_body, html_body, \
-         extracted_text, direction, raw_headers, created_at \
-         FROM messages WHERE inbox_id = $1 \
-         ORDER BY created_at DESC \
-         LIMIT $2 OFFSET $3",
-    )
-    .bind(inbox_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
+    let query = format!(
+        "SELECT {SELECT_COLS} FROM messages WHERE inbox_id = $1 \
+         ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+    );
+    sqlx::query_as(&query)
+        .bind(inbox_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+}
+
+pub async fn list_by_inbox_unslopified(
+    pool: &PgPool,
+    inbox_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Message>, sqlx::Error> {
+    let query = format!(
+        "SELECT {SELECT_COLS_WITH_SLOP} FROM messages WHERE inbox_id = $1 \
+         AND (triage_status IS NULL OR triage_status = 'inbox') \
+         ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+    );
+    sqlx::query_as(&query)
+        .bind(inbox_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
 }
 
 pub async fn list_by_thread(pool: &PgPool, thread_id: Uuid) -> Result<Vec<Message>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, inbox_id, thread_id, message_id_header, in_reply_to, \
-         references_header, from_addr, to_addrs, cc_addrs, subject, text_body, html_body, \
-         extracted_text, direction, raw_headers, created_at \
-         FROM messages WHERE thread_id = $1 \
-         ORDER BY created_at ASC",
-    )
-    .bind(thread_id)
-    .fetch_all(pool)
-    .await
+    let query =
+        format!("SELECT {SELECT_COLS} FROM messages WHERE thread_id = $1 ORDER BY created_at ASC");
+    sqlx::query_as(&query).bind(thread_id).fetch_all(pool).await
 }
 
 /// Fetches (thread_id, message_id_header) pairs for an inbox in a single query.
@@ -126,21 +138,38 @@ pub async fn search(
     .await
 }
 
+pub async fn find_existing_message_ids(
+    pool: &PgPool,
+    inbox_id: Uuid,
+    message_ids: &[&str],
+) -> Result<std::collections::HashSet<String>, sqlx::Error> {
+    if message_ids.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT message_id_header FROM messages \
+         WHERE inbox_id = $1 AND message_id_header = ANY($2)",
+    )
+    .bind(inbox_id)
+    .bind(message_ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(mid,)| mid).collect())
+}
+
 pub async fn find_by_message_id_header(
     pool: &PgPool,
     inbox_id: Uuid,
     message_id_header: &str,
 ) -> Result<Option<Message>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, inbox_id, thread_id, message_id_header, in_reply_to, \
-         references_header, from_addr, to_addrs, cc_addrs, subject, text_body, html_body, \
-         extracted_text, direction, raw_headers, created_at \
-         FROM messages WHERE inbox_id = $1 AND message_id_header = $2",
-    )
-    .bind(inbox_id)
-    .bind(message_id_header)
-    .fetch_optional(pool)
-    .await
+    let query = format!(
+        "SELECT {SELECT_COLS} FROM messages WHERE inbox_id = $1 AND message_id_header = $2"
+    );
+    sqlx::query_as(&query)
+        .bind(inbox_id)
+        .bind(message_id_header)
+        .fetch_optional(pool)
+        .await
 }
 
 #[cfg(test)]

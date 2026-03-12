@@ -23,6 +23,7 @@ pub struct ListMessagesParams {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
     pub thread_id: Option<Uuid>,
+    pub unslopify: Option<bool>,
 }
 
 pub async fn send(
@@ -133,6 +134,8 @@ pub async fn list(
     let limit = params.limit.unwrap_or(50).clamp(1, 100);
     let offset = params.offset.unwrap_or(0).max(0);
 
+    let unslopify = params.unslopify.unwrap_or(false);
+
     let messages = if let Some(thread_id) = params.thread_id {
         let thread = crate::db::threads::get_by_id(&state.pool, thread_id)
             .await
@@ -142,6 +145,8 @@ pub async fn list(
             return Err(ApiError::NotFound);
         }
         crate::db::messages::list_by_thread(&state.pool, thread_id).await
+    } else if unslopify {
+        crate::db::messages::list_by_inbox_unslopified(&state.pool, inbox_id, limit, offset).await
     } else {
         crate::db::messages::list_by_inbox(&state.pool, inbox_id, limit, offset).await
     }

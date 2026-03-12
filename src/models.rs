@@ -1,4 +1,4 @@
-#![allow(dead_code)] // consumed by tests; API layer will call in Phase 1
+#![allow(dead_code)] // Create* structs used only in tests until Phase 4
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,18 @@ pub struct Message {
     pub direction: String,
     pub raw_headers: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
+    #[sqlx(default)]
+    pub slop_score: Option<f32>,
+    #[sqlx(default)]
+    pub slop_signals: Option<serde_json::Value>,
+    #[sqlx(default)]
+    pub category: Option<String>,
+    #[sqlx(default)]
+    pub priority: Option<String>,
+    #[sqlx(default)]
+    pub triage_status: Option<String>,
+    #[sqlx(default)]
+    pub requires_action: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -162,6 +174,62 @@ pub struct Domain {
     pub status: String,
     pub stalwart_principal_id: Option<String>,
     pub verified_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct LinkedAccount {
+    pub id: Uuid,
+    pub inbox_id: Uuid,
+    pub org_id: Uuid,
+    pub provider: String,
+    pub imap_host: String,
+    pub imap_port: i32,
+    pub username: String,
+    pub password: String,
+    pub last_sync_at: Option<DateTime<Utc>>,
+    pub sync_status: String,
+    pub message_count: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateLinkedAccount {
+    pub inbox_id: Uuid,
+    pub org_id: Uuid,
+    pub imap_host: String,
+    pub imap_port: Option<i32>,
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct SenderReputation {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub sender_email: String,
+    pub total_messages: i32,
+    pub slop_count: i32,
+    pub last_seen_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl SenderReputation {
+    pub fn slop_ratio(&self) -> f32 {
+        if self.total_messages > 0 {
+            self.slop_count as f32 / self.total_messages as f32
+        } else {
+            0.0
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct SlopFeedback {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub message_id: Uuid,
+    pub is_slop: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -278,6 +346,12 @@ mod tests {
             direction: "inbound".into(),
             raw_headers: None,
             created_at: Utc::now(),
+            slop_score: None,
+            slop_signals: None,
+            category: None,
+            priority: None,
+            triage_status: None,
+            requires_action: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -303,6 +377,12 @@ mod tests {
             direction: "outbound".into(),
             raw_headers: Some(serde_json::json!({"X-Custom": "val", "X-Other": "val2"})),
             created_at: Utc::now(),
+            slop_score: None,
+            slop_signals: None,
+            category: None,
+            priority: None,
+            triage_status: None,
+            requires_action: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -462,6 +542,76 @@ mod tests {
     }
 
     #[test]
+    fn test_linked_account_serialization_roundtrip() {
+        let acct = LinkedAccount {
+            id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            provider: "imap".into(),
+            imap_host: "imap.gmail.com".into(),
+            imap_port: 993,
+            username: "user@gmail.com".into(),
+            password: "enc_secret".into(),
+            last_sync_at: Some(Utc::now()),
+            sync_status: "idle".into(),
+            message_count: 42,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&acct).unwrap();
+        let back: LinkedAccount = serde_json::from_str(&json).unwrap();
+        assert_eq!(acct, back);
+    }
+
+    #[test]
+    fn test_linked_account_nullable_fields() {
+        let json = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "inbox_id": Uuid::new_v4(),
+            "org_id": Uuid::new_v4(),
+            "provider": "imap",
+            "imap_host": "imap.example.com",
+            "imap_port": 993,
+            "username": "user",
+            "password": "pw",
+            "last_sync_at": null,
+            "sync_status": "idle",
+            "message_count": 0,
+            "created_at": "2026-03-12T00:00:00Z"
+        });
+        let acct: LinkedAccount = serde_json::from_value(json).unwrap();
+        assert!(acct.last_sync_at.is_none());
+        assert_eq!(acct.message_count, 0);
+    }
+
+    #[test]
+    fn test_create_linked_account_serialization_roundtrip() {
+        let create = CreateLinkedAccount {
+            inbox_id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            imap_host: "imap.outlook.com".into(),
+            imap_port: Some(993),
+            username: "user@outlook.com".into(),
+            password: "enc_pass".into(),
+        };
+        let json = serde_json::to_string(&create).unwrap();
+        let back: CreateLinkedAccount = serde_json::from_str(&json).unwrap();
+        assert_eq!(create, back);
+    }
+
+    #[test]
+    fn test_create_linked_account_optional_fields() {
+        let json = serde_json::json!({
+            "inbox_id": Uuid::new_v4(),
+            "org_id": Uuid::new_v4(),
+            "imap_host": "imap.example.com",
+            "username": "user",
+            "password": "pw"
+        });
+        let create: CreateLinkedAccount = serde_json::from_value(json).unwrap();
+        assert!(create.imap_port.is_none());
+    }
+
+    #[test]
     fn test_message_unicode_fields() {
         let msg = Message {
             id: Uuid::new_v4(),
@@ -480,6 +630,12 @@ mod tests {
             direction: "inbound".into(),
             raw_headers: None,
             created_at: Utc::now(),
+            slop_score: None,
+            slop_signals: None,
+            category: None,
+            priority: None,
+            triage_status: None,
+            requires_action: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();

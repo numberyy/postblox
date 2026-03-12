@@ -24,10 +24,8 @@ pub async fn search_similar(
     limit: i64,
     threshold: f64,
 ) -> Result<Vec<Message>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, inbox_id, thread_id, message_id_header, in_reply_to, \
-         references_header, from_addr, to_addrs, cc_addrs, subject, \
-         text_body, html_body, extracted_text, direction, raw_headers, created_at \
+    let query = format!(
+        "SELECT {} \
          FROM ( \
              SELECT m.*, m.embedding <=> $1::vector AS distance \
              FROM messages m \
@@ -37,13 +35,15 @@ pub async fn search_similar(
          WHERE 1 - distance >= $3 \
          ORDER BY distance \
          LIMIT $4",
-    )
-    .bind(Vector::from(embedding.to_vec()))
-    .bind(org_id)
-    .bind(threshold)
-    .bind(limit)
-    .fetch_all(pool)
-    .await
+        crate::db::messages::SELECT_COLS
+    );
+    sqlx::query_as(&query)
+        .bind(Vector::from(embedding.to_vec()))
+        .bind(org_id)
+        .bind(threshold)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
 }
 
 pub async fn count_unembedded(pool: &PgPool, org_id: Uuid) -> Result<i64, sqlx::Error> {

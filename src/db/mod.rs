@@ -9,8 +9,11 @@ pub mod drafts;
 pub mod embeddings;
 pub mod inboxes;
 pub mod labels;
+pub mod linked_accounts;
 pub mod messages;
 pub mod organizations;
+pub mod slop;
+pub mod slop_feedback;
 pub mod threads;
 pub mod webhooks;
 
