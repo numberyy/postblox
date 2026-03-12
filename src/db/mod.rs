@@ -3,7 +3,9 @@
 use sqlx::{postgres::PgPoolOptions, PgPool};
 
 pub mod api_keys;
+pub mod drafts;
 pub mod inboxes;
+pub mod labels;
 pub mod messages;
 pub mod organizations;
 pub mod threads;

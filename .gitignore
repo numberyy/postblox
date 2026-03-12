@@ -5,3 +5,7 @@
 .DS_Store
 postblox.toml
 .env
+HANDOVER.md
+TASKS.md
+plans/
+.claude/

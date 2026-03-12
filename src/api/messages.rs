@@ -39,6 +39,22 @@ pub async fn send(
         ));
     }
 
+    if let Err(violations) = crate::mail::guard::scan(
+        req.subject.as_deref(),
+        req.text_body.as_deref(),
+        req.html_body.as_deref(),
+        &state.guard_patterns,
+    ) {
+        let details: Vec<String> = violations
+            .iter()
+            .map(|v| format!("{} in {}", v.pattern_name, v.field))
+            .collect();
+        return Err(ApiError::BadRequest(format!(
+            "message blocked: detected {}",
+            details.join(", ")
+        )));
+    }
+
     // Store without angle brackets for consistent threading with inbound (parser strips them).
     let message_id = format!("{}@postblox", Uuid::new_v4());
     let mime_message_id = format!("<{message_id}>");

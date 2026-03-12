@@ -120,6 +120,40 @@ pub struct CreateWebhook {
     pub secret: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Label {
+    pub id: Uuid,
+    pub inbox_id: Uuid,
+    pub name: String,
+    pub color: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Draft {
+    pub id: Uuid,
+    pub inbox_id: Uuid,
+    pub to_addrs: serde_json::Value,
+    pub cc_addrs: Option<serde_json::Value>,
+    pub subject: Option<String>,
+    pub text_body: Option<String>,
+    pub html_body: Option<String>,
+    pub in_reply_to_message_id: Option<Uuid>,
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateDraft {
+    pub inbox_id: Uuid,
+    pub to_addrs: serde_json::Value,
+    pub cc_addrs: Option<serde_json::Value>,
+    pub subject: Option<String>,
+    pub text_body: Option<String>,
+    pub html_body: Option<String>,
+    pub in_reply_to_message_id: Option<Uuid>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +366,53 @@ mod tests {
         let json = serde_json::to_string(&wh).unwrap();
         let back: CreateWebhook = serde_json::from_str(&json).unwrap();
         assert_eq!(back.events.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_label_serialization_roundtrip() {
+        let label = Label {
+            id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+            name: "important".into(),
+            color: Some("#ff0000".into()),
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&label).unwrap();
+        let back: Label = serde_json::from_str(&json).unwrap();
+        assert_eq!(label, back);
+    }
+
+    #[test]
+    fn test_draft_serialization_roundtrip() {
+        let draft = Draft {
+            id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+            to_addrs: serde_json::json!(["a@b.com"]),
+            cc_addrs: Some(serde_json::json!(["c@d.com"])),
+            subject: Some("Draft subject".into()),
+            text_body: Some("Hello".into()),
+            html_body: None,
+            in_reply_to_message_id: None,
+            updated_at: Utc::now(),
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&draft).unwrap();
+        let back: Draft = serde_json::from_str(&json).unwrap();
+        assert_eq!(draft, back);
+    }
+
+    #[test]
+    fn test_create_draft_optional_fields() {
+        let json = serde_json::json!({
+            "inbox_id": Uuid::new_v4(),
+            "to_addrs": []
+        });
+        let cd: CreateDraft = serde_json::from_value(json).unwrap();
+        assert!(cd.subject.is_none());
+        assert!(cd.text_body.is_none());
+        assert!(cd.html_body.is_none());
+        assert!(cd.cc_addrs.is_none());
+        assert!(cd.in_reply_to_message_id.is_none());
     }
 
     #[test]

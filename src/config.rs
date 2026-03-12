@@ -12,6 +12,13 @@ pub struct Config {
     pub stalwart_url: Option<String>,
     pub stalwart_admin_token: Option<String>,
     pub stalwart_inbound_token: Option<String>,
+    pub guard_patterns: Option<Vec<GuardPatternConfig>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GuardPatternConfig {
+    pub name: String,
+    pub pattern: String,
 }
 
 fn default_host() -> String {
@@ -43,6 +50,7 @@ impl Config {
                 stalwart_url: std::env::var("STALWART_URL").ok(),
                 stalwart_admin_token: std::env::var("STALWART_ADMIN_TOKEN").ok(),
                 stalwart_inbound_token: std::env::var("STALWART_INBOUND_TOKEN").ok(),
+                guard_patterns: None,
             })
         }
     }

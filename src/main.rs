@@ -35,11 +35,25 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .expect("failed to build webhook client");
 
+    let mut guard_patterns = mail::guard::default_patterns();
+    if let Some(custom) = &config.guard_patterns {
+        for cp in custom {
+            match regex::Regex::new(&cp.pattern) {
+                Ok(re) => guard_patterns.push(mail::guard::GuardPattern {
+                    name: cp.name.clone(),
+                    regex: re,
+                }),
+                Err(e) => tracing::warn!("invalid guard pattern '{}': {e}", cp.name),
+            }
+        }
+    }
+
     let state = api::AppState {
         pool,
         stalwart: stalwart_client,
         webhook_client,
         inbound_token: config.stalwart_inbound_token,
+        guard_patterns,
     };
     let app = api::router(state);
 

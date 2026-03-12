@@ -17,7 +17,6 @@ pub struct StalwartClient {
     admin_token: String,
 }
 
-#[allow(dead_code)] // create_account/delete_account called from inbox CRUD (next PR)
 impl StalwartClient {
     pub fn new(base_url: &str, admin_token: &str) -> Self {
         let http = reqwest::Client::builder()

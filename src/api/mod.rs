@@ -6,10 +6,13 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 pub mod auth;
+pub mod drafts;
 pub mod error;
 pub mod inbound;
 pub mod inboxes;
+pub mod labels;
 pub mod messages;
+pub mod search;
 pub mod threads;
 pub mod webhooks;
 
@@ -19,6 +22,7 @@ pub struct AppState {
     pub stalwart: Option<crate::stalwart::StalwartClient>,
     pub webhook_client: reqwest::Client,
     pub inbound_token: Option<String>,
+    pub guard_patterns: Vec<crate::mail::guard::GuardPattern>,
 }
 
 #[derive(Deserialize)]
@@ -63,7 +67,36 @@ pub fn router(state: AppState) -> axum::Router {
             "/inboxes/{inbox_id}/messages",
             get(messages::list).post(messages::send),
         )
-        .route("/inboxes/{inbox_id}/messages/{id}", get(messages::get));
+        .route("/inboxes/{inbox_id}/messages/{id}", get(messages::get))
+        .route(
+            "/inboxes/{inbox_id}/labels",
+            get(labels::list).post(labels::create),
+        )
+        .route(
+            "/inboxes/{inbox_id}/labels/{id}",
+            axum::routing::delete(labels::delete),
+        )
+        .route(
+            "/inboxes/{inbox_id}/messages/{message_id}/labels",
+            get(labels::list_for_message).post(labels::add_to_message),
+        )
+        .route(
+            "/inboxes/{inbox_id}/messages/{message_id}/labels/{label_id}",
+            axum::routing::delete(labels::remove_from_message),
+        )
+        .route(
+            "/inboxes/{inbox_id}/drafts",
+            get(drafts::list).post(drafts::create),
+        )
+        .route(
+            "/inboxes/{inbox_id}/drafts/{id}",
+            get(drafts::get).put(drafts::update).delete(drafts::delete),
+        )
+        .route(
+            "/inboxes/{inbox_id}/drafts/{id}/send",
+            post(drafts::send_draft),
+        )
+        .route("/search", get(search::search));
 
     axum::Router::new()
         .route("/health", get(health))

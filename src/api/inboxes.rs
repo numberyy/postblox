@@ -37,6 +37,12 @@ pub async fn create(
     .await
     .map_err(ApiError::from_sqlx)?;
 
+    if let Some(ref stalwart) = state.stalwart {
+        if let Err(e) = stalwart.create_account(&inbox.email, &inbox.email).await {
+            tracing::warn!("stalwart account creation failed for {}: {e}", inbox.email);
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(inbox)))
 }
 
@@ -65,7 +71,13 @@ pub async fn delete(
     AuthOrg(org_id): AuthOrg,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    get_inbox_for_org(&state.pool, id, org_id).await?;
+    let inbox = get_inbox_for_org(&state.pool, id, org_id).await?;
+
+    if let Some(ref stalwart) = state.stalwart {
+        if let Err(e) = stalwart.delete_account(&inbox.email).await {
+            tracing::warn!("stalwart account deletion failed for {}: {e}", inbox.email);
+        }
+    }
 
     crate::db::inboxes::delete(&state.pool, id)
         .await

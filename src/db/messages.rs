@@ -101,6 +101,31 @@ pub async fn message_id_headers_by_inbox(
     Ok(map)
 }
 
+pub async fn search(
+    pool: &PgPool,
+    org_id: Uuid,
+    query: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Message>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT m.id, m.inbox_id, m.thread_id, m.message_id_header, m.in_reply_to, \
+         m.references_header, m.from_addr, m.to_addrs, m.cc_addrs, m.subject, \
+         m.text_body, m.html_body, m.extracted_text, m.direction, m.raw_headers, m.created_at \
+         FROM messages m \
+         JOIN inboxes i ON m.inbox_id = i.id \
+         WHERE i.org_id = $1 AND m.search_vector @@ plainto_tsquery('english', $2) \
+         ORDER BY ts_rank(m.search_vector, plainto_tsquery('english', $2)) DESC, m.created_at DESC \
+         LIMIT $3 OFFSET $4",
+    )
+    .bind(org_id)
+    .bind(query)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn find_by_message_id_header(
     pool: &PgPool,
     inbox_id: Uuid,
@@ -275,6 +300,90 @@ mod tests {
         assert_eq!(msg.to_addrs.as_array().unwrap().len(), 2);
         assert_eq!(msg.cc_addrs.as_ref().unwrap().as_array().unwrap().len(), 1);
         assert_eq!(msg.raw_headers.as_ref().unwrap()["X-Custom"], "value");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_search_finds_matching_message() {
+        let pool = crate::db::test_pool().await;
+        let inbox = setup_inbox(&pool).await;
+        let mut cm = test_create_message(inbox.id);
+        cm.subject = Some("quarterly revenue report".into());
+        cm.text_body = Some("Financial summary for Q4".into());
+        create(&pool, &cm).await.unwrap();
+
+        let org_id = crate::db::inboxes::get_by_id(&pool, inbox.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .org_id;
+        let results = search(&pool, org_id, "revenue", 10, 0).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].subject.as_deref(),
+            Some("quarterly revenue report")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_search_no_results() {
+        let pool = crate::db::test_pool().await;
+        let inbox = setup_inbox(&pool).await;
+        let cm = test_create_message(inbox.id);
+        create(&pool, &cm).await.unwrap();
+
+        let org_id = crate::db::inboxes::get_by_id(&pool, inbox.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .org_id;
+        let results = search(&pool, org_id, "xyznonexistent", 10, 0)
+            .await
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_search_respects_org_boundary() {
+        let pool = crate::db::test_pool().await;
+        let inbox = setup_inbox(&pool).await;
+        let mut cm = test_create_message(inbox.id);
+        cm.subject = Some("confidential budget data".into());
+        create(&pool, &cm).await.unwrap();
+
+        let other_org = crate::db::organizations::create(&pool, "Other Org")
+            .await
+            .unwrap();
+        let results = search(&pool, other_org.id, "confidential", 10, 0)
+            .await
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_search_pagination() {
+        let pool = crate::db::test_pool().await;
+        let inbox = setup_inbox(&pool).await;
+        for i in 0..3 {
+            let mut cm = test_create_message(inbox.id);
+            cm.subject = Some(format!("invoice {i}"));
+            cm.message_id_header = Some(format!("<search-pg-{i}-{}>", Uuid::new_v4()));
+            create(&pool, &cm).await.unwrap();
+        }
+
+        let org_id = crate::db::inboxes::get_by_id(&pool, inbox.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .org_id;
+        let page1 = search(&pool, org_id, "invoice", 2, 0).await.unwrap();
+        assert_eq!(page1.len(), 2);
+
+        let page2 = search(&pool, org_id, "invoice", 2, 2).await.unwrap();
+        assert_eq!(page2.len(), 1);
     }
 
     #[tokio::test]
