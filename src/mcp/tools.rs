@@ -1,0 +1,836 @@
+use serde_json::{json, Value};
+
+use crate::client::PostbloxClient;
+use crate::error::McpError;
+
+fn require_str(args: &Value, key: &str) -> Result<String, McpError> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| McpError::MissingArgument(key.into()))
+}
+
+fn optional_str(args: &Value, key: &str) -> Option<String> {
+    args.get(key).and_then(|v| v.as_str()).map(String::from)
+}
+
+fn optional_i64(args: &Value, key: &str) -> Option<i64> {
+    args.get(key).and_then(|v| v.as_i64())
+}
+
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from(b"0123456789ABCDEF"[(b >> 4) as usize]));
+                out.push(char::from(b"0123456789ABCDEF"[(b & 0x0f) as usize]));
+            }
+        }
+    }
+    out
+}
+
+fn build_query_string(params: &[(&str, Option<String>)]) -> String {
+    let pairs: Vec<String> = params
+        .iter()
+        .filter_map(|(k, v)| v.as_ref().map(|val| format!("{k}={}", url_encode(val))))
+        .collect();
+    if pairs.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", pairs.join("&"))
+    }
+}
+
+pub fn tool_definitions() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "postblox_list_inboxes",
+            "description": "List all inboxes for the organization.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        json!({
+            "name": "postblox_create_inbox",
+            "description": "Create a new inbox with the given email address.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "email": { "type": "string", "description": "Email address for the inbox" },
+                    "display_name": { "type": "string", "description": "Optional display name" },
+                    "inbox_type": { "type": "string", "description": "Inbox type (default: native)" }
+                },
+                "required": ["email"]
+            }
+        }),
+        json!({
+            "name": "postblox_get_inbox",
+            "description": "Get a specific inbox by ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" }
+                },
+                "required": ["inbox_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_delete_inbox",
+            "description": "Delete an inbox by ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" }
+                },
+                "required": ["inbox_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_send_email",
+            "description": "Send an email from an inbox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the sending inbox" },
+                    "to": { "type": "array", "items": { "type": "string" }, "description": "Recipient email addresses" },
+                    "subject": { "type": "string", "description": "Email subject" },
+                    "text_body": { "type": "string", "description": "Plain text body" },
+                    "html_body": { "type": "string", "description": "HTML body" },
+                    "cc": { "type": "array", "items": { "type": "string" }, "description": "CC recipients" },
+                    "in_reply_to": { "type": "string", "description": "Message-ID header of the message being replied to" }
+                },
+                "required": ["inbox_id", "to", "subject"]
+            }
+        }),
+        json!({
+            "name": "postblox_list_messages",
+            "description": "List messages in an inbox, optionally filtered by thread.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "limit": { "type": "integer", "description": "Max results (1-100, default 50)" },
+                    "offset": { "type": "integer", "description": "Offset for pagination" },
+                    "thread_id": { "type": "string", "description": "Filter by thread UUID" }
+                },
+                "required": ["inbox_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_get_message",
+            "description": "Get a specific message by ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "message_id": { "type": "string", "description": "UUID of the message" }
+                },
+                "required": ["inbox_id", "message_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_list_threads",
+            "description": "List threads in an inbox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "limit": { "type": "integer", "description": "Max results (1-100, default 50)" },
+                    "offset": { "type": "integer", "description": "Offset for pagination" }
+                },
+                "required": ["inbox_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_get_thread",
+            "description": "Get a specific thread with its messages.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "thread_id": { "type": "string", "description": "UUID of the thread" }
+                },
+                "required": ["inbox_id", "thread_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_search",
+            "description": "Search across messages. Supports full-text and semantic (vector similarity) search.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "q": { "type": "string", "description": "Search query" },
+                    "inbox_id": { "type": "string", "description": "Limit search to a specific inbox" },
+                    "limit": { "type": "integer", "description": "Max results" },
+                    "offset": { "type": "integer", "description": "Offset for pagination" },
+                    "semantic": { "type": "boolean", "description": "Use semantic (vector similarity) search instead of full-text" },
+                    "threshold": { "type": "number", "description": "Minimum similarity threshold for semantic search (0.0-1.0, default 0.7)" }
+                },
+                "required": ["q"]
+            }
+        }),
+        json!({
+            "name": "postblox_briefing",
+            "description": "Get a summary briefing of recent email activity.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "period": { "type": "string", "description": "Time period: 1h, 6h, 12h, 24h, or 7d (default: 24h)" }
+                },
+                "required": []
+            }
+        }),
+        json!({
+            "name": "postblox_register_webhook",
+            "description": "Register a webhook to receive email event notifications.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "Webhook callback URL" },
+                    "events": { "type": "array", "items": { "type": "string" }, "description": "Events to subscribe to (message.received, message.sent)" }
+                },
+                "required": ["url", "events"]
+            }
+        }),
+        json!({
+            "name": "postblox_list_webhooks",
+            "description": "List all registered webhooks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        json!({
+            "name": "postblox_delete_webhook",
+            "description": "Delete a webhook by ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "webhook_id": { "type": "string", "description": "UUID of the webhook" }
+                },
+                "required": ["webhook_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_list_labels",
+            "description": "List labels for an inbox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" }
+                },
+                "required": ["inbox_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_create_label",
+            "description": "Create a label for an inbox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "name": { "type": "string", "description": "Label name" },
+                    "color": { "type": "string", "description": "Optional hex color (e.g. #ff0000)" }
+                },
+                "required": ["inbox_id", "name"]
+            }
+        }),
+        json!({
+            "name": "postblox_add_label_to_message",
+            "description": "Add a label to a message.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "message_id": { "type": "string", "description": "UUID of the message" },
+                    "label_id": { "type": "string", "description": "UUID of the label" }
+                },
+                "required": ["inbox_id", "message_id", "label_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_remove_label_from_message",
+            "description": "Remove a label from a message.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "message_id": { "type": "string", "description": "UUID of the message" },
+                    "label_id": { "type": "string", "description": "UUID of the label" }
+                },
+                "required": ["inbox_id", "message_id", "label_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_list_drafts",
+            "description": "List drafts in an inbox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "limit": { "type": "integer", "description": "Max results" },
+                    "offset": { "type": "integer", "description": "Offset for pagination" }
+                },
+                "required": ["inbox_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_create_draft",
+            "description": "Create a draft email.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "to": { "type": "array", "items": { "type": "string" }, "description": "Recipients" },
+                    "cc": { "type": "array", "items": { "type": "string" }, "description": "CC recipients" },
+                    "subject": { "type": "string", "description": "Email subject" },
+                    "text_body": { "type": "string", "description": "Plain text body" },
+                    "html_body": { "type": "string", "description": "HTML body" },
+                    "in_reply_to_message_id": { "type": "string", "description": "UUID of the message being replied to" }
+                },
+                "required": ["inbox_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_update_draft",
+            "description": "Update a draft email.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "draft_id": { "type": "string", "description": "UUID of the draft" },
+                    "to": { "type": "array", "items": { "type": "string" }, "description": "Recipients" },
+                    "cc": { "type": "array", "items": { "type": "string" }, "description": "CC recipients" },
+                    "subject": { "type": "string", "description": "Email subject" },
+                    "text_body": { "type": "string", "description": "Plain text body" },
+                    "html_body": { "type": "string", "description": "HTML body" }
+                },
+                "required": ["inbox_id", "draft_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_send_draft",
+            "description": "Send a draft, converting it to a sent message and deleting the draft.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "draft_id": { "type": "string", "description": "UUID of the draft" }
+                },
+                "required": ["inbox_id", "draft_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_delete_draft",
+            "description": "Delete a draft.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "draft_id": { "type": "string", "description": "UUID of the draft" }
+                },
+                "required": ["inbox_id", "draft_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_list_domains",
+            "description": "List all domains for the organization.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        json!({
+            "name": "postblox_create_domain",
+            "description": "Add a domain to the organization for email sending.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Domain name (e.g. example.com)" }
+                },
+                "required": ["name"]
+            }
+        }),
+        json!({
+            "name": "postblox_get_domain",
+            "description": "Get domain details including DNS records.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "domain_id": { "type": "string", "description": "UUID of the domain" }
+                },
+                "required": ["domain_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_verify_domain",
+            "description": "Trigger DNS verification for a domain.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "domain_id": { "type": "string", "description": "UUID of the domain" }
+                },
+                "required": ["domain_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_delete_domain",
+            "description": "Delete a domain.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "domain_id": { "type": "string", "description": "UUID of the domain" }
+                },
+                "required": ["domain_id"]
+            }
+        }),
+    ]
+}
+
+pub async fn dispatch(
+    client: &PostbloxClient,
+    name: &str,
+    args: Value,
+) -> Result<String, McpError> {
+    match name {
+        "postblox_list_inboxes" => client.get("/inboxes").await,
+
+        "postblox_create_inbox" => {
+            let email = require_str(&args, "email")?;
+            let mut body = json!({ "email": email });
+            if let Some(dn) = optional_str(&args, "display_name") {
+                body["display_name"] = json!(dn);
+            }
+            if let Some(it) = optional_str(&args, "inbox_type") {
+                body["inbox_type"] = json!(it);
+            }
+            client.post("/inboxes", body).await
+        }
+
+        "postblox_get_inbox" => {
+            let id = require_str(&args, "inbox_id")?;
+            client.get(&format!("/inboxes/{id}")).await
+        }
+
+        "postblox_delete_inbox" => {
+            let id = require_str(&args, "inbox_id")?;
+            client.delete(&format!("/inboxes/{id}")).await
+        }
+
+        "postblox_send_email" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let mut body = json!({
+                "to": args.get("to").cloned().unwrap_or(json!([])),
+                "subject": require_str(&args, "subject")?,
+            });
+            if let Some(tb) = optional_str(&args, "text_body") {
+                body["text_body"] = json!(tb);
+            }
+            if let Some(hb) = optional_str(&args, "html_body") {
+                body["html_body"] = json!(hb);
+            }
+            if let Some(cc) = args.get("cc").cloned() {
+                body["cc"] = cc;
+            }
+            if let Some(irt) = optional_str(&args, "in_reply_to") {
+                body["in_reply_to"] = json!(irt);
+            }
+            client
+                .post(&format!("/inboxes/{inbox_id}/messages"), body)
+                .await
+        }
+
+        "postblox_list_messages" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let qs = build_query_string(&[
+                ("limit", optional_i64(&args, "limit").map(|v| v.to_string())),
+                (
+                    "offset",
+                    optional_i64(&args, "offset").map(|v| v.to_string()),
+                ),
+                ("thread_id", optional_str(&args, "thread_id")),
+            ]);
+            client
+                .get(&format!("/inboxes/{inbox_id}/messages{qs}"))
+                .await
+        }
+
+        "postblox_get_message" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let msg_id = require_str(&args, "message_id")?;
+            client
+                .get(&format!("/inboxes/{inbox_id}/messages/{msg_id}"))
+                .await
+        }
+
+        "postblox_list_threads" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let qs = build_query_string(&[
+                ("limit", optional_i64(&args, "limit").map(|v| v.to_string())),
+                (
+                    "offset",
+                    optional_i64(&args, "offset").map(|v| v.to_string()),
+                ),
+            ]);
+            client
+                .get(&format!("/inboxes/{inbox_id}/threads{qs}"))
+                .await
+        }
+
+        "postblox_get_thread" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let thread_id = require_str(&args, "thread_id")?;
+            client
+                .get(&format!("/inboxes/{inbox_id}/threads/{thread_id}"))
+                .await
+        }
+
+        "postblox_search" => {
+            let q = require_str(&args, "q")?;
+            let semantic = args
+                .get("semantic")
+                .and_then(|v| v.as_bool())
+                .map(|v| v.to_string());
+            let threshold = args
+                .get("threshold")
+                .and_then(|v| v.as_f64())
+                .map(|v| v.to_string());
+            let params: Vec<(&str, Option<String>)> = vec![
+                ("q", Some(q)),
+                ("inbox_id", optional_str(&args, "inbox_id")),
+                ("limit", optional_i64(&args, "limit").map(|v| v.to_string())),
+                (
+                    "offset",
+                    optional_i64(&args, "offset").map(|v| v.to_string()),
+                ),
+                ("semantic", semantic),
+                ("threshold", threshold),
+            ];
+            let qs = build_query_string(&params);
+            client.get(&format!("/search{qs}")).await
+        }
+
+        "postblox_briefing" => {
+            let qs = build_query_string(&[("period", optional_str(&args, "period"))]);
+            client.get(&format!("/briefing{qs}")).await
+        }
+
+        "postblox_register_webhook" => {
+            let body = json!({
+                "url": require_str(&args, "url")?,
+                "events": args.get("events").cloned().unwrap_or(json!([])),
+            });
+            client.post("/webhooks", body).await
+        }
+
+        "postblox_list_webhooks" => client.get("/webhooks").await,
+
+        "postblox_delete_webhook" => {
+            let id = require_str(&args, "webhook_id")?;
+            client.delete(&format!("/webhooks/{id}")).await
+        }
+
+        "postblox_list_labels" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            client.get(&format!("/inboxes/{inbox_id}/labels")).await
+        }
+
+        "postblox_create_label" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let mut body = json!({ "name": require_str(&args, "name")? });
+            if let Some(c) = optional_str(&args, "color") {
+                body["color"] = json!(c);
+            }
+            client
+                .post(&format!("/inboxes/{inbox_id}/labels"), body)
+                .await
+        }
+
+        "postblox_add_label_to_message" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let msg_id = require_str(&args, "message_id")?;
+            let label_id = require_str(&args, "label_id")?;
+            client
+                .post(
+                    &format!("/inboxes/{inbox_id}/messages/{msg_id}/labels"),
+                    json!({ "label_id": label_id }),
+                )
+                .await
+        }
+
+        "postblox_remove_label_from_message" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let msg_id = require_str(&args, "message_id")?;
+            let label_id = require_str(&args, "label_id")?;
+            client
+                .delete(&format!(
+                    "/inboxes/{inbox_id}/messages/{msg_id}/labels/{label_id}"
+                ))
+                .await
+        }
+
+        "postblox_list_drafts" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let qs = build_query_string(&[
+                ("limit", optional_i64(&args, "limit").map(|v| v.to_string())),
+                (
+                    "offset",
+                    optional_i64(&args, "offset").map(|v| v.to_string()),
+                ),
+            ]);
+            client.get(&format!("/inboxes/{inbox_id}/drafts{qs}")).await
+        }
+
+        "postblox_create_draft" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let mut body = json!({});
+            if let Some(to) = args.get("to").cloned() {
+                body["to"] = to;
+            }
+            if let Some(cc) = args.get("cc").cloned() {
+                body["cc"] = cc;
+            }
+            if let Some(s) = optional_str(&args, "subject") {
+                body["subject"] = json!(s);
+            }
+            if let Some(tb) = optional_str(&args, "text_body") {
+                body["text_body"] = json!(tb);
+            }
+            if let Some(hb) = optional_str(&args, "html_body") {
+                body["html_body"] = json!(hb);
+            }
+            if let Some(irt) = optional_str(&args, "in_reply_to_message_id") {
+                body["in_reply_to_message_id"] = json!(irt);
+            }
+            client
+                .post(&format!("/inboxes/{inbox_id}/drafts"), body)
+                .await
+        }
+
+        "postblox_update_draft" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let draft_id = require_str(&args, "draft_id")?;
+            let mut body = json!({});
+            if let Some(to) = args.get("to").cloned() {
+                body["to"] = to;
+            }
+            if let Some(cc) = args.get("cc").cloned() {
+                body["cc"] = cc;
+            }
+            if let Some(s) = optional_str(&args, "subject") {
+                body["subject"] = json!(s);
+            }
+            if let Some(tb) = optional_str(&args, "text_body") {
+                body["text_body"] = json!(tb);
+            }
+            if let Some(hb) = optional_str(&args, "html_body") {
+                body["html_body"] = json!(hb);
+            }
+            client
+                .put(&format!("/inboxes/{inbox_id}/drafts/{draft_id}"), body)
+                .await
+        }
+
+        "postblox_send_draft" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let draft_id = require_str(&args, "draft_id")?;
+            client
+                .post(
+                    &format!("/inboxes/{inbox_id}/drafts/{draft_id}/send"),
+                    json!({}),
+                )
+                .await
+        }
+
+        "postblox_delete_draft" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let draft_id = require_str(&args, "draft_id")?;
+            client
+                .delete(&format!("/inboxes/{inbox_id}/drafts/{draft_id}"))
+                .await
+        }
+
+        "postblox_list_domains" => client.get("/domains").await,
+
+        "postblox_create_domain" => {
+            let body = json!({ "name": require_str(&args, "name")? });
+            client.post("/domains", body).await
+        }
+
+        "postblox_get_domain" => {
+            let id = require_str(&args, "domain_id")?;
+            client.get(&format!("/domains/{id}")).await
+        }
+
+        "postblox_verify_domain" => {
+            let id = require_str(&args, "domain_id")?;
+            client
+                .post(&format!("/domains/{id}/verify"), json!({}))
+                .await
+        }
+
+        "postblox_delete_domain" => {
+            let id = require_str(&args, "domain_id")?;
+            client.delete(&format!("/domains/{id}")).await
+        }
+
+        _ => Err(McpError::UnknownTool(name.into())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tool_definitions_all_have_required_fields() {
+        let defs = tool_definitions();
+        assert!(!defs.is_empty());
+        for def in &defs {
+            assert!(def.get("name").and_then(|v| v.as_str()).is_some());
+            assert!(def.get("description").and_then(|v| v.as_str()).is_some());
+            let schema = def.get("inputSchema").unwrap();
+            assert_eq!(schema["type"], "object");
+            assert!(schema.get("properties").is_some());
+            assert!(schema.get("required").is_some());
+        }
+    }
+
+    #[test]
+    fn test_tool_definitions_unique_names() {
+        let defs = tool_definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d["name"].as_str().unwrap()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(names.len(), sorted.len(), "duplicate tool names found");
+    }
+
+    #[test]
+    fn test_tool_definitions_count() {
+        let defs = tool_definitions();
+        assert_eq!(defs.len(), 28);
+    }
+
+    #[test]
+    fn test_require_str_present() {
+        let args = json!({"email": "bot@x.com"});
+        assert_eq!(require_str(&args, "email").unwrap(), "bot@x.com");
+    }
+
+    #[test]
+    fn test_require_str_missing_returns_error() {
+        let args = json!({});
+        let err = require_str(&args, "email").unwrap_err();
+        assert!(err.to_string().contains("email"));
+    }
+
+    #[test]
+    fn test_require_str_null_returns_error() {
+        let args = json!({"email": null});
+        assert!(require_str(&args, "email").is_err());
+    }
+
+    #[test]
+    fn test_optional_str_present() {
+        let args = json!({"name": "test"});
+        assert_eq!(optional_str(&args, "name"), Some("test".into()));
+    }
+
+    #[test]
+    fn test_optional_str_missing() {
+        let args = json!({});
+        assert_eq!(optional_str(&args, "name"), None);
+    }
+
+    #[test]
+    fn test_optional_i64_present() {
+        let args = json!({"limit": 10});
+        assert_eq!(optional_i64(&args, "limit"), Some(10));
+    }
+
+    #[test]
+    fn test_optional_i64_missing() {
+        let args = json!({});
+        assert_eq!(optional_i64(&args, "limit"), None);
+    }
+
+    #[test]
+    fn test_build_query_string_empty() {
+        let qs = build_query_string(&[("a", None), ("b", None)]);
+        assert_eq!(qs, "");
+    }
+
+    #[test]
+    fn test_build_query_string_single_param() {
+        let qs = build_query_string(&[("q", Some("hello".into()))]);
+        assert_eq!(qs, "?q=hello");
+    }
+
+    #[test]
+    fn test_build_query_string_multiple_params() {
+        let qs = build_query_string(&[
+            ("q", Some("hello".into())),
+            ("limit", Some("10".into())),
+            ("missing", None),
+        ]);
+        assert_eq!(qs, "?q=hello&limit=10");
+    }
+
+    #[test]
+    fn test_build_query_string_encodes_special_chars() {
+        let qs = build_query_string(&[("q", Some("hello world&foo=bar".into()))]);
+        assert_eq!(qs, "?q=hello%20world%26foo%3Dbar");
+    }
+
+    #[test]
+    fn test_url_encode_unreserved_chars_unchanged() {
+        assert_eq!(url_encode("abc-_.~123"), "abc-_.~123");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_unknown_tool_returns_error() {
+        let client = PostbloxClient::new("http://localhost:1".into(), "key".into());
+        let err = dispatch(&client, "nonexistent_tool", json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, McpError::UnknownTool(_)));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_missing_required_arg() {
+        let client = PostbloxClient::new("http://localhost:1".into(), "key".into());
+        let err = dispatch(&client, "postblox_send_email", json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, McpError::MissingArgument(_)));
+    }
+
+    #[test]
+    fn test_tool_definitions_required_fields_exist_in_properties() {
+        let defs = tool_definitions();
+        for def in &defs {
+            let props = def["inputSchema"]["properties"].as_object().unwrap();
+            let required = def["inputSchema"]["required"].as_array().unwrap();
+            for req in required {
+                let name = req.as_str().unwrap();
+                assert!(
+                    props.contains_key(name),
+                    "tool {} requires '{}' but it's not in properties",
+                    def["name"],
+                    name
+                );
+            }
+        }
+    }
+}

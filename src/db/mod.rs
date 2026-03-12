@@ -6,6 +6,7 @@ pub mod api_keys;
 pub mod briefing;
 pub mod domains;
 pub mod drafts;
+pub mod embeddings;
 pub mod inboxes;
 pub mod labels;
 pub mod messages;

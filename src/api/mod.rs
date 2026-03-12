@@ -27,6 +27,10 @@ pub struct AppState {
     pub webhook_client: reqwest::Client,
     pub inbound_token: Option<String>,
     pub guard_patterns: Vec<crate::mail::guard::GuardPattern>,
+    #[allow(dead_code)] // used once relay sending is wired up
+    pub relay: Option<crate::config::RelayConfig>,
+    pub embedding_provider: Option<std::sync::Arc<dyn crate::embeddings::EmbeddingProvider>>,
+    pub embedding_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Deserialize)]

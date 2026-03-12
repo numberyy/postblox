@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 mod api;
 mod config;
 mod db;
+mod embeddings;
 mod events;
 mod mail;
 mod models;
@@ -48,12 +49,42 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    let embedding_provider: Option<std::sync::Arc<dyn embeddings::EmbeddingProvider>> =
+        match &config.embedding_url {
+            Some(url) => {
+                let model = config
+                    .embedding_model
+                    .as_deref()
+                    .unwrap_or("text-embedding-3-small");
+                tracing::info!("embedding provider: {url}, model: {model}");
+                Some(std::sync::Arc::new(
+                    embeddings::openai::OpenAiProvider::new(
+                        url,
+                        model,
+                        config.embedding_api_key.clone(),
+                        768,
+                    ),
+                ))
+            }
+            None => {
+                tracing::info!("no embedding provider configured, semantic search disabled");
+                None
+            }
+        };
+
+    if config.relay.is_some() {
+        tracing::info!("SMTP relay configured");
+    }
+
     let state = api::AppState {
         pool,
         stalwart: stalwart_client,
         webhook_client,
         inbound_token: config.stalwart_inbound_token,
         guard_patterns,
+        relay: config.relay,
+        embedding_provider,
+        embedding_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(20)),
     };
     let app = api::router(state);
 

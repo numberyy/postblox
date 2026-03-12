@@ -13,6 +13,25 @@ pub struct Config {
     pub stalwart_admin_token: Option<String>,
     pub stalwart_inbound_token: Option<String>,
     pub guard_patterns: Option<Vec<GuardPatternConfig>>,
+    pub embedding_url: Option<String>,
+    pub embedding_model: Option<String>,
+    pub embedding_api_key: Option<String>,
+    pub relay: Option<RelayConfig>,
+}
+
+#[allow(dead_code)] // used once relay sending is wired up
+#[derive(Debug, Deserialize, Clone)]
+pub struct RelayConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    #[serde(default = "default_relay_starttls")]
+    pub starttls: bool,
+}
+
+fn default_relay_starttls() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +70,10 @@ impl Config {
                 stalwart_admin_token: std::env::var("STALWART_ADMIN_TOKEN").ok(),
                 stalwart_inbound_token: std::env::var("STALWART_INBOUND_TOKEN").ok(),
                 guard_patterns: None,
+                embedding_url: std::env::var("EMBEDDING_URL").ok(),
+                embedding_model: std::env::var("EMBEDDING_MODEL").ok(),
+                embedding_api_key: std::env::var("EMBEDDING_API_KEY").ok(),
+                relay: None,
             })
         }
     }

@@ -153,5 +153,37 @@ pub async fn receive_inbound(
         .await;
     });
 
+    if let Some(ref provider) = state.embedding_provider {
+        let text = cm
+            .extracted_text
+            .clone()
+            .or_else(|| cm.text_body.clone())
+            .unwrap_or_default();
+        if !text.is_empty() {
+            let pool = state.pool.clone();
+            let provider = provider.clone();
+            let semaphore = state.embedding_semaphore.clone();
+            let msg_id = msg.id;
+            tokio::spawn(async move {
+                let _permit = match semaphore.acquire().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                match provider.embed(&text).await {
+                    Ok(embedding) => {
+                        if let Err(e) =
+                            crate::db::embeddings::store_embedding(&pool, msg_id, &embedding).await
+                        {
+                            tracing::warn!(message_id = %msg_id, "failed to store embedding: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(message_id = %msg_id, "failed to generate embedding: {e}");
+                    }
+                }
+            });
+        }
+    }
+
     Ok(StatusCode::OK)
 }
