@@ -10,6 +10,7 @@ pub mod approvals;
 pub mod audit;
 pub mod auth;
 pub mod briefing;
+pub mod deliver;
 pub mod domains;
 pub mod drafts;
 pub mod error;
@@ -19,10 +20,12 @@ pub mod inboxes;
 pub mod labels;
 pub mod linked_accounts;
 pub mod messages;
+pub mod notifications;
 pub mod organizations;
 pub mod permissions;
 pub mod search;
 pub mod threads;
+pub mod trust;
 pub mod webhooks;
 
 #[derive(Clone)]
@@ -36,6 +39,7 @@ pub struct AppState {
     pub relay: Option<crate::config::RelayConfig>,
     pub embedding_provider: Option<std::sync::Arc<dyn crate::embeddings::EmbeddingProvider>>,
     pub embedding_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    pub trust_auto_upgrade_threshold: i32,
 }
 
 #[derive(Deserialize)]
@@ -136,7 +140,16 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/approvals/{id}", get(approvals::get))
         .route("/approvals/{id}/approve", post(approvals::approve))
         .route("/approvals/{id}/reject", post(approvals::reject))
-        .route("/approvals/batch", post(approvals::batch));
+        .route("/approvals/batch", post(approvals::batch))
+        .route("/inboxes/{inbox_id}/trust", get(trust::get))
+        .route(
+            "/notifications",
+            get(notifications::list).post(notifications::create),
+        )
+        .route(
+            "/notifications/{id}",
+            axum::routing::delete(notifications::delete),
+        );
 
     axum::Router::new()
         .route("/health", get(health))

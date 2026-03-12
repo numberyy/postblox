@@ -211,11 +211,11 @@ pub async fn send_draft(
         )));
     }
 
-    let send_mode = match crate::db::permissions::get_by_inbox(&state.pool, inbox_id).await {
-        Ok(Some(perm)) => perm.mode(),
-        Ok(None) => SendMode::default(),
+    let permission = match crate::db::permissions::get_by_inbox(&state.pool, inbox_id).await {
+        Ok(perm) => perm,
         Err(e) => return Err(ApiError::Internal(e.to_string())),
     };
+    let send_mode = permission.as_ref().map(|p| p.mode()).unwrap_or_default();
 
     match send_mode {
         SendMode::Shadow => {
@@ -223,12 +223,22 @@ pub async fn send_draft(
                 "inbox is in shadow mode, sending disabled".into(),
             ));
         }
-        SendMode::Approval => {
-            // Store message but don't send — approval queue handled by approval system
+        SendMode::Approval => {}
+        SendMode::AutoApprove => {
+            if let Some(ref perm) = permission {
+                if let crate::core::rules::RuleVerdict::Block { reason, .. } =
+                    perm.rules().evaluate(
+                        &to,
+                        draft.subject.as_deref().unwrap_or(""),
+                        draft.text_body.as_deref().unwrap_or(""),
+                        None,
+                    )
+                {
+                    return Err(ApiError::Forbidden(format!("rule check failed: {reason}")));
+                }
+            }
         }
-        SendMode::AutoApprove | SendMode::Autonomous => {
-            // Proceed to send
-        }
+        SendMode::Autonomous => {}
     }
 
     let cc: Vec<String> = draft
@@ -311,46 +321,22 @@ pub async fn send_draft(
         return Ok((StatusCode::ACCEPTED, Json(msg)));
     }
 
-    // Build MIME only when actually sending (skipped for Approval mode above)
-    let mime_message_id = format!("<{message_id}>");
-    let raw_mime = crate::mail::builder::build_mime(
-        &inbox.email,
-        &to,
-        &cc,
-        msg.subject.as_deref().unwrap_or(""),
-        msg.text_body.as_deref(),
-        msg.html_body.as_deref(),
-        &mime_message_id,
-    );
-
-    if let Some(ref stalwart) = state.stalwart {
-        let to_refs: Vec<&str> = to.iter().map(|s| s.as_str()).collect();
-        if let Err(e) = stalwart
-            .submit_message(&inbox.email, &to_refs, &raw_mime)
-            .await
-        {
-            tracing::error!("stalwart submission failed: {e}");
-            return Err(ApiError::Internal("email delivery failed".into()));
-        }
-    } else {
-        tracing::warn!("stalwart not configured, skipping email delivery");
-    }
-
-    let pool = state.pool.clone();
-    let webhook_client = state.webhook_client.clone();
-    let msg_id = msg.id;
-    tokio::spawn(async move {
-        crate::events::dispatch(
-            &pool,
-            org_id,
-            crate::events::PostbloxEvent::MessageSent {
-                message_id: msg_id,
-                inbox_id,
-            },
-            &webhook_client,
-        )
-        .await;
-    });
+    super::deliver::deliver_message(
+        &state,
+        org_id,
+        inbox_id,
+        msg.id,
+        &super::deliver::DeliveryParams {
+            from: &inbox.email,
+            to: &to,
+            cc: &cc,
+            subject: msg.subject.as_deref().unwrap_or(""),
+            text_body: msg.text_body.as_deref(),
+            html_body: msg.html_body.as_deref(),
+            message_id_header: &message_id,
+        },
+    )
+    .await?;
 
     Ok((StatusCode::CREATED, Json(msg)))
 }

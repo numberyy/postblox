@@ -17,6 +17,8 @@ pub struct Config {
     pub embedding_model: Option<String>,
     pub embedding_api_key: Option<String>,
     pub relay: Option<RelayConfig>,
+    #[serde(default = "default_trust_threshold")]
+    pub trust_auto_upgrade_threshold: i32,
 }
 
 #[allow(dead_code)] // used once relay sending is wired up
@@ -38,6 +40,10 @@ fn default_relay_starttls() -> bool {
 pub struct GuardPatternConfig {
     pub name: String,
     pub pattern: String,
+}
+
+fn default_trust_threshold() -> i32 {
+    10
 }
 
 fn default_host() -> String {
@@ -74,6 +80,10 @@ impl Config {
                 embedding_model: std::env::var("EMBEDDING_MODEL").ok(),
                 embedding_api_key: std::env::var("EMBEDDING_API_KEY").ok(),
                 relay: None,
+                trust_auto_upgrade_threshold: std::env::var("TRUST_AUTO_UPGRADE_THRESHOLD")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(default_trust_threshold),
             })
         }
     }
@@ -102,5 +112,22 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 8080);
+    }
+
+    #[test]
+    fn test_config_trust_threshold_default() {
+        let toml_str = r#"database_url = "postgres://localhost/postblox""#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.trust_auto_upgrade_threshold, 10);
+    }
+
+    #[test]
+    fn test_config_trust_threshold_custom() {
+        let toml_str = r#"
+            database_url = "postgres://localhost/postblox"
+            trust_auto_upgrade_threshold = 25
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.trust_auto_upgrade_threshold, 25);
     }
 }

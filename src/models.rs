@@ -56,12 +56,16 @@ impl Permission {
     pub fn mode(&self) -> SendMode {
         self.send_mode.parse().unwrap_or_default()
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CreatePermission {
-    pub inbox_id: Uuid,
-    pub send_mode: Option<SendMode>,
+    pub fn rules(&self) -> crate::core::rules::RuleSet {
+        match serde_json::from_value(self.rules.clone()) {
+            Ok(rs) => rs,
+            Err(e) => {
+                tracing::warn!(permission_id = %self.id, "invalid rules JSON, treating as empty: {e}");
+                crate::core::rules::RuleSet(vec![])
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
@@ -411,6 +415,69 @@ pub struct CreateApproval {
     pub message_id: Uuid,
 }
 
+// === Trust ===
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TrustScore {
+    pub id: Uuid,
+    pub inbox_id: Uuid,
+    pub total_sends: i32,
+    pub approved_count: i32,
+    pub rejected_count: i32,
+    pub auto_upgraded: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationProvider {
+    Ntfy,
+    Email,
+    Webhook,
+}
+
+impl fmt::Display for NotificationProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Ntfy => "ntfy",
+            Self::Email => "email",
+            Self::Webhook => "webhook",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for NotificationProvider {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ntfy" => Ok(Self::Ntfy),
+            "email" => Ok(Self::Email),
+            "webhook" => Ok(Self::Webhook),
+            other => Err(format!("unknown notification provider: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct NotificationConfig {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub provider: String,
+    pub config: serde_json::Value,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateNotificationConfig {
+    pub org_id: Uuid,
+    pub provider: NotificationProvider,
+    pub config: serde_json::Value,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,25 +579,6 @@ mod tests {
         let json = serde_json::to_string(&perm).unwrap();
         let back: Permission = serde_json::from_str(&json).unwrap();
         assert_eq!(perm, back);
-    }
-
-    #[test]
-    fn test_create_permission_defaults_send_mode() {
-        let json = serde_json::json!({
-            "inbox_id": Uuid::new_v4()
-        });
-        let cp: CreatePermission = serde_json::from_value(json).unwrap();
-        assert!(cp.send_mode.is_none());
-    }
-
-    #[test]
-    fn test_create_permission_with_explicit_mode() {
-        let json = serde_json::json!({
-            "inbox_id": Uuid::new_v4(),
-            "send_mode": "autonomous"
-        });
-        let cp: CreatePermission = serde_json::from_value(json).unwrap();
-        assert_eq!(cp.send_mode, Some(SendMode::Autonomous));
     }
 
     #[test]
@@ -1107,5 +1155,118 @@ mod tests {
         let json = serde_json::to_string(&ca).unwrap();
         let back: CreateApproval = serde_json::from_str(&json).unwrap();
         assert_eq!(ca, back);
+    }
+
+    // === Trust model tests ===
+
+    #[test]
+    fn test_trust_score_serialization_roundtrip() {
+        let ts = TrustScore {
+            id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+            total_sends: 20,
+            approved_count: 17,
+            rejected_count: 3,
+            auto_upgraded: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&ts).unwrap();
+        let back: TrustScore = serde_json::from_str(&json).unwrap();
+        assert_eq!(ts, back);
+    }
+
+    #[test]
+    fn test_trust_score_defaults() {
+        let json = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "inbox_id": Uuid::new_v4(),
+            "total_sends": 0,
+            "approved_count": 0,
+            "rejected_count": 0,
+            "auto_upgraded": false,
+            "created_at": "2026-03-12T00:00:00Z",
+            "updated_at": "2026-03-12T00:00:00Z"
+        });
+        let ts: TrustScore = serde_json::from_value(json).unwrap();
+        assert_eq!(ts.total_sends, 0);
+        assert!(!ts.auto_upgraded);
+    }
+
+    #[test]
+    fn test_notification_provider_display_all_variants() {
+        assert_eq!(NotificationProvider::Ntfy.to_string(), "ntfy");
+        assert_eq!(NotificationProvider::Email.to_string(), "email");
+        assert_eq!(NotificationProvider::Webhook.to_string(), "webhook");
+    }
+
+    #[test]
+    fn test_notification_provider_from_str_roundtrip() {
+        for provider in [
+            NotificationProvider::Ntfy,
+            NotificationProvider::Email,
+            NotificationProvider::Webhook,
+        ] {
+            let s = provider.to_string();
+            let parsed: NotificationProvider = s.parse().unwrap();
+            assert_eq!(parsed, provider);
+        }
+    }
+
+    #[test]
+    fn test_notification_provider_from_str_invalid_returns_err() {
+        let result: Result<NotificationProvider, _> = "slack".parse();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("unknown notification provider"));
+    }
+
+    #[test]
+    fn test_notification_provider_serde_roundtrip() {
+        let provider = NotificationProvider::Ntfy;
+        let json = serde_json::to_string(&provider).unwrap();
+        assert_eq!(json, "\"ntfy\"");
+        let back: NotificationProvider = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, provider);
+    }
+
+    #[test]
+    fn test_notification_config_serialization_roundtrip() {
+        let nc = NotificationConfig {
+            id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            provider: "ntfy".into(),
+            config: serde_json::json!({"url": "https://ntfy.sh/postblox"}),
+            active: true,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&nc).unwrap();
+        let back: NotificationConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(nc, back);
+    }
+
+    #[test]
+    fn test_create_notification_config_serialization_roundtrip() {
+        let cnc = CreateNotificationConfig {
+            org_id: Uuid::new_v4(),
+            provider: NotificationProvider::Webhook,
+            config: serde_json::json!({"url": "https://example.com/hook"}),
+        };
+        let json = serde_json::to_string(&cnc).unwrap();
+        let back: CreateNotificationConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(cnc, back);
+    }
+
+    #[test]
+    fn test_create_notification_config_empty_config() {
+        let json = serde_json::json!({
+            "org_id": Uuid::new_v4(),
+            "provider": "email",
+            "config": {}
+        });
+        let cnc: CreateNotificationConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(cnc.provider, NotificationProvider::Email);
+        assert_eq!(cnc.config, serde_json::json!({}));
     }
 }

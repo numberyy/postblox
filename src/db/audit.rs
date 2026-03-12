@@ -85,53 +85,6 @@ pub async fn list_entries(
     query.fetch_all(pool).await
 }
 
-pub async fn count_entries(
-    pool: &PgPool,
-    org_id: Uuid,
-    inbox_id_filter: Option<Uuid>,
-    action_filter: Option<&str>,
-    after: Option<DateTime<Utc>>,
-    before: Option<DateTime<Utc>>,
-) -> Result<i64, sqlx::Error> {
-    let mut sql = "SELECT COUNT(*) as count FROM audit_log WHERE org_id = $1".to_string();
-    let mut param_idx = 2u32;
-
-    if inbox_id_filter.is_some() {
-        sql.push_str(&format!(" AND inbox_id = ${param_idx}"));
-        param_idx += 1;
-    }
-    if action_filter.is_some() {
-        sql.push_str(&format!(" AND action = ${param_idx}"));
-        param_idx += 1;
-    }
-    if after.is_some() {
-        sql.push_str(&format!(" AND created_at > ${param_idx}"));
-        param_idx += 1;
-    }
-    if before.is_some() {
-        sql.push_str(&format!(" AND created_at < ${param_idx}"));
-        param_idx += 1;
-    }
-    let _ = param_idx;
-
-    let mut query = sqlx::query_scalar::<_, i64>(&sql).bind(org_id);
-
-    if let Some(iid) = inbox_id_filter {
-        query = query.bind(iid);
-    }
-    if let Some(act) = action_filter {
-        query = query.bind(act);
-    }
-    if let Some(a) = after {
-        query = query.bind(a);
-    }
-    if let Some(b) = before {
-        query = query.bind(b);
-    }
-
-    query.fetch_one(pool).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,64 +256,6 @@ mod tests {
             .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].inbox_id, Some(inbox_id));
-    }
-
-    #[tokio::test]
-    #[ignore] // needs real DB
-    async fn test_count_entries_basic() {
-        let pool = crate::db::test_pool().await;
-        let (org_id, inbox_id) = setup_org(&pool).await;
-
-        for _ in 0..3 {
-            create_entry(
-                &pool,
-                org_id,
-                Some(inbox_id),
-                "message_sent",
-                "a",
-                serde_json::json!({}),
-            )
-            .await
-            .unwrap();
-        }
-
-        let count = count_entries(&pool, org_id, None, None, None, None)
-            .await
-            .unwrap();
-        assert!(count >= 3);
-    }
-
-    #[tokio::test]
-    #[ignore] // needs real DB
-    async fn test_count_entries_with_action_filter() {
-        let pool = crate::db::test_pool().await;
-        let (org_id, inbox_id) = setup_org(&pool).await;
-
-        create_entry(
-            &pool,
-            org_id,
-            Some(inbox_id),
-            "message_sent",
-            "a",
-            serde_json::json!({}),
-        )
-        .await
-        .unwrap();
-        create_entry(
-            &pool,
-            org_id,
-            Some(inbox_id),
-            "inbox_created",
-            "a",
-            serde_json::json!({}),
-        )
-        .await
-        .unwrap();
-
-        let count = count_entries(&pool, org_id, None, Some("inbox_created"), None, None)
-            .await
-            .unwrap();
-        assert_eq!(count, 1);
     }
 
     #[tokio::test]

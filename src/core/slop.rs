@@ -826,7 +826,6 @@ mod tests {
             text_body: Some("Hey, can we meet at 3pm?"),
             raw_headers: Some(&headers),
             sender_slop_ratio: Some(0.0),
-            ..empty_input()
         };
         let result = classify(&input);
         assert_eq!(result.score, 0.0);

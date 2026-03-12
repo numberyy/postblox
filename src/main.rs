@@ -10,6 +10,7 @@ mod embeddings;
 mod events;
 mod mail;
 mod models;
+mod notifications;
 mod stalwart;
 mod sync;
 
@@ -87,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
         relay: config.relay,
         embedding_provider,
         embedding_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(20)),
+        trust_auto_upgrade_threshold: config.trust_auto_upgrade_threshold,
     };
     let app = api::router(state);
 

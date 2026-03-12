@@ -69,64 +69,33 @@ pub async fn approve(
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or(ApiError::Internal("inbox not found".into()))?;
 
-    let to_addrs: Vec<String> = msg
-        .to_addrs
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let cc_addrs: Vec<String> = msg
-        .cc_addrs
-        .as_ref()
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let message_id_header = msg
-        .message_id_header
-        .as_deref()
-        .unwrap_or("unknown@postblox");
-    let mime_message_id = if message_id_header.starts_with('<') {
-        message_id_header.to_string()
-    } else {
-        format!("<{message_id_header}>")
-    };
-
-    let raw_mime = crate::mail::builder::build_mime(
-        &inbox.email,
-        &to_addrs,
-        &cc_addrs,
-        msg.subject.as_deref().unwrap_or(""),
-        msg.text_body.as_deref(),
-        msg.html_body.as_deref(),
-        &mime_message_id,
-    );
-
-    if let Some(ref stalwart) = state.stalwart {
-        let to_refs: Vec<&str> = to_addrs.iter().map(|s| s.as_str()).collect();
-        if let Err(e) = stalwart
-            .submit_message(&inbox.email, &to_refs, &raw_mime)
-            .await
-        {
-            tracing::error!("stalwart submission failed for approved message: {e}");
-            return Err(ApiError::Internal("email delivery failed".into()));
-        }
-    } else {
-        tracing::warn!("stalwart not configured, skipping delivery for approved message");
-    }
+    let (to, cc) = super::deliver::extract_addrs(&msg);
+    super::deliver::deliver_message(
+        &state,
+        org_id,
+        approval.inbox_id,
+        approval.message_id,
+        &super::deliver::DeliveryParams {
+            from: &inbox.email,
+            to: &to,
+            cc: &cc,
+            subject: msg.subject.as_deref().unwrap_or(""),
+            text_body: msg.text_body.as_deref(),
+            html_body: msg.html_body.as_deref(),
+            message_id_header: msg
+                .message_id_header
+                .as_deref()
+                .unwrap_or("unknown@postblox"),
+        },
+    )
+    .await?;
 
     let pool = state.pool.clone();
     let webhook_client = state.webhook_client.clone();
     let msg_id = approval.message_id;
     let inbox_id = approval.inbox_id;
     let decided_by = req.decided_by.clone();
+    let threshold = state.trust_auto_upgrade_threshold;
     tokio::spawn(async move {
         crate::events::audit(
             &pool,
@@ -137,16 +106,40 @@ pub async fn approve(
             serde_json::json!({"message_id": msg_id.to_string(), "approval_id": id.to_string()}),
         )
         .await;
-        crate::events::dispatch(
-            &pool,
-            org_id,
-            crate::events::PostbloxEvent::MessageSent {
-                message_id: msg_id,
-                inbox_id,
-            },
-            &webhook_client,
-        )
-        .await;
+
+        if let Err(e) = crate::db::trust::record_send_outcome(&pool, inbox_id, true).await {
+            tracing::error!("failed to record trust outcome: {e}");
+        }
+        match crate::db::trust::check_and_upgrade(&pool, inbox_id, threshold).await {
+            Ok(Some(score)) => {
+                crate::events::audit(
+                    &pool,
+                    org_id,
+                    Some(inbox_id),
+                    crate::models::AuditAction::PermissionChanged,
+                    "system:trust_auto_upgrade",
+                    serde_json::json!({
+                        "new_mode": "auto_approve",
+                        "approved_count": score.approved_count,
+                        "threshold": threshold,
+                    }),
+                )
+                .await;
+                crate::events::dispatch(
+                    &pool,
+                    org_id,
+                    crate::events::PostbloxEvent::TrustChanged {
+                        inbox_id,
+                        new_mode: crate::models::SendMode::AutoApprove,
+                        approved_count: score.approved_count,
+                    },
+                    &webhook_client,
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::error!("failed to check trust upgrade: {e}"),
+        }
     });
 
     Ok(Json(approval))
@@ -177,6 +170,10 @@ pub async fn reject(
             serde_json::json!({"message_id": msg_id.to_string(), "approval_id": id.to_string()}),
         )
         .await;
+
+        if let Err(e) = crate::db::trust::record_send_outcome(&pool, inbox_id, false).await {
+            tracing::error!("failed to record trust outcome: {e}");
+        }
     });
 
     Ok(Json(approval))
@@ -206,12 +203,11 @@ pub async fn batch(
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let pool = state.pool.clone();
-    let stalwart = state.stalwart.clone();
-    let webhook_client = state.webhook_client.clone();
+    let state_clone = state.clone();
     let status = req.status;
     let decided_by = req.decided_by.clone();
     let decided_clone = decided.clone();
+    let threshold = state.trust_auto_upgrade_threshold;
     tokio::spawn(async move {
         let action = if status == ApprovalStatus::Approved {
             crate::models::AuditAction::MessageApproved
@@ -220,7 +216,7 @@ pub async fn batch(
         };
         for d in &decided_clone {
             crate::events::audit(
-                &pool,
+                &state_clone.pool,
                 org_id,
                 Some(d.inbox_id),
                 action,
@@ -231,8 +227,8 @@ pub async fn batch(
 
             if status == ApprovalStatus::Approved {
                 let (msg_result, inbox_result) = tokio::join!(
-                    crate::db::messages::get_by_id(&pool, d.message_id),
-                    crate::db::inboxes::get_by_id(&pool, d.inbox_id),
+                    crate::db::messages::get_by_id(&state_clone.pool, d.message_id),
+                    crate::db::inboxes::get_by_id(&state_clone.pool, d.inbox_id),
                 );
                 let msg = match msg_result {
                     Ok(Some(m)) => m,
@@ -249,69 +245,73 @@ pub async fn batch(
                     }
                 };
 
-                let to_addrs: Vec<String> = msg
-                    .to_addrs
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let cc_addrs: Vec<String> = msg
-                    .cc_addrs
-                    .as_ref()
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                let message_id_header = msg
-                    .message_id_header
-                    .as_deref()
-                    .unwrap_or("unknown@postblox");
-                let mime_message_id = if message_id_header.starts_with('<') {
-                    message_id_header.to_string()
-                } else {
-                    format!("<{message_id_header}>")
-                };
-
-                let raw_mime = crate::mail::builder::build_mime(
-                    &inbox.email,
-                    &to_addrs,
-                    &cc_addrs,
-                    msg.subject.as_deref().unwrap_or(""),
-                    msg.text_body.as_deref(),
-                    msg.html_body.as_deref(),
-                    &mime_message_id,
-                );
-
-                if let Some(ref stalwart) = stalwart {
-                    let to_refs: Vec<&str> = to_addrs.iter().map(|s| s.as_str()).collect();
-                    if let Err(e) = stalwart
-                        .submit_message(&inbox.email, &to_refs, &raw_mime)
-                        .await
-                    {
-                        tracing::error!(
-                            "batch approve: stalwart delivery failed for message {}: {e}",
-                            d.message_id
-                        );
-                    }
-                }
-
-                crate::events::dispatch(
-                    &pool,
+                let (to, cc) = super::deliver::extract_addrs(&msg);
+                if let Err(e) = super::deliver::deliver_message(
+                    &state_clone,
                     org_id,
-                    crate::events::PostbloxEvent::MessageSent {
-                        message_id: d.message_id,
-                        inbox_id: d.inbox_id,
+                    d.inbox_id,
+                    d.message_id,
+                    &super::deliver::DeliveryParams {
+                        from: &inbox.email,
+                        to: &to,
+                        cc: &cc,
+                        subject: msg.subject.as_deref().unwrap_or(""),
+                        text_body: msg.text_body.as_deref(),
+                        html_body: msg.html_body.as_deref(),
+                        message_id_header: msg
+                            .message_id_header
+                            .as_deref()
+                            .unwrap_or("unknown@postblox"),
                     },
-                    &webhook_client,
                 )
-                .await;
+                .await
+                {
+                    tracing::error!(
+                        "batch approve: delivery failed for message {}: {e:?}",
+                        d.message_id
+                    );
+                }
+            }
+
+            let approved = status == ApprovalStatus::Approved;
+            if let Err(e) =
+                crate::db::trust::record_send_outcome(&state_clone.pool, d.inbox_id, approved).await
+            {
+                tracing::error!("failed to record trust outcome: {e}");
+            }
+            if approved {
+                match crate::db::trust::check_and_upgrade(&state_clone.pool, d.inbox_id, threshold)
+                    .await
+                {
+                    Ok(Some(score)) => {
+                        crate::events::audit(
+                            &state_clone.pool,
+                            org_id,
+                            Some(d.inbox_id),
+                            crate::models::AuditAction::PermissionChanged,
+                            "system:trust_auto_upgrade",
+                            serde_json::json!({
+                                "new_mode": "auto_approve",
+                                "approved_count": score.approved_count,
+                                "threshold": threshold,
+                            }),
+                        )
+                        .await;
+                        crate::events::dispatch(
+                            &state_clone.pool,
+                            org_id,
+                            crate::events::PostbloxEvent::TrustChanged {
+                                inbox_id: d.inbox_id,
+                                new_mode: crate::models::SendMode::AutoApprove,
+                                approved_count: score.approved_count,
+                            },
+                            &state_clone.webhook_client,
+                        )
+                        .await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::error!("failed to check trust upgrade: {e}"),
+                }
             }
         }
     });

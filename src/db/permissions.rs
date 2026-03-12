@@ -7,15 +7,17 @@ pub async fn upsert(
     pool: &PgPool,
     inbox_id: Uuid,
     send_mode: SendMode,
+    rules: &serde_json::Value,
 ) -> Result<Permission, sqlx::Error> {
     sqlx::query_as(
-        "INSERT INTO permissions (inbox_id, send_mode) \
-         VALUES ($1, $2) \
-         ON CONFLICT (inbox_id) DO UPDATE SET send_mode = $2, updated_at = now() \
+        "INSERT INTO permissions (inbox_id, send_mode, rules) \
+         VALUES ($1, $2, $3) \
+         ON CONFLICT (inbox_id) DO UPDATE SET send_mode = $2, rules = $3, updated_at = now() \
          RETURNING id, inbox_id, send_mode, rules, created_at, updated_at",
     )
     .bind(inbox_id)
     .bind(send_mode.to_string())
+    .bind(rules)
     .fetch_one(pool)
     .await
 }
@@ -49,10 +51,12 @@ mod tests {
             .await
             .unwrap();
 
-        let perm = upsert(&pool, inbox.id, SendMode::Approval).await.unwrap();
+        let perm = upsert(&pool, inbox.id, SendMode::Approval, &serde_json::json!([]))
+            .await
+            .unwrap();
         assert_eq!(perm.inbox_id, inbox.id);
         assert_eq!(perm.send_mode, "approval");
-        assert_eq!(perm.rules, serde_json::json!({}));
+        assert_eq!(perm.rules, serde_json::json!([]));
     }
 
     #[tokio::test]
@@ -67,8 +71,17 @@ mod tests {
             .await
             .unwrap();
 
-        let p1 = upsert(&pool, inbox.id, SendMode::Approval).await.unwrap();
-        let p2 = upsert(&pool, inbox.id, SendMode::Autonomous).await.unwrap();
+        let p1 = upsert(&pool, inbox.id, SendMode::Approval, &serde_json::json!([]))
+            .await
+            .unwrap();
+        let p2 = upsert(
+            &pool,
+            inbox.id,
+            SendMode::Autonomous,
+            &serde_json::json!([]),
+        )
+        .await
+        .unwrap();
         assert_eq!(p1.id, p2.id);
         assert_eq!(p2.send_mode, "autonomous");
         assert!(p2.updated_at >= p1.updated_at);
@@ -86,7 +99,9 @@ mod tests {
             .await
             .unwrap();
 
-        upsert(&pool, inbox.id, SendMode::Shadow).await.unwrap();
+        upsert(&pool, inbox.id, SendMode::Shadow, &serde_json::json!([]))
+            .await
+            .unwrap();
 
         let found = get_by_inbox(&pool, inbox.id).await.unwrap().unwrap();
         assert_eq!(found.send_mode, "shadow");
@@ -112,7 +127,14 @@ mod tests {
             .await
             .unwrap();
 
-        upsert(&pool, inbox.id, SendMode::Autonomous).await.unwrap();
+        upsert(
+            &pool,
+            inbox.id,
+            SendMode::Autonomous,
+            &serde_json::json!([]),
+        )
+        .await
+        .unwrap();
         crate::db::inboxes::delete(&pool, inbox.id).await.unwrap();
 
         let result = get_by_inbox(&pool, inbox.id).await.unwrap();
@@ -132,8 +154,12 @@ mod tests {
             .unwrap();
 
         // Two upserts produce the same row, not two rows
-        upsert(&pool, inbox.id, SendMode::Approval).await.unwrap();
-        upsert(&pool, inbox.id, SendMode::Shadow).await.unwrap();
+        upsert(&pool, inbox.id, SendMode::Approval, &serde_json::json!([]))
+            .await
+            .unwrap();
+        upsert(&pool, inbox.id, SendMode::Shadow, &serde_json::json!([]))
+            .await
+            .unwrap();
 
         // Only one permission row for this inbox
         let rows: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM permissions WHERE inbox_id = $1")
@@ -163,7 +189,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            let perm = upsert(&pool, inbox.id, mode).await.unwrap();
+            let perm = upsert(&pool, inbox.id, mode, &serde_json::json!([]))
+                .await
+                .unwrap();
             assert_eq!(perm.send_mode, mode.to_string());
             assert_eq!(perm.mode(), mode);
         }

@@ -13,11 +13,13 @@ pub mod inboxes;
 pub mod labels;
 pub mod linked_accounts;
 pub mod messages;
+pub mod notifications;
 pub mod organizations;
 pub mod permissions;
 pub mod slop;
 pub mod slop_feedback;
 pub mod threads;
+pub mod trust;
 pub mod webhooks;
 
 pub async fn connect(database_url: &str) -> anyhow::Result<PgPool> {

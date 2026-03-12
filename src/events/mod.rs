@@ -8,6 +8,7 @@ pub const KNOWN_EVENTS: &[&str] = &[
     "message.sent",
     "message.classified",
     "approval.requested",
+    "trust.changed",
 ];
 
 pub enum PostbloxEvent {
@@ -28,6 +29,11 @@ pub enum PostbloxEvent {
         inbox_id: Uuid,
         approval_id: Uuid,
     },
+    TrustChanged {
+        inbox_id: Uuid,
+        new_mode: crate::models::SendMode,
+        approved_count: i32,
+    },
 }
 
 impl PostbloxEvent {
@@ -37,6 +43,7 @@ impl PostbloxEvent {
             Self::MessageSent { .. } => "message.sent",
             Self::MessageClassified { .. } => "message.classified",
             Self::ApprovalRequested { .. } => "approval.requested",
+            Self::TrustChanged { .. } => "trust.changed",
         }
     }
 
@@ -66,6 +73,15 @@ impl PostbloxEvent {
                 "inbox_id": inbox_id,
                 "approval_id": approval_id,
             }),
+            Self::TrustChanged {
+                inbox_id,
+                new_mode,
+                approved_count,
+            } => serde_json::json!({
+                "inbox_id": inbox_id,
+                "new_mode": new_mode.to_string(),
+                "approved_count": approved_count,
+            }),
         }
     }
 }
@@ -87,6 +103,43 @@ pub async fn audit(
 }
 
 pub async fn dispatch(pool: &PgPool, org_id: Uuid, event: PostbloxEvent, client: &reqwest::Client) {
+    // Fire notifications for relevant events
+    match &event {
+        PostbloxEvent::ApprovalRequested {
+            message_id,
+            inbox_id,
+            approval_id,
+        } => {
+            crate::notifications::notify_org(
+                pool,
+                org_id,
+                "Approval Required",
+                &format!(
+                    "Message {message_id} from inbox {inbox_id} needs approval (approval {approval_id})"
+                ),
+                client,
+            )
+            .await;
+        }
+        PostbloxEvent::TrustChanged {
+            inbox_id,
+            new_mode,
+            approved_count,
+        } => {
+            crate::notifications::notify_org(
+                pool,
+                org_id,
+                "Trust Level Changed",
+                &format!(
+                    "Inbox {inbox_id} auto-upgraded to {new_mode} after {approved_count} approved sends"
+                ),
+                client,
+            )
+            .await;
+        }
+        _ => {}
+    }
+
     let event_name = event.event_name();
     let data = event.data();
 
@@ -195,5 +248,34 @@ mod tests {
     #[test]
     fn test_known_events_includes_approval_requested() {
         assert!(KNOWN_EVENTS.contains(&"approval.requested"));
+    }
+
+    #[test]
+    fn test_event_name_trust_changed() {
+        let event = PostbloxEvent::TrustChanged {
+            inbox_id: Uuid::new_v4(),
+            new_mode: crate::models::SendMode::AutoApprove,
+            approved_count: 10,
+        };
+        assert_eq!(event.event_name(), "trust.changed");
+    }
+
+    #[test]
+    fn test_event_data_trust_changed_contains_fields() {
+        let inbox_id = Uuid::new_v4();
+        let event = PostbloxEvent::TrustChanged {
+            inbox_id,
+            new_mode: crate::models::SendMode::AutoApprove,
+            approved_count: 15,
+        };
+        let data = event.data();
+        assert_eq!(data["inbox_id"], inbox_id.to_string());
+        assert_eq!(data["new_mode"], "auto_approve");
+        assert_eq!(data["approved_count"], 15);
+    }
+
+    #[test]
+    fn test_known_events_includes_trust_changed() {
+        assert!(KNOWN_EVENTS.contains(&"trust.changed"));
     }
 }
