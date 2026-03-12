@@ -41,9 +41,9 @@ pub async fn upsert(
 
     let rules = match req.rules {
         Some(rules_json) => {
-            serde_json::from_value::<Vec<crate::core::rules::Rule>>(rules_json.clone())
+            let parsed = serde_json::from_value::<Vec<crate::core::rules::Rule>>(rules_json)
                 .map_err(|e| ApiError::BadRequest(format!("invalid rules: {e}")))?;
-            rules_json
+            serde_json::to_value(parsed).unwrap()
         }
         None => serde_json::json!([]),
     };

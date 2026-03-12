@@ -7,6 +7,7 @@ use uuid::Uuid;
 use super::auth::AuthOrg;
 use super::error::ApiError;
 use super::{clamp_pagination, get_inbox_for_org, AppState, PaginationParams};
+use crate::core::slop;
 use crate::models::{Draft, Message, SendMode};
 
 #[derive(Deserialize)]
@@ -226,12 +227,22 @@ pub async fn send_draft(
         SendMode::Approval => {}
         SendMode::AutoApprove => {
             if let Some(ref perm) = permission {
+                let slop_score = {
+                    let input = slop::ClassifierInput {
+                        from_addr: &inbox.email,
+                        subject: draft.subject.as_deref(),
+                        text_body: draft.text_body.as_deref(),
+                        raw_headers: None,
+                        sender_slop_ratio: None,
+                    };
+                    slop::classify(&input).score as f64
+                };
                 if let crate::core::rules::RuleVerdict::Block { reason, .. } =
                     perm.rules().evaluate(
                         &to,
                         draft.subject.as_deref().unwrap_or(""),
                         draft.text_body.as_deref().unwrap_or(""),
-                        None,
+                        Some(slop_score),
                     )
                 {
                     return Err(ApiError::Forbidden(format!("rule check failed: {reason}")));
@@ -285,10 +296,6 @@ pub async fn send_draft(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    if let Err(e) = crate::db::drafts::delete(&state.pool, id).await {
-        tracing::warn!("failed to delete draft {id} after send: {e}");
-    }
-
     if send_mode == SendMode::Approval {
         let approval = crate::db::approvals::create(
             &state.pool,
@@ -300,6 +307,10 @@ pub async fn send_draft(
         )
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        if let Err(e) = crate::db::drafts::delete(&state.pool, id).await {
+            tracing::warn!("failed to delete draft {id} after approval queued: {e}");
+        }
 
         let pool = state.pool.clone();
         let webhook_client = state.webhook_client.clone();
@@ -319,6 +330,10 @@ pub async fn send_draft(
         });
 
         return Ok((StatusCode::ACCEPTED, Json(msg)));
+    }
+
+    if let Err(e) = crate::db::drafts::delete(&state.pool, id).await {
+        tracing::warn!("failed to delete draft {id} after send: {e}");
     }
 
     super::deliver::deliver_message(

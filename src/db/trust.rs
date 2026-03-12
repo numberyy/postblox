@@ -22,19 +22,18 @@ pub async fn record_send_outcome(
     inbox_id: Uuid,
     approved: bool,
 ) -> Result<TrustScore, sqlx::Error> {
-    let (approved_inc, rejected_inc) = if approved { (1, 0) } else { (0, 1) };
-
     sqlx::query_as(&format!(
         "INSERT INTO trust_scores (inbox_id, total_sends, approved_count, rejected_count) \
-         VALUES ($1, 1, {approved_inc}, {rejected_inc}) \
+         VALUES ($1, 1, CASE WHEN $2 THEN 1 ELSE 0 END, CASE WHEN $2 THEN 0 ELSE 1 END) \
          ON CONFLICT (inbox_id) DO UPDATE SET \
          total_sends = trust_scores.total_sends + 1, \
-         approved_count = trust_scores.approved_count + {approved_inc}, \
-         rejected_count = trust_scores.rejected_count + {rejected_inc}, \
+         approved_count = trust_scores.approved_count + CASE WHEN $2 THEN 1 ELSE 0 END, \
+         rejected_count = trust_scores.rejected_count + CASE WHEN $2 THEN 0 ELSE 1 END, \
          updated_at = now() \
          RETURNING {SELECT_COLS}"
     ))
     .bind(inbox_id)
+    .bind(approved)
     .fetch_one(pool)
     .await
 }

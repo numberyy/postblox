@@ -40,7 +40,7 @@ pub async fn deliver_message(
     if let Some(ref stalwart) = state.stalwart {
         let to_refs: Vec<&str> = params.to.iter().map(|s| s.as_str()).collect();
         if let Err(e) = stalwart
-            .submit_message(params.from, &to_refs, &raw_mime)
+            .submit_message(params.from, &to_refs, raw_mime)
             .await
         {
             tracing::error!("stalwart submission failed: {e}");

@@ -22,6 +22,7 @@ pub async fn create(
     .await
 }
 
+#[allow(dead_code)]
 pub async fn get_by_message(
     pool: &PgPool,
     org_id: Uuid,

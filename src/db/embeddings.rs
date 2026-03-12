@@ -46,6 +46,7 @@ pub async fn search_similar(
         .await
 }
 
+#[allow(dead_code)]
 pub async fn count_unembedded(pool: &PgPool, org_id: Uuid) -> Result<i64, sqlx::Error> {
     let (count,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM messages m \

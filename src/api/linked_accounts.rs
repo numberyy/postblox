@@ -105,11 +105,22 @@ pub async fn sync(
     .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     match crate::sync::imap::one_shot_sync(&state.pool, &account, &inbox).await {
-        Ok(result) => Ok(Json(SyncResponse {
-            fetched: result.fetched,
-            stored: result.stored,
-            skipped: result.skipped,
-        })),
+        Ok(result) => {
+            if let Err(e) = crate::db::linked_accounts::set_sync_status(
+                &state.pool,
+                account.id,
+                crate::sync::SyncStatus::Idle,
+            )
+            .await
+            {
+                tracing::warn!(account_id = %account.id, "failed to set sync status to idle: {e}");
+            }
+            Ok(Json(SyncResponse {
+                fetched: result.fetched,
+                stored: result.stored,
+                skipped: result.skipped,
+            }))
+        }
         Err(e) => {
             if let Err(status_err) = crate::db::linked_accounts::set_sync_status(
                 &state.pool,

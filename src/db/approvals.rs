@@ -20,23 +20,52 @@ pub async fn create(pool: &PgPool, input: &CreateApproval) -> Result<Approval, s
         .await
 }
 
+#[allow(dead_code)]
 pub async fn list_pending(
     pool: &PgPool,
     org_id: Uuid,
     offset: i64,
     limit: i64,
 ) -> Result<Vec<Approval>, sqlx::Error> {
-    let query = format!(
-        "SELECT {SELECT_COLS} FROM approvals \
-         WHERE org_id = $1 AND status = 'pending' \
-         ORDER BY created_at ASC LIMIT $2 OFFSET $3"
-    );
-    sqlx::query_as(&query)
-        .bind(org_id)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await
+    list_by_status(pool, org_id, Some("pending"), offset, limit).await
+}
+
+pub async fn list_by_status(
+    pool: &PgPool,
+    org_id: Uuid,
+    status: Option<&str>,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<Approval>, sqlx::Error> {
+    match status {
+        Some(s) => {
+            let query = format!(
+                "SELECT {SELECT_COLS} FROM approvals \
+                 WHERE org_id = $1 AND status = $2 \
+                 ORDER BY created_at ASC LIMIT $3 OFFSET $4"
+            );
+            sqlx::query_as(&query)
+                .bind(org_id)
+                .bind(s)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(pool)
+                .await
+        }
+        None => {
+            let query = format!(
+                "SELECT {SELECT_COLS} FROM approvals \
+                 WHERE org_id = $1 \
+                 ORDER BY created_at ASC LIMIT $2 OFFSET $3"
+            );
+            sqlx::query_as(&query)
+                .bind(org_id)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(pool)
+                .await
+        }
+    }
 }
 
 pub async fn get(

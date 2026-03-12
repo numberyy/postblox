@@ -6,8 +6,15 @@ use uuid::Uuid;
 
 use super::auth::AuthOrg;
 use super::error::ApiError;
-use super::{clamp_pagination, AppState, PaginationParams};
+use super::AppState;
 use crate::models::{Approval, ApprovalStatus};
+
+#[derive(Deserialize)]
+pub struct ApprovalListParams {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub status: Option<String>,
+}
 
 #[derive(Deserialize)]
 pub struct DecisionRequest {
@@ -24,13 +31,20 @@ pub struct BatchDecisionRequest {
 pub async fn list(
     State(state): State<AppState>,
     AuthOrg(org_id): AuthOrg,
-    Query(params): Query<PaginationParams>,
+    Query(params): Query<ApprovalListParams>,
 ) -> Result<Json<Vec<Approval>>, ApiError> {
-    let (limit, offset) = clamp_pagination(&params);
+    let limit = params.limit.unwrap_or(50).clamp(1, 100);
+    let offset = params.offset.unwrap_or(0).max(0);
 
-    let approvals = crate::db::approvals::list_pending(&state.pool, org_id, offset, limit)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let approvals = crate::db::approvals::list_by_status(
+        &state.pool,
+        org_id,
+        params.status.as_deref(),
+        offset,
+        limit,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(Json(approvals))
 }

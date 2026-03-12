@@ -7,6 +7,7 @@ use uuid::Uuid;
 use super::auth::AuthOrg;
 use super::error::ApiError;
 use super::{get_inbox_for_org, AppState};
+use crate::core::slop;
 use crate::models::{Message, SendMode};
 
 #[derive(Deserialize)]
@@ -71,12 +72,22 @@ pub async fn send(
         SendMode::Approval => {}
         SendMode::AutoApprove => {
             if let Some(ref perm) = permission {
+                let slop_score = {
+                    let input = slop::ClassifierInput {
+                        from_addr: &inbox.email,
+                        subject: req.subject.as_deref(),
+                        text_body: req.text_body.as_deref(),
+                        raw_headers: None,
+                        sender_slop_ratio: None,
+                    };
+                    slop::classify(&input).score as f64
+                };
                 if let crate::core::rules::RuleVerdict::Block { reason, .. } =
                     perm.rules().evaluate(
                         &req.to,
                         req.subject.as_deref().unwrap_or(""),
                         req.text_body.as_deref().unwrap_or(""),
-                        None,
+                        Some(slop_score),
                     )
                 {
                     return Err(ApiError::Forbidden(format!("rule check failed: {reason}")));

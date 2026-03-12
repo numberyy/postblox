@@ -394,6 +394,149 @@ pub fn tool_definitions() -> Vec<Value> {
                 "required": ["domain_id"]
             }
         }),
+        json!({
+            "name": "postblox_list_approvals",
+            "description": "List pending approval requests, paginated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "Max results" },
+                    "offset": { "type": "integer", "description": "Offset for pagination" }
+                },
+                "required": []
+            }
+        }),
+        json!({
+            "name": "postblox_get_approval",
+            "description": "Get a specific approval request by ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "approval_id": { "type": "string", "description": "UUID of the approval" }
+                },
+                "required": ["approval_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_approve_message",
+            "description": "Approve a pending message.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "approval_id": { "type": "string", "description": "UUID of the approval" },
+                    "decided_by": { "type": "string", "description": "Who approved this message" }
+                },
+                "required": ["approval_id", "decided_by"]
+            }
+        }),
+        json!({
+            "name": "postblox_reject_message",
+            "description": "Reject a pending message.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "approval_id": { "type": "string", "description": "UUID of the approval" },
+                    "decided_by": { "type": "string", "description": "Who rejected this message" }
+                },
+                "required": ["approval_id", "decided_by"]
+            }
+        }),
+        json!({
+            "name": "postblox_batch_approvals",
+            "description": "Approve or reject multiple messages at once.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "string" }, "description": "UUIDs of the approvals" },
+                    "status": { "type": "string", "enum": ["approved", "rejected"], "description": "Decision: approved or rejected" },
+                    "decided_by": { "type": "string", "description": "Who made this decision" }
+                },
+                "required": ["ids", "status", "decided_by"]
+            }
+        }),
+        json!({
+            "name": "postblox_get_permissions",
+            "description": "Get the permission settings for an inbox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" }
+                },
+                "required": ["inbox_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_set_permissions",
+            "description": "Update permission settings for an inbox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "send_mode": { "type": "string", "enum": ["shadow", "approval", "auto_approve", "autonomous"], "description": "Outbound sending mode" },
+                    "rules": { "type": "array", "description": "Permission rules as JSON array" }
+                },
+                "required": ["inbox_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_get_trust",
+            "description": "Get trust level for an inbox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" }
+                },
+                "required": ["inbox_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_list_audit",
+            "description": "List audit log entries with optional filters.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "Max results" },
+                    "offset": { "type": "integer", "description": "Offset for pagination" },
+                    "inbox_id": { "type": "string", "description": "Filter by inbox UUID" },
+                    "action": { "type": "string", "description": "Filter by action type" },
+                    "after": { "type": "string", "description": "Filter entries after this ISO datetime" },
+                    "before": { "type": "string", "description": "Filter entries before this ISO datetime" }
+                },
+                "required": []
+            }
+        }),
+        json!({
+            "name": "postblox_list_notifications",
+            "description": "List notification channels.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        json!({
+            "name": "postblox_create_notification",
+            "description": "Create a notification channel.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "provider": { "type": "string", "enum": ["ntfy", "email", "webhook"], "description": "Notification provider" },
+                    "config": { "type": "object", "description": "Provider-specific configuration" }
+                },
+                "required": ["provider", "config"]
+            }
+        }),
+        json!({
+            "name": "postblox_delete_notification",
+            "description": "Delete a notification channel.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "notification_id": { "type": "string", "description": "UUID of the notification channel" }
+                },
+                "required": ["notification_id"]
+            }
+        }),
     ]
 }
 
@@ -684,6 +827,99 @@ pub async fn dispatch(
             client.delete(&format!("/domains/{id}")).await
         }
 
+        "postblox_list_approvals" => {
+            let qs = build_query_string(&[
+                ("limit", optional_i64(&args, "limit").map(|v| v.to_string())),
+                (
+                    "offset",
+                    optional_i64(&args, "offset").map(|v| v.to_string()),
+                ),
+            ]);
+            client.get(&format!("/approvals{qs}")).await
+        }
+
+        "postblox_get_approval" => {
+            let id = require_str(&args, "approval_id")?;
+            client.get(&format!("/approvals/{id}")).await
+        }
+
+        "postblox_approve_message" => {
+            let id = require_str(&args, "approval_id")?;
+            let body = json!({ "decided_by": require_str(&args, "decided_by")? });
+            client.post(&format!("/approvals/{id}/approve"), body).await
+        }
+
+        "postblox_reject_message" => {
+            let id = require_str(&args, "approval_id")?;
+            let body = json!({ "decided_by": require_str(&args, "decided_by")? });
+            client.post(&format!("/approvals/{id}/reject"), body).await
+        }
+
+        "postblox_batch_approvals" => {
+            let body = json!({
+                "ids": args.get("ids").cloned().unwrap_or(json!([])),
+                "status": require_str(&args, "status")?,
+                "decided_by": require_str(&args, "decided_by")?,
+            });
+            client.post("/approvals/batch", body).await
+        }
+
+        "postblox_get_permissions" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            client
+                .get(&format!("/inboxes/{inbox_id}/permissions"))
+                .await
+        }
+
+        "postblox_set_permissions" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let mut body = json!({});
+            if let Some(sm) = optional_str(&args, "send_mode") {
+                body["send_mode"] = json!(sm);
+            }
+            if let Some(rules) = args.get("rules").cloned() {
+                body["rules"] = rules;
+            }
+            client
+                .put(&format!("/inboxes/{inbox_id}/permissions"), body)
+                .await
+        }
+
+        "postblox_get_trust" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            client.get(&format!("/inboxes/{inbox_id}/trust")).await
+        }
+
+        "postblox_list_audit" => {
+            let qs = build_query_string(&[
+                ("limit", optional_i64(&args, "limit").map(|v| v.to_string())),
+                (
+                    "offset",
+                    optional_i64(&args, "offset").map(|v| v.to_string()),
+                ),
+                ("inbox_id", optional_str(&args, "inbox_id")),
+                ("action", optional_str(&args, "action")),
+                ("after", optional_str(&args, "after")),
+                ("before", optional_str(&args, "before")),
+            ]);
+            client.get(&format!("/audit{qs}")).await
+        }
+
+        "postblox_list_notifications" => client.get("/notifications").await,
+
+        "postblox_create_notification" => {
+            let body = json!({
+                "provider": require_str(&args, "provider")?,
+                "config": args.get("config").cloned().unwrap_or(json!({})),
+            });
+            client.post("/notifications", body).await
+        }
+
+        "postblox_delete_notification" => {
+            let id = require_str(&args, "notification_id")?;
+            client.delete(&format!("/notifications/{id}")).await
+        }
+
         _ => Err(McpError::UnknownTool(name.into())),
     }
 }
@@ -719,7 +955,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let defs = tool_definitions();
-        assert_eq!(defs.len(), 28);
+        assert_eq!(defs.len(), 40);
     }
 
     #[test]

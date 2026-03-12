@@ -67,8 +67,8 @@ pub async fn receive_inbound(
         .map(|t| crate::mail::reply_extract::extract_reply(t));
 
     let (threads_result, mid_map_result) = tokio::join!(
-        crate::db::threads::list_by_inbox(&state.pool, inbox.id, 100, 0),
-        crate::db::messages::message_id_headers_by_inbox(&state.pool, inbox.id),
+        crate::db::threads::list_by_inbox(&state.pool, inbox.id, 10_000, 0),
+        crate::db::messages::message_id_headers_by_inbox(&state.pool, inbox.id, 10_000),
     );
     let threads = threads_result.map_err(|e| ApiError::Internal(e.to_string()))?;
     let mid_map = mid_map_result.map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -93,13 +93,14 @@ pub async fn receive_inbound(
             id
         }
         crate::mail::ThreadMatch::New => {
-            let thread =
-                crate::db::threads::create(&state.pool, inbox.id, parsed.subject.as_deref())
-                    .await
-                    .map_err(|e| ApiError::Internal(e.to_string()))?;
-            crate::db::threads::increment_message_count(&state.pool, thread.id, Utc::now())
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let thread = crate::db::threads::create_with_message(
+                &state.pool,
+                inbox.id,
+                parsed.subject.as_deref(),
+                Utc::now(),
+            )
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
             thread.id
         }
     };

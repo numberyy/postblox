@@ -56,25 +56,26 @@ impl RuleSet {
                     if domains.is_empty() {
                         continue;
                     }
-                    let allowed: Vec<String> = domains.iter().map(|d| d.to_lowercase()).collect();
                     for addr in to {
-                        let domain = addr.rsplit('@').next().unwrap_or("").to_lowercase();
-                        if !allowed.iter().any(|a| a == &domain) {
+                        let domain = addr.rsplit('@').next().unwrap_or("");
+                        if !domains.iter().any(|d| d.eq_ignore_ascii_case(domain)) {
                             return RuleVerdict::Block {
                                 rule: "domain_allowlist".into(),
-                                reason: format!("domain '{domain}' not in allowlist"),
+                                reason: format!(
+                                    "domain '{}' not in allowlist",
+                                    domain.to_lowercase()
+                                ),
                             };
                         }
                     }
                 }
                 Rule::DomainBlocklist { domains } => {
-                    let blocked: Vec<String> = domains.iter().map(|d| d.to_lowercase()).collect();
                     for addr in to {
-                        let domain = addr.rsplit('@').next().unwrap_or("").to_lowercase();
-                        if blocked.iter().any(|b| b == &domain) {
+                        let domain = addr.rsplit('@').next().unwrap_or("");
+                        if domains.iter().any(|d| d.eq_ignore_ascii_case(domain)) {
                             return RuleVerdict::Block {
                                 rule: "domain_blocklist".into(),
-                                reason: format!("domain '{domain}' is blocked"),
+                                reason: format!("domain '{}' is blocked", domain.to_lowercase()),
                             };
                         }
                     }
@@ -104,15 +105,17 @@ impl RuleSet {
                     }
                 }
                 Rule::KeywordBlocklist { keywords } => {
-                    let subject_lower = subject.to_lowercase();
-                    let body_lower = text_body.to_lowercase();
-                    for kw in keywords {
-                        let kw_lower = kw.to_lowercase();
-                        if subject_lower.contains(&kw_lower) || body_lower.contains(&kw_lower) {
-                            return RuleVerdict::Block {
-                                rule: "keyword_blocklist".into(),
-                                reason: format!("keyword '{kw}' found in message"),
-                            };
+                    if !keywords.is_empty() {
+                        let subject_lower = subject.to_lowercase();
+                        let body_lower = text_body.to_lowercase();
+                        for kw in keywords {
+                            let kw_lower = kw.to_lowercase();
+                            if subject_lower.contains(&kw_lower) || body_lower.contains(&kw_lower) {
+                                return RuleVerdict::Block {
+                                    rule: "keyword_blocklist".into(),
+                                    reason: format!("keyword '{kw}' found in message"),
+                                };
+                            }
                         }
                     }
                 }

@@ -107,12 +107,16 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
     let mut score: f32 = 0.0;
     let mut signals: Vec<String> = Vec::new();
     let mut is_otp = false;
+    let mut has_list_unsub = false;
+    let mut has_auto_sub = false;
+    let mut has_noreply_sig = false;
 
     // Header-based signals
     if let Some(headers) = input.raw_headers {
         if header_value(headers, "List-Unsubscribe").is_some() {
             score += 0.3;
             signals.push("list-unsubscribe".into());
+            has_list_unsub = true;
         }
 
         if let Some(prec) = header_value(headers, "Precedence") {
@@ -128,6 +132,7 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
             if lower == "auto-generated" || lower == "auto-replied" {
                 score += 0.15;
                 signals.push("auto-submitted".into());
+                has_auto_sub = true;
             }
         }
     }
@@ -136,6 +141,7 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
     if has_noreply(input.from_addr) {
         score += 0.15;
         signals.push("noreply-sender".into());
+        has_noreply_sig = true;
     }
 
     // Cold email patterns in subject
@@ -162,11 +168,6 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
     }
 
     score = score.clamp(0.0, 1.0);
-
-    // Category — use booleans tracked during signal collection
-    let has_list_unsub = signals.iter().any(|s| s == "list-unsubscribe");
-    let has_auto_sub = signals.iter().any(|s| s == "auto-submitted");
-    let has_noreply_sig = signals.iter().any(|s| s == "noreply-sender");
 
     let category = if is_otp {
         Some("otp".into())

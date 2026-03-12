@@ -1,5 +1,3 @@
-#![allow(dead_code)] // consumed by tests; API layer will call in Phase 1
-
 use sqlx::{postgres::PgPoolOptions, PgPool};
 
 pub mod api_keys;

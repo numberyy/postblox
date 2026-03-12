@@ -95,13 +95,16 @@ pub async fn list_by_thread(pool: &PgPool, thread_id: Uuid) -> Result<Vec<Messag
 pub async fn message_id_headers_by_inbox(
     pool: &PgPool,
     inbox_id: Uuid,
+    limit: i64,
 ) -> Result<std::collections::HashMap<Uuid, Vec<String>>, sqlx::Error> {
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT thread_id, message_id_header \
          FROM messages \
-         WHERE inbox_id = $1 AND thread_id IS NOT NULL AND message_id_header IS NOT NULL",
+         WHERE inbox_id = $1 AND thread_id IS NOT NULL AND message_id_header IS NOT NULL \
+         ORDER BY created_at DESC LIMIT $2",
     )
     .bind(inbox_id)
+    .bind(limit)
     .fetch_all(pool)
     .await?;
 
@@ -120,22 +123,22 @@ pub async fn search(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Message>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT m.id, m.inbox_id, m.thread_id, m.message_id_header, m.in_reply_to, \
-         m.references_header, m.from_addr, m.to_addrs, m.cc_addrs, m.subject, \
-         m.text_body, m.html_body, m.extracted_text, m.direction, m.raw_headers, m.created_at \
+    let sql = format!(
+        "SELECT {SELECT_COLS} \
          FROM messages m \
-         JOIN inboxes i ON m.inbox_id = i.id \
-         WHERE i.org_id = $1 AND m.search_vector @@ plainto_tsquery('english', $2) \
-         ORDER BY ts_rank(m.search_vector, plainto_tsquery('english', $2)) DESC, m.created_at DESC \
-         LIMIT $3 OFFSET $4",
-    )
-    .bind(org_id)
-    .bind(query)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
+         JOIN inboxes i ON m.inbox_id = i.id, \
+         plainto_tsquery('english', $2) q \
+         WHERE i.org_id = $1 AND m.search_vector @@ q \
+         ORDER BY ts_rank(m.search_vector, q) DESC, m.created_at DESC \
+         LIMIT $3 OFFSET $4"
+    );
+    sqlx::query_as(&sql)
+        .bind(org_id)
+        .bind(query)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
 }
 
 pub async fn find_existing_message_ids(

@@ -10,6 +10,7 @@ pub async fn create(pool: &PgPool, name: &str) -> Result<Organization, sqlx::Err
         .await
 }
 
+#[allow(dead_code)]
 pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Organization>, sqlx::Error> {
     sqlx::query_as("SELECT id, name, created_at FROM organizations WHERE id = $1")
         .bind(id)
@@ -17,6 +18,7 @@ pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Organization>, 
         .await
 }
 
+#[allow(dead_code)]
 pub async fn list(pool: &PgPool) -> Result<Vec<Organization>, sqlx::Error> {
     sqlx::query_as("SELECT id, name, created_at FROM organizations ORDER BY created_at")
         .fetch_all(pool)

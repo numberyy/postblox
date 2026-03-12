@@ -117,7 +117,7 @@ impl StalwartClient {
         &self,
         from: &str,
         to: &[&str],
-        raw_mime: &[u8],
+        raw_mime: Vec<u8>,
     ) -> Result<(), StalwartError> {
         let mut req = self
             .http
@@ -130,7 +130,7 @@ impl StalwartClient {
             req = req.query(&[("to", addr)]);
         }
 
-        let resp = req.body(raw_mime.to_vec()).send().await?;
+        let resp = req.body(raw_mime).send().await?;
 
         Self::check_response(resp).await?;
         Ok(())

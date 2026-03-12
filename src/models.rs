@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::fmt;
 use std::str::FromStr;
 
@@ -75,6 +73,7 @@ pub struct Organization {
     pub created_at: DateTime<Utc>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateOrganization {
     pub name: String,
@@ -91,6 +90,7 @@ pub struct ApiKey {
     pub last_used_at: Option<DateTime<Utc>>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateApiKey {
     pub org_id: Uuid,
@@ -109,6 +109,7 @@ pub struct Inbox {
     pub created_at: DateTime<Utc>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateInbox {
     pub org_id: Uuid,
@@ -188,6 +189,7 @@ pub struct Webhook {
     pub created_at: DateTime<Utc>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateWebhook {
     pub org_id: Uuid,

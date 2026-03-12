@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::models::Thread;
 
+#[allow(dead_code)]
 pub async fn create(
     pool: &PgPool,
     inbox_id: Uuid,
@@ -15,6 +16,23 @@ pub async fn create(
     )
     .bind(inbox_id)
     .bind(subject)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn create_with_message(
+    pool: &PgPool,
+    inbox_id: Uuid,
+    subject: Option<&str>,
+    message_at: DateTime<Utc>,
+) -> Result<Thread, sqlx::Error> {
+    sqlx::query_as(
+        "INSERT INTO threads (inbox_id, subject, message_count, last_message_at) VALUES ($1, $2, 1, $3) \
+         RETURNING id, inbox_id, subject, message_count, last_message_at, created_at",
+    )
+    .bind(inbox_id)
+    .bind(subject)
+    .bind(message_at)
     .fetch_one(pool)
     .await
 }
