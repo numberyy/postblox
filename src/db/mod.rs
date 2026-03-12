@@ -1,0 +1,32 @@
+#![allow(dead_code)] // consumed by tests; API layer will call in Phase 1
+
+use sqlx::{postgres::PgPoolOptions, PgPool};
+
+pub mod api_keys;
+pub mod inboxes;
+pub mod messages;
+pub mod organizations;
+pub mod threads;
+pub mod webhooks;
+
+pub async fn connect(database_url: &str) -> anyhow::Result<PgPool> {
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(std::time::Duration::from_secs(3))
+        .connect(database_url)
+        .await?;
+
+    tracing::info!("connected to postgres");
+    Ok(pool)
+}
+
+#[cfg(test)]
+pub(crate) async fn test_pool() -> PgPool {
+    let url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
+    PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("failed to connect to test database")
+}

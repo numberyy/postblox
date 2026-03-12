@@ -1,0 +1,737 @@
+How want to build something like agent mail, but fully local for myself.and my agents,.don't want to pay for agent mail.productMar 10Investigated AgentMail service to architect local alternative solutionInvestigated AgentMail service to architect local alternative solutionLet me first look up what AgentMail offers so we can map out the right local alternative for you.Architected self-hosted mail server with API layer for agentsArchitected self-hosted mail server with API layer for agentsGood idea. So AgentMail is essentially an API-first email platform that lets AI agents have their own inboxes to send, receive, and reply to emails with proper threading Agentmail. The core features you'd want to replicate locally are: programmatic inbox creation, two-way email conversations, webhooks/events for incoming mail, threading, and optionally semantic search over messages.
+Here's how I'd architect this for your setup:
+Mail Server — Stalwart or Maddy
+Stalwart is the strongest choice here. It's a Rust-based all-in-one mail server (SMTP + IMAP + JMAP) with a built-in REST API for account management. You can programmatically create mailboxes, and it handles SPF/DKIM/DMARC natively. Maddy (Go) is simpler but less feature-rich. Either runs as a systemd service on Fedora, fits right alongside Pulse.
+API Layer — Elixir/Phoenix
+Since you're already deep in BEAM land with Pulse, a thin Phoenix API that wraps the mail server makes sense. This becomes your "AgentMail API" — endpoints for creating agent inboxes, sending mail, fetching threads, searching. GenServer processes can hold per-agent state, and the BEAM's concurrency model is perfect for handling many agent mailboxes concurrently.
+Event Pipeline — Webhooks via Sieve + Milter or JMAP Push
+Stalwart supports JMAP push notifications and Sieve filtering. When an email arrives for an agent, you pipe the event into your Elixir app (either via JMAP EventSource, a milter, or a Sieve pipe-to script). From there, your Phoenix app can fan out to whatever agent needs to handle it — including Pulse if you want notification triage to pick it up.
+Semantic Search — Optional Embeddings Layer
+Store email bodies + embeddings in SQLite/PostgreSQL with pgvector. Index on ingest. This gives you the "search and reason over emails" capability that AgentMail offers.
+Rough stack:
+┌─────────────────────────────────────────────┐
+│              Your Agents / Pulse             │
+│         (Claude Code, Jido, custom)          │
+└──────────────┬──────────────────────────────┘
+               │  HTTP/JSON API
+┌──────────────▼──────────────────────────────┐
+│         Phoenix API  (your "AgentMail")      │
+│  - POST /inboxes       (create agent inbox)  │
+│  - POST /send          (send as agent)       │
+│  - GET  /threads/:id   (fetch conversation)  │
+│  - GET  /search        (semantic search)     │
+│  - WS   /events        (real-time push)      │
+└──────────────┬──────────────────────────────┘
+               │  JMAP / IMAP / SMTP
+┌──────────────▼──────────────────────────────┐
+│         Stalwart Mail Server                 │
+│  - SMTP inbound/outbound                    │
+│  - IMAP for mailbox access                  │
+│  - JMAP for modern API + push               │
+│  - SPF/DKIM/DMARC baked in                  │
+│  - Sieve filtering                          │
+└──────────────┬──────────────────────────────┘
+               │
+          DNS (your domain)
+      MX, SPF, DKIM, DMARC records
+What you'd need infrastructure-wise:
+A domain you control with DNS access (for MX records, DKIM keys, etc.), a static IP or a VPS with port 25 open (many ISPs block port 25 on residential connections — this is the biggest gotcha for fully local SMTP), and the Stalwart + Phoenix services running on your machine or a cheap VPS.
+If your Bangalore ISP blocks port 25, the pragmatic move is a tiny VPS (Hetzner, Oracle Cloud free tier) running Stalwart as the mail relay, with your Phoenix API either colocated there or at home tunneled via WireGuard.
+Want me to scaffold out the Elixir project structure and Stalwart config, or do you want to hash out the feature set / API design first?I want to create this as a standalone project and open source so other can use it
+It should allow users to create emails for agents and replicate everything agent mail doesMar 10Architected standalone open-source email agent platform replicating existing functionalityArchitected standalone open-source email agent platform replicating existing functionalityLet me dig deeper into AgentMail's actual API surface so we can map the full feature set.Searched the webSearched the webNow let me look at Stalwart's API capabilities since that's the best self-hosted mail server to build on top of.Architected comprehensive design document for open-source Elixir projectArchitected comprehensive design document for open-source Elixir projectNow I have a thorough picture of AgentMail's full API surface and the existing landscape. Let me put together a proper project design doc for you.Envisioned open-source email agent replication frameworkEnvisioned open-source email agent replication frameworkHere's the full design doc for PostBox — an open-source, self-hosted AgentMail alternative.
+I went deep into AgentMail's docs to map their entire API surface — inboxes, threads, messages, drafts, labels, attachments, webhooks, WebSockets, semantic search, reply extraction, domain management — and designed PostBox to replicate all of it.
+The key architectural decisions:
+Stalwart as the mail engine — it already solves the genuinely hard problems (SMTP delivery, SPF/DKIM/DMARC, JMAP, account management via REST API). We don't reinvent email plumbing, we just wrap it with an agent-friendly API.
+Elixir/Phoenix as the API layer — GenServer-per-inbox maps perfectly to the domain, Phoenix Channels give us WebSockets for free, Broadway handles webhook dispatch with backpressure. And it integrates natively with Pulse down the road.
+pgvector for semantic search — configurable embedding provider (Ollama locally, or OpenAI/Anthropic if users prefer). This replicates AgentMail's "search by meaning" feature.
+Built-in MCP server — agents using Claude Code or Cursor can interact with PostBox directly via MCP, which is something AgentMail also offers but PostBox would ship for free.
+The name "PostBox" is a placeholder — happy to brainstorm. A few other options: AgentPost, MailForge, InboxKit, OpenInbox.
+Want me to scaffold the actual Elixir project with mix phx.new and wire up the Stalwart client module first?Postbox designDocument · MD DownloadWhy base on elixir? Is that really that much better? What is the best stack, not related to other projects I'm working onMar 10Weighed technology stacks objectively, favoring Go or PythonWeighed technology stacks objectively, favoring Go or PythonFair challenge. Let me think about this purely on the merits for this project — an open-source email infrastructure tool that other people will self-host and contribute to.
+The key constraints that should drive the stack decision:
+It's infrastructure software. People will run this alongside Stalwart on VPSes, homelab boxes, Docker. It needs to be easy to deploy, low resource footprint, and operationally boring.
+It's open source. Contributor pool matters enormously. The language choice directly determines how many people will send PRs.
+The audience is AI agent developers. Mostly Python and TypeScript shops. They want to docker compose up and forget about it.
+The actual workload is I/O-bound. It's proxying between HTTP clients and Stalwart's API/SMTP, dispatching webhooks, querying Postgres. There's no CPU-heavy computation.
+With that framing, here's my honest assessment:
+Go is the strongest choice. Single static binary, trivial Docker images (~15MB), goroutines handle the concurrency naturally, the infrastructure/DevOps community builds almost everything in Go (Caddy, Traefik, Minio, Gitea, etc.), and it's approachable enough that most developers can contribute. WebSocket support is solid via Gorilla or nhooyr. Background job dispatch is just goroutines + channels — no framework needed. The deployment story is unbeatable: one binary, zero runtime dependencies.
+Python/FastAPI is the runner-up. Maximizes contributor pool since the AI agent community lives in Python. FastAPI's async model handles the I/O workload fine. The downside is deployment — you need a Python runtime, dependency management, Celery or similar for background jobs, and it's heavier operationally. But if you optimize for community growth over operational elegance, it's a valid pick.
+Rust is tempting but wrong here. Yes, Stalwart is Rust, and the performance would be exceptional. But development velocity is slower, the contributor barrier is real, and the performance ceiling of Go is already far beyond what this workload needs.
+Elixir is great technically but bad strategically for OSS. The concurrency model is genuinely ideal for this domain. But the community is small, most AI developers have never touched it, and you'd be filtering out 95% of potential contributors. For a personal tool it'd be fine — for an OSS project meant to grow, it's a handicap.
+TypeScript/Node is reasonable but feels wrong for infrastructure. npm dependency trees, V8 memory overhead, and the single-threaded model (even with workers) make it a weaker choice for something people need to trust and forget about.
+My recommendation: Go with PostgreSQL + pgvector.
+postbox/
+├── cmd/postbox/main.go          # single entry point
+├── internal/
+│   ├── api/                     # HTTP handlers (chi or echo)
+│   ├── stalwart/                # Stalwart API client
+│   ├── mail/                    # inbox, message, thread logic
+│   ├── webhooks/                # dispatch with retries
+│   ├── ws/                      # WebSocket hub
+│   ├── mcp/                     # MCP server
+│   ├── search/                  # pgvector semantic search
+│   └── store/                   # PostgreSQL queries
+├── pkg/sdk/                     # Go client SDK (dogfood)
+├── Dockerfile                   # ~15MB final image
+├── docker-compose.yml
+└── go.mod
+The deploy story becomes: download one binary (or docker compose up), point it at Stalwart, done. That simplicity is what makes self-hosted OSS projects actually get adopted.
+Want me to update the design doc for Go and scaffold the project?But stalwart is rust and already built. Can't we reuse that? Also why rust over go.if you say performance will.be exceptional?Mar 102 / 2Reconsidered Rust's merits for ecosystem integration and self-hosted efficiencyReconsidered Rust's merits for ecosystem integration and self-hosted efficiencyYou're right, and I was too quick to dismiss Rust. Let me actually think this through properly.
+On "reusing Stalwart" — there are two levels of reuse:
+Level 1: Stalwart as a black box (what the current design does). PostBox talks to Stalwart via its REST API and JMAP. In this model the language doesn't matter — Go, Python, Rust, anything can call HTTP endpoints. This works but it's the thinnest integration.
+Level 2: Shared Rust ecosystem. This is the real opportunity. Stalwart's maintainers have extracted a ton of battle-tested crates — mail-parser, mail-builder, mail-auth (DKIM/SPF/DMARC), smtp-proto, jmap-client. If PostBox is Rust, you get all of these for free. You're not just calling Stalwart's API — you're using the same mail parsing, the same DKIM verification, the same JMAP types. When you need to parse an inbound email to extract reply content, strip signatures, pull attachments, or build a threaded view from headers, these aren't trivial tasks, and Stalwart's ecosystem already solves them correctly.
+On Rust vs Go specifically:
+The contributor pool argument I made cuts both ways. Yes, Go has more developers in general. But infrastructure-tool-for-email-nerds-who-self-host is a niche where Rust developers are overrepresented. Look at what the self-hosting community actually gravitates toward — Stalwart over Maddy, Kanidm over Keycloak, Zola over Hugo. The audience for this project will skew Rust-friendly.
+The development velocity argument is also weaker than I made it sound. The async Rust ecosystem has matured a lot. Axum (from the Tokio team) is essentially "chi/echo but Rust" — clean routing, middleware, extractors. SQLx gives you compile-time checked queries against Postgres. Tokio handles all the concurrency. The framework layer isn't where you'd lose velocity. And email parsing is where you'd actually lose the most velocity in Go — writing or finding good MIME parsing, header handling, threading logic — stuff that's already solved in Stalwart's crates.
+The memory/resource argument actually matters for this project specifically. People are going to run this on $5 VPSes alongside Stalwart. A Go binary idles at 30-50MB, a Rust binary at 3-5MB. On a 1GB VPS running Stalwart + Postgres + PostBox + maybe Ollama, that headroom is real.
+So I'll reverse my recommendation: Rust with Axum is the right call here. The reasoning:
+
+Shared crate ecosystem with Stalwart (mail-parser, mail-builder, mail-auth, jmap-client)
+Same deployment story as Go (single static binary, tiny Docker image)
+Lower resource footprint on the small VPSes your users will run
+The audience for self-hosted email infra skews toward Rust
+Potential to contribute agent-facing features upstream to Stalwart eventually
+Type safety is genuinely useful for email — MIME, headers, threading, and encoding are edge-case minefields
+
+The stack becomes:
+Rust + Axum         — HTTP API, WebSocket, MCP server
+SQLx + PostgreSQL   — data layer, compile-time query checks
+pgvector            — semantic search
+Tokio               — async runtime (same as Stalwart)
+mail-parser         — parse inbound emails (Stalwart crate)
+mail-builder        — construct outbound emails (Stalwart crate)
+Stalwart            — SMTP/IMAP/JMAP (managed via its REST API)
+Want me to update the design doc for this stack and scaffold the Rust project with cargo init?Ultrathink, and give me the best roadmap and specs for something that is
+- performance first
+- no deep dependencies that require upstream lib updates for new features. Balance this with development speed, if something takes too long to build ourselves, we can use dependencies in the meanwhile
+- replicates agent mail
+- supports multiple inboxes, and creating custom inboxes which just act as links to your actual gmail accounts with auto sync periods (so agent reads your email, deletes stuff, but everything's syncs up with your codebase at sync time, and for sending emails permissions srr required for agent or can be enabled by default or if you can think of more innovative ways of handling this)
+- can handle all email types, creating and reading and parsing properly for all.types
+-simple and easy to expose to agents and non technical users to connect to agents. Allows very deep config for tech users for modifying and adding features and improving/tuning it.Show moreMar 102 / 2Architected comprehensive email infrastructure balancing performance, dependencies, and innovative permission modelsArchitected comprehensive email infrastructure balancing performance, dependencies, and innovative permission modelsLet me think deeply about this and put together a thorough spec.Synthesized requirements and prepared comprehensive technical specificationSynthesized requirements and prepared comprehensive technical specificationNow let me write the comprehensive spec.Architected performance-centric email agent system balancing dependencies and customizationArchitected performance-centric email agent system balancing dependencies and customizationHere's the full spec. Let me hit the key decisions and what I think makes this genuinely better than AgentMail, not just a clone:
+The big insight: Two inbox types. Native inboxes (Stalwart-backed, your domain) work like AgentMail. But Linked inboxes are the differentiator — connect your actual Gmail via OAuth, agent reads your real email, operates on a local cache for speed, and syncs writes back at configurable intervals. AgentMail can't do this. It only gives agents new addresses.
+Permission engine is the other differentiator. AgentMail gives agents full access with zero guardrails. PostBox has four send modes (auto / approval / shadow / disabled), auto-approval rules (domain allowlists, reply-to-existing threads, rate limits), and progressive trust where agents earn autonomy over time based on human feedback. Every action is audit-logged.
+On the Rust + Stalwart decision: mail-parser gives us zero-copy parsing of every MIME type across 41 character encodings, fuzz-tested, battle-tested with millions of real emails. Building that ourselves would take months. mail-builder handles RFC 5322 construction. But both are pure libraries with no external deps — they're the safest kind of dependency. Everything else that's core (permissions, sync engine, webhooks, MCP, threading) we build ourselves.
+The dependency tier system keeps us honest: Tier 1 (trust — tokio, axum, sqlx, mail-parser), Tier 2 (use behind traits — async-imap, lettre, reqwest, can swap later), Tier 3 (build ourselves — everything that's core to our value).
+For non-technical users: a web dashboard built with server-rendered HTML + htmx, shipped inside the single binary. "Connect Gmail" button, approval queue with approve/reject, visual permission toggles. No npm, no build step.
+24-week roadmap gets you to v1.0 with full AgentMail parity + linked inboxes + permissions + MCP + dashboard. Phase 1 (weeks 3-5) is a usable product for native inboxes. Phase 3 (weeks 9-12) is when linked inboxes land and you're ahead of AgentMail.
+Want to start scaffolding the Cargo workspace and Phase 0?Postbox full specDocument · MD DownloadIf I want to monetize this later,.does stalwart or any dependency restrict this?
+How to approach this ethically? And also add in long term vision or plan to replace these dependenciesMar 102 / 2Investigated licensing constraints and charted ethical monetization pathwayInvestigated licensing constraints and charted ethical monetization pathwayGreat question — let me check the actual licenses before giving you advice.Analyzed licensing implications and monetization constraints comprehensivelyAnalyzed licensing implications and monetization constraints comprehensivelyNow I have the full picture. This is actually a nuanced situation with some good news and one important wrinkle.
+Here's the breakdown:
+The Stalwart crates are completely fine. mail-parser, mail-builder, mail-send, smtp-proto are all dual-licensed Apache-2.0 OR MIT GitHub. You can use them in closed-source commercial software, modify them, ship them, sell them — no restrictions whatsoever. These are the crates PostBox actually links against, so this is the license that matters for your binary.
+Stalwart the server is AGPL-3.0. The Stalwart server is dual-licensed under AGPL-3.0 and a proprietary Stalwart Enterprise License Medevel. This is the critical one. AGPL means: if you modify Stalwart's code and provide it as a network service, you must release those modifications under AGPL. But here's the thing — PostBox doesn't modify or link against Stalwart's server code. PostBox talks to Stalwart over HTTP/IMAP/SMTP, the same way any email client talks to any mail server. This is explicitly not a derivative work under any license. You're fine.
+But there's a strategic risk. If your monetization model involves shipping a hosted/managed version of PostBox (SaaS), you're bundling Stalwart as part of that service. You're not modifying it, so AGPL technically doesn't trigger. But it creates ambiguity that enterprise customers' legal teams will flag. And if you ever need to patch Stalwart for your use case, AGPL locks you into publishing those patches.
+Here's my honest assessment across monetization models:
+Model 1 — Open-core (PostBox is MIT, sell premium features/support). Totally fine. PostBox is your code, MIT licensed. Stalwart is a recommended dependency that users install themselves. You're not distributing Stalwart. No license issues at all.
+Model 2 — Managed/hosted SaaS (you run PostBox + Stalwart for customers). This works legally — running unmodified AGPL software as part of your stack is allowed. You just can't modify Stalwart without publishing those changes. But some enterprise customers have blanket policies against AGPL in their supply chain, even when it doesn't apply to them. This is a sales friction issue, not a legal one.
+Model 3 — Appliance/bundled distribution (ship a Docker image with Stalwart inside). This is where AGPL gets real. Distributing Stalwart means you must comply with AGPL for the Stalwart portion — provide source, preserve license notices, etc. If you've modified it, publish the modifications. If you haven't modified it, you're still distributing AGPL software, which scares some buyers. You could either buy a Stalwart Enterprise License, or make Stalwart a user-installed prerequisite rather than bundling it.
+All other Rust dependencies — tokio, axum, sqlx, async-imap, reqwest, lettre — are MIT or Apache-2.0. Zero commercial restrictions.
+Now, for the ethical approach and long-term independence plan, let me put together the addendum to the spec:Synthesized monetization constraints and ethical implementation strategySynthesized monetization constraints and ethical implementation strategyHere's the bottom line:
+You're completely clear to monetize. Every single crate that PostBox compiles against — mail-parser, mail-builder, mail-send, smtp-proto, mail-auth, tokio, axum, sqlx, all of them — is MIT or Apache-2.0. Zero restrictions on commercial use, closing source, selling, anything.
+Stalwart the server is AGPL-3.0, but it doesn't matter for your architecture. PostBox talks to Stalwart over HTTP/IMAP/SMTP as a separate process. That's like a web app talking to Postgres — no derivative work, no license obligations on PostBox. The key thing is to never bundle Stalwart inside your Docker image. Keep it as a separate service in the compose file that users pull from Stalwart's own registry.
+The ethical framework I laid out has three pillars:
+First, give back financially — sponsor Stalwart Labs and key crates. If PostBox generates revenue, allocate 5% to upstream deps. This isn't charity, it's infrastructure investment.
+Second, give back in code — bugs found in mail-parser get upstream PRs first. Any generally-useful email tooling you build (reply extraction, threading library) gets published as separate MIT crates, not hoarded inside PostBox.
+Third, don't compete with your dependencies — PostBox sits on top of Stalwart, not instead of it. Reach out to Stalwart Labs before launching. Recommend Stalwart Enterprise in your docs for users who need those features.
+For long-term independence, the replacement roadmap has clear triggers — don't build postbox-mta prematurely. The MIT-licensed Stalwart crates (smtp-proto, mail-auth, mail-send) are your building blocks when the time comes. You'd be building the orchestration layer, not reimplementing DKIM from scratch. Estimated 3-4 months when needed, but that's a year 2+ decision.
+Recommended monetization: open-core. PostBox Community (MIT, free forever, genuinely useful) + PostBox Pro (commercial license, multi-tenancy, advanced analytics, SSO, priority support). BSL 1.1 for the Pro extensions is a good middle ground — source-visible, converts to open source after 3-4 years.
+Want to start building, or do you want to nail down the name and GitHub repo setup first?Postbox licensing and independenceDocument · MD DownloadGood. let's start with name, github repo, and just a started doc to nail down and set this project up properly. ensure repo is properly setup for open source project, and it follows best practices and structureMar 10Architecting open-source repository structure and nomenclatureArchitecting open-source repository structure and nomenclatureLet me first check name availability for our top candidates.Validated project name and architected open source structureValidated project name and architected open source structureGood — "postbox" isn't taken on crates.io. Let me scaffold the complete project.Orchestrated open source project setup with best practicesOrchestrated open source project setup with best practicesClaude's response was interruptedRetrydont create everything here! create a md doc like earlier synthesizing best practices to setup this project and everything. And let's go with postbox as the nameMar 102 / 2Synthesized project setup best practices for Postbox documentationSynthesized project setup best practices for Postbox documentationHere's the complete setup guide. The key things I want to highlight:
+cargo-deny is your license firewall. The deny.toml config sets copyleft = "deny", which means CI fails if any GPL/AGPL crate sneaks into your dependency tree. This is non-negotiable for future monetization — it catches problems before they ship.
+The initial commit checklist is deliberately minimal. Just a binary that starts, connects to Postgres, and serves /health. Everything else comes in subsequent PRs. This ensures the repo is always in a buildable, testable state from day one.
+The first 5 PRs are sequenced to establish patterns. Each one introduces a codebase convention (auth middleware → handler/core/db flow → parsing pipeline → outbound email → inbound email) that all future code follows. After PR #5, you have the core loop working and that's your v0.1.
+Squash merges only. Clean git history matters for an OSS project. Conventional commits format (feat:, fix:, docs:) makes changelogs easy to generate.
+ARCHITECTURE.md is the secret weapon. Most OSS projects skip this. It's the single most valuable thing for getting contributors oriented. Without it, people open the repo, see 30 files, and close the tab.
+You now have three documents that together form the complete project blueprint: the full technical spec, the licensing & independence plan, and this setup guide. Ready to start writing actual Rust whenever you are.Postbox setup guideDocument · MD Downloadcheck domain availability?Mar 10Identified naming conflict and explored alternative solutionsIdentified naming conflict and explored alternative solutionsBad news — "Postbox" is already a well-known email client (postbox-inc.com, acquired by eM Client). Using this name would create brand confusion and potential trademark issues. We need to pick something else.
+Let me check alternatives:Evaluated domain availability and brainstormed alternative naming optionsEvaluated domain availability and brainstormed alternative naming optionsAll three are taken: Postbox (email client, acquired by eM Client), InboxKit (cold email infra), Mailforge (cold email infra). The email space is crowded with names.
+Let me think of names that are distinctive, not generic email words, and available:Anticipated domain availability inquiry requirementsAnticipated domain availability inquiry requirementsHermes is also heavily used in the email space. The problem is that every mythological/postal metaphor is taken.
+Here's where I'd land — names that are distinctive, short, unused in the email space, and communicate the concept:A few quick notes on each while you're thinking:
+Posta — Italian/Spanish for "mail." Short, 5 letters, looks good as a CLI command (posta send), and unlikely to conflict with existing email products. posta.dev is the natural domain.
+Outbox — Very clear metaphor for agent email. "Your agent's outbox." But might conflict with some existing products.
+Pigeon — Carrier pigeon → agent carries messages. Memorable, fun, works great for branding. pigeon.dev may be taken though.
+Mailpilot — More descriptive, but longer. Communicates that the agent "pilots" your email.
+Or go a completely different direction — I'm open to whatever resonates with you.only give me suggestions that are actually availableMar 102 / 2Verified availability across multiple platforms before suggesting namesVerified availability across multiple platforms before suggesting namesFair point. Let me actually check before suggesting anything.Verified availability across multiple package repositories systematicallyVerified availability across multiple package repositories systematicallyLet me do this properly — batch check actual availability across the registries that matter.Anticipated user constraint regarding availabilityAnticipated user constraint regarding availabilityHere are the names that are available across ALL four registries (crates.io + PyPI + npm + GitHub org):
+NameVibeNotesironmailRust + mail. Strong, durable."Iron" is a known Rust web framework name, but the crate is dormant. Clean namespace.ferromail"Ferro" = iron in Latin/Italian. Rust → iron → ferro.More unique, less collision risk. ferromail.dev likely available.oxpostOx = strength/Rust mascot adjacent. Post = mail.Short, punchy. oxpost.dev likely available.
+And these are available on 3 of 4 (only GitHub org taken, which is fine — you'd use your own username or create an org):
+NameAvailable onVibeletterpostcrates + PyPI + npmTraditional, clearmailpipecrates + PyPI + npmTechnical, descriptivesendwellcrates + PyPI + npmFriendly, approachablesentboxcrates + PyPI + npm"Agent sends from sentbox"mailsteedcrates + PyPI + npmFast horse carrying mailmailfoldcrates + PyPI + npmFold/envelope metaphor
+GitHub org names being "taken" often just means an empty/inactive profile — you'd publish under github.com/your-username/projectname anyway.Every name above is verified available on crates.io, PyPI, and npm right now. Pick whichever resonates and I'll update the setup guide and check the .dev domain availability for it.also check if web domain is availableMar 102 / 2Eliminated trademark conflict, vetted remaining domain candidatesEliminated trademark conflict, vetted remaining domain candidatesIronMail is out too — it was a CipherTrust/McAfee email security appliance, plus ironmail.app already exists. Let me check the truly clean ones.Pivoted to alternative method after command failurePivoted to alternative method after command failurehost isn't available in this container. Let me use curl/dig alternatives.Investigated domain registration status and ownership detailsInvestigated domain registration status and ownership detailsNo active websites on any of them. But registered-but-parked is still possible. Let me verify the top candidates via WHOIS.Acknowledged technical limitation regarding domain availability verificationAcknowledged technical limitation regarding domain availability verificationI can't reliably do WHOIS/RDAP lookups from this sandbox — the network restrictions block the relevant APIs. Here's what I can confirm and what you'd need to verify yourself in 30 seconds:
+Verified available (crates.io + PyPI + npm):
+Namecrates.ioPyPInpmGitHub orgDomain (.dev)ferromail✅✅✅✅Check yourselfoxpost✅✅✅✅Check yourselfmailsteed✅✅✅❌ (org taken, fine)Check yourselfsentbox✅✅✅❌ (org taken, fine)Check yourselfmailfold✅✅✅❌ (org taken, fine)Check yourself
+Disqualified during research:
+
+Postbox — existing email client (postbox-inc.com)
+IronMail — was a CipherTrust/McAfee product, ironmail.app exists
+InboxKit — existing cold email SaaS
+Mailforge — existing cold email SaaS
+
+Quick domain check — takes 30 seconds:
+Go to instantdomainsearch.com and type each name. It shows .dev, .io, .com availability in real-time as you type. Pick the one where all three are green, then let me know and I'll update all the spec docs.https://instantdomainsearch.com/domain-extensions?q=postboxMar 10Identified JavaScript limitation and opted for transparencyIdentified JavaScript limitation and opted for transparencyUnfortunately the site renders domain results via client-side JavaScript, so I'm only getting the static page shell. The one thing I can see is that postbox.com shows a "Buy/Acquire" link, meaning it's taken or premium — which aligns with Postbox being an existing email client brand.
+I can't reliably check domain availability from this environment. Here's what I'd recommend — takes 60 seconds:
+Go to instantdomainsearch.com yourself and type each of these:
+
+ferromail
+oxpost
+mailsteed
+sentbox
+mailfold
+
+Look for green checkmarks on .dev, .io, and .com. Then also type postbox to confirm it's taken across the board (it almost certainly is given postbox-inc.com exists).
+All five names above are confirmed available on crates.io, PyPI, and npm. The domain is the last piece. Once you've checked, tell me which one has clean availability and I'll update all the docs and we can start scaffolding the actual project.are you sure the product idea is not already there?Mar 10Scrutinized existing open-source solutions to validate product uniquenessScrutinized existing open-source solutions to validate product uniquenessGood instinct. Let me actually verify this properly instead of assuming.Surveyed existing landscape against proposed conceptSurveyed existing landscape against proposed conceptOkay, this is an honest assessment. Here's the real competitive landscape:
+Existing projects that overlap with our idea:
+ProjectWhat it doesHow it overlapsWhat it's missingAgentMail (SaaS)Full email infra for AI agents — programmatic inboxes, threading, webhooks, semantic search, MCPThis IS the product we're cloningNot self-hosted, not open-source, costs moneyAgenticMail (open source)Full AI workforce platform — email, SMS, calendar, browser automation, Google Meet, 370+ tools, 145 SaaS integrations, DLP, complianceThis is very close to our idea, and it's MIT licensed, self-hosted, TypeScript/NodeIt's an OpenClaw-specific mega-platform, not a standalone email API. It's trying to be everything — workforce management, compliance, SOC2 reports, Google Meet. It's not focused on being a clean, embeddable email API for any agent frameworkMailCat (open source)Temporary mailboxes for AI agents — create, receive, auto-extract verification codesOverlaps on "email for agents"Receive-only (no sending), temporary (auto-delete after 1hr), Cloudflare Workers only, no threading/labels/search, designed for verification flows not persistent emailATAT (open source)Email client for AI agents via IMAP/SMTP aliasesOverlaps on "agents use email"OpenAI-specific, single email account with aliases, no programmatic inbox creation, no API layerInbox Zero (open source)AI email assistant — triage, auto-reply, unsubscribeOverlaps on "AI + email"It's an email CLIENT, not infrastructure. Manages your existing inbox, doesn't create new ones for agentsMail-0/Zero (open source)Self-hosted email app with AI agentsOverlaps on "self-hosted AI email"It's an email CLIENT/UI, not an API platform for programmatic agent accessmcp_agent_mailInter-agent messaging via MCP + Git + SQLiteOverlaps on "agent mail"Not real email — it's an internal messaging system between coding agents, not SMTP/IMAP
+The honest gap analysis:
+AgenticMail is the closest competitor and it's already open source + self-hosted. BUT it's a sprawling "AI workforce" platform (770+ files, Google Meet integration, DLP, SOC2 reports, 145 SaaS integrations). It's tied to OpenClaw and is trying to be Notion + Slack + Gmail + HR system all at once.
+What genuinely doesn't exist yet:
+
+A focused, standalone, embeddable email API for agents — framework-agnostic (not tied to OpenClaw), just email (not a mega-platform), clean REST API + SDKs + MCP that any agent framework can use
+Linked inbox sync with permission guardrails — connect your Gmail, agent reads it with configurable permissions (read-only, approval-required sends, progressive trust). Nobody does this.
+Performance-first Rust implementation — everything in this space is TypeScript/Python. A single static binary that idles at 5MB is genuinely differentiated for the self-hosting audience.
+
+My revised honest take:
+The core "email API for agents" concept exists (AgentMail SaaS, AgenticMail open-source). You would NOT be the first to market with this idea. But there are genuine gaps:
+
+AgenticMail is a sprawling platform, not a focused email API. Our "do one thing well" approach is different.
+Nobody does linked inbox sync with permissions. This is genuinely novel.
+Nobody has a Rust implementation. The performance/resource story is real for self-hosters.
+Nobody has progressive trust. Shadow → approval → auto is a new concept.
+
+The question is: is the differentiation enough? The linked inbox sync + permission engine + Rust performance story is strong, but you should go in with eyes open that AgenticMail exists and covers a lot of the same ground, even if it's doing it differently.
+Want to proceed with this differentiation angle, pivot the concept to lean harder into the unique features (linked inboxes + permissions being the core, not just another AgentMail clone), or rethink entirely?https://github.com/agenticmail/agenticmail
+do a deep review of this, the codebase, the stack, developer etcMar 10Synthesized codebase analysis to craft comprehensive technical reviewSynthesized codebase analysis to craft comprehensive technical reviewHere's my honest deep review:
+
+AgenticMail is almost certainly a solo AI-generated project with zero real users. Here's the evidence:
+Traction: Zero.
+
+OSS repo: 0 stars, 0 forks, 0 watchers
+Enterprise repo: 0 stars, 0 forks, 0 watchers
+1 contributor on both repos
+0 issues, 0 PRs from external contributors
+npm package likely has negligible downloads
+No community at all — Discord link exists but likely empty
+
+Development pattern: Classic AI code generation.
+
+57 commits on the OSS repo, 199 on enterprise — all from one person
+770+ source files and 82 engine modules for a project with zero users is a red flag. Real projects grow iteratively. This was generated in bulk.
+The feature list reads like a wishlist, not a changelog. "145 SaaS integration adapters", "370+ tools", "51 soul templates", "10 database backends" — this is breadth without depth. Nobody builds 145 SaaS adapters before having their first user.
+The README for the enterprise version is ~15,000 words. Real projects don't write 15K-word READMEs before getting a single star. This reads like an LLM was told "write the most comprehensive README possible."
+27 releases in a month (v0.5.340 on March 5, 2026) — that's version-bumping, not meaningful releases.
+
+Architecture: Over-engineered, under-validated.
+
+10 database backends (Postgres, MySQL, SQLite, MongoDB, DynamoDB, Turso, PlanetScale, CockroachDB, Supabase, Neon) for a project nobody uses. Real projects pick one and add more when users ask.
+28 dashboard pages before a single user. This is building the cockpit before knowing if the plane flies.
+Claims "SOC 2 Type II reports" — a startup with zero users does not have SOC 2. They likely generate a template report that checks boxes, not an actual audited compliance framework.
+"Agents join Google Meet and speak like humans" — this is an extremely complex feature (virtual audio routing, real-time TTS, browser automation in a meeting context). I'd be surprised if this actually works reliably.
+
+Developer: Ope Olatunji
+
+Single developer, appears to be a solo builder
+No other notable public repos or known track record in the email/infra space
+The project is heavily OpenClaw-coupled — AgenticMail exists primarily as an OpenClaw plugin, which is itself a niche framework
+
+Stack: TypeScript/Node.js + Express + SQLite
+
+Express API server, nodemailer for SMTP, imapflow for IMAP
+SQLite as default storage (fine for dev, but they claim "enterprise")
+Uses Stalwart via Docker for the actual mail server — same approach we designed
+Monorepo with 5 npm packages
+
+What actually works vs. what's claimed:
+The core email flow (send/receive via Stalwart + Gmail relay) probably works — it's straightforward nodemailer + imapflow. The outbound guard (regex scanning for API keys in outgoing emails) probably works. The rest — 145 SaaS adapters, Google Meet voice, DLP scanning, SOC2 reports, workforce management — ranges from "stub implementation" to "generates a template" to "might crash on first real use."
+Bottom line for your project:
+AgenticMail is not a real competitor. It's a solo developer's AI-generated megaproject with no users, no community, and no validation. The feature claims are aspirational, not battle-tested. Nobody has actually used 145 SaaS adapters or run SOC2 compliance reports from this tool.
+This actually reinforces the opportunity. The space is wide open for a focused, well-built, actually-tested project. The gap isn't "does anything exist" — the gap is "does anything exist that actually works, has users, and is maintained by a credible team." AgentMail (YC) is the only real player, and they're SaaS-only.
+Your differentiation — focused email API (not a mega-platform), Rust performance, linked inbox sync with permissions, progressive trust — is still genuinely unoccupied. Want to proceed?how is our architecture better or different?Mar 102 / 2Weighed honest architectural comparison over promotional framingWeighed honest architectural comparison over promotional framingHonestly, let me be careful here. Some of what we designed is better, some is different-not-better, and some things AgenticMail actually got right that we should learn from. Let me be real about all three.
+Where our architecture is genuinely better:
+Performance and resource footprint. This is the clearest win. AgenticMail is a Node.js Express app with SQLite. Our Rust + Axum + Postgres design will idle at 5MB vs their ~80-150MB. On a $5 VPS running alongside Stalwart, this matters. Their architecture can't serve concurrent IMAP sync for 100 linked accounts without blocking the event loop or leaking memory in long-running connections. Tokio tasks handle this natively.
+Email parsing. They use imapflow and nodemailer — solid JS libraries, but they parse email in JavaScript. We use mail-parser, which is zero-copy, fuzz-tested, handles 41 character encodings, and has been battle-tested in Stalwart itself processing millions of real emails. For edge-case MIME messages (nested multipart, legacy CJK encodings, malformed headers from 1990s mailing lists), our parsing pipeline will be more correct and significantly faster.
+Linked inbox sync as a first-class concept. AgenticMail has Gmail relay mode (Gmail sub-addressing: you+agentname@gmail.com) which is clever but limited — it's not the same as "agent reads your actual inbox with permissions." Their relay polls Gmail IMAP every 30 seconds and delivers to the local Stalwart. That's inbound routing, not bidirectional sync with conflict resolution. Our sync engine design — local cache, IMAP IDLE for real-time, write-back queue, conflict resolution state machine — is architecturally different. It's a genuinely harder problem that they haven't attempted.
+The permission engine. AgenticMail has an outbound guard (regex scanning for leaked credentials) and a manual approval flow for blocked emails. That's one narrow slice of permissions. Our design has four send modes (auto/approval/shadow/disabled), auto-approval rules, progressive trust, per-inbox permission config, and a full audit log. Their approach is "scan and block if dangerous." Ours is "granular control over what agents can do, with trust that evolves over time." Different philosophy, genuinely more useful for production deployments where you need nuanced control.
+Single binary deployment. docker compose up and you have a Rust binary + Stalwart + Postgres. Their deployment requires Node.js 20+, npm global install, Docker for Stalwart, PM2 for process management, and a setup wizard. Our deployment story is simpler and more robust — fewer moving parts, no runtime dependencies, no process manager.
+Where we're different but not necessarily better:
+Database choice. We chose Postgres + pgvector. They support 10 backends. For an open-source project, their approach is more welcoming — someone with existing MySQL or MongoDB can use AgenticMail without adding Postgres. Our approach is more opinionated (and we get pgvector for free), but it's a tradeoff, not a strict win. For v1 this is fine; we can add more backends later if demand exists.
+Framework independence vs. OpenClaw integration. We designed for framework-agnostic use (any agent via REST/MCP). They're deeply coupled to OpenClaw with a dedicated plugin, system prompt injection, and skill definitions. Neither approach is wrong — theirs gives a better out-of-box experience for OpenClaw users, ours is more portable. But most AI developers aren't using OpenClaw, so our bet on framework independence is probably the right call for adoption.
+Monorepo with separate packages vs. single crate. Their @agenticmail/core, @agenticmail/api, @agenticmail/mcp split is actually good design — the core SDK is usable independently of the API server. Our single-crate approach is simpler for contributors but means you can't use our core logic as a library without pulling in the full binary. Something to consider for later.
+Where AgenticMail got things right that we should learn from:
+The Gmail relay mode is smart. Using Gmail's + sub-addressing (you+agentname@gmail.com) as a zero-config gateway is genuinely clever. It means users can get internet email working in 2 minutes without buying a domain, setting up DNS, or configuring Stalwart's outbound SMTP. We should steal this idea for our Phase 1. It dramatically lowers the barrier to "first email sent" which is critical for adoption.
+The interactive CLI shell. Their 44-command REPL with arrow key navigation, inline email reading, and pagination is a nice developer experience. We designed an API and MCP server but didn't plan a CLI shell. For a developer tool, this matters — being able to agenticmail> /inbox and see your agent's email without writing code or using curl is a good onboarding experience.
+The outbound guard concept. Scanning outgoing emails for accidentally leaked API keys, passwords, and PII before sending is a great default safety feature. We have it in our permission engine design, but they implemented it as a simple always-on regex scanner, which is the right level of sophistication for v1. We don't need to over-engineer this.
+SMS/phone number access. They integrated Google Voice for giving agents phone numbers. We didn't include this at all. For agents that need to do verification flows or receive SMS-based OTPs, this is genuinely useful. Not critical for our v1, but worth noting as a feature gap.
+What's actually the same:
+Both projects use Stalwart as the mail server via Docker, talk to it via its REST API for account management, use SMTP for sending and IMAP for receiving, and expose a REST API + MCP server for agent interaction. The core architecture is fundamentally the same plumbing. The differences are in what sits on top of that plumbing and how well it's built.
+Where neither of us has been validated:
+Here's the uncomfortable truth — neither architecture has been tested with real users at any scale. Their 0 stars and our 0 lines of code are both at the same point: unvalidated. The best architecture is the one that ships, gets users, and iterates based on feedback. Right now, the most important architectural advantage we could have is simply building something focused that works reliably, rather than trying to be comprehensive before anyone's used it.
+My recommendation for how to proceed:
+Steal the Gmail relay idea from AgenticMail for Phase 1 — it's the fastest path to "agent sends real email." Keep the Rust + focused API + linked inbox sync + permissions differentiation as the long-term moat. Skip the mega-platform temptation (they have 770 files and 0 users — that's a warning, not a goal). Ship something small that actually works, get 10 real users, then iterate.
+Want me to revise the roadmap to incorporate these lessons?explain ours vs their gmail relay planMar 10Deconstructed competing Gmail integration methodologiesDeconstructed competing Gmail integration methodologiesTwo fundamentally different approaches to the same problem: "how does an agent interact with real email?"
+AgenticMail's Gmail Relay: Agent gets a fake address that routes through your Gmail
+Agent's address: you+salesbot@gmail.com
+                 ^^^^^^^^^^^^
+                 Gmail sub-addressing trick
+
+SENDING:
+  Agent calls POST /mail/send
+    → AgenticMail connects to Gmail's SMTP (smtp.gmail.com)
+    → Sends as "you+salesbot@gmail.com" via your Gmail credentials
+    → Recipient sees email from "you+salesbot@gmail.com"
+    → Reply-To header set so replies come back to the right agent
+
+RECEIVING:
+  Someone replies to you+salesbot@gmail.com
+    → Gmail receives it (it's your Gmail account)
+    → AgenticMail polls your Gmail IMAP every 30 seconds
+    → Finds new message addressed to you+salesbot@...
+    → Routes it to the salesbot's local Stalwart mailbox
+    → Agent reads it from local Stalwart via IMAP
+The key insight: Gmail treats you+anything@gmail.com the same as you@gmail.com — it all lands in the same inbox. AgenticMail uses the +suffix to route messages to different agents. One Gmail account, many agents.
+What's good about this:
+
+Zero setup. No domain purchase, no DNS, no DKIM configuration.
+Works in 2 minutes with just a Gmail app password.
+Gmail handles deliverability — your emails land in inboxes because they're coming from Gmail's infrastructure.
+Free. No Stalwart outbound SMTP config needed.
+
+What's limited:
+
+Agents don't have real addresses. you+salesbot@gmail.com looks unprofessional and reveals your personal email.
+Agents can't read your actual inbox. They only see messages explicitly addressed to their +suffix.
+30-second polling delay on inbound. Not real-time.
+Gmail rate limits apply (500 sends/day for consumer, 2000 for Workspace).
+All agents share one Gmail account's reputation. If one agent spams, all agents are affected.
+No access to your existing email history, threads, contacts.
+
+Our Linked Inbox: Agent connects to your actual Gmail and operates on it
+Agent's access: Full read/write to your real Gmail inbox
+                (with permission guardrails)
+
+SETUP:
+  User clicks "Connect Gmail" in web dashboard
+    → OAuth consent flow (Google's standard)
+    → PostBox stores encrypted OAuth tokens
+    → Sync engine starts a dedicated Tokio task for this account
+
+INITIAL SYNC:
+  PostBox pulls all messages from Gmail API into local Postgres cache
+    → Headers, bodies, labels, thread structure
+    → Attachments stored locally
+    → Embeddings generated for semantic search
+
+ONGOING SYNC:
+  Two mechanisms running concurrently:
+    1. IMAP IDLE — persistent connection, Gmail pushes new message notifications instantly
+    2. Periodic full reconciliation (configurable: 1-60 min) — catches anything IDLE missed
+
+READING:
+  Agent calls GET /messages
+    → Served instantly from local Postgres cache (sub-5ms)
+    → Agent sees your REAL inbox — same threads, labels, everything
+    → No 30-second polling delay
+
+WRITING (this is where permissions matter):
+  Agent calls POST /send
+    → Permission engine checks: what mode is this inbox in?
+
+    If "auto":
+      → Send immediately via Gmail API
+      → Message appears in your Gmail Sent folder
+
+    If "approval":
+      → Draft stored in pending_sends table
+      → You get a notification (push/webhook/email)
+      → You approve/reject from dashboard or notification
+      → If approved, PostBox sends via Gmail API
+
+    If "shadow":
+      → Agent thinks it sent, but nothing actually goes out
+      → Draft logged for your review
+      → Good for testing a new agent
+
+    If "disabled":
+      → Agent can read but never send
+
+SYNC BACK:
+  Agent archives a message locally
+    → Queued in sync_queue table
+    → Next sync cycle pushes the archive action to Gmail
+    → Message is archived in your real Gmail too
+
+  Agent applies a label locally
+    → Same queue → synced back to Gmail
+
+  You delete a message in Gmail while agent had queued an action on it
+    → Conflict detected during reconciliation
+    → Agent's queued action is discarded
+    → Logged in audit trail
+Side-by-side comparison:
+                        AgenticMail Relay          Our Linked Inbox
+                        ─────────────────          ────────────────
+What agent sees         Only messages sent         Your entire real inbox
+                        to its +suffix             (all threads, labels, history)
+
+Agent's address         you+bot@gmail.com          Your actual email
+                        (looks fake)               (agent acts as you)
+
+Send mechanism          Gmail SMTP via              Gmail API via OAuth
+                        app password                (more secure, no stored password)
+
+Inbound latency         ~30 sec (IMAP poll)        ~instant (IMAP IDLE)
+
+Read your existing      No                         Yes — full history
+email history?
+
+Permission model        Outbound regex scan         4 send modes + auto-approval
+                        + manual approve/reject     rules + progressive trust
+
+Sync direction          One-way (Gmail → agent)     Bidirectional (Gmail ↔ agent)
+
+Conflict handling       None (no write-back)        State machine with resolution
+
+Credential type         App password                OAuth tokens (revocable)
+                        (stored in plaintext?)      (encrypted at rest)
+
+Gmail rate limits       Shared across all agents    Per-account, standard Gmail API
+                        on one account              quotas
+
+Offline operation       No — needs Gmail            Yes — operates on local cache,
+                        connection to read          syncs when connected
+
+Semantic search         No                          Yes — pgvector on local cache
+across email
+The philosophical difference:
+AgenticMail's relay says: "Give agents their own mailboxes that happen to route through Gmail." The agent has its own identity, its own address, its own inbox. It never touches your real email.
+Our linked inbox says: "Let agents operate on YOUR email, under YOUR control, with guardrails." The agent reads your actual inbox, triages your real messages, drafts replies as you. It's a fundamentally different use case.
+They're not mutually exclusive. Our architecture supports both:
+
+Native inboxes (Stalwart-backed) → agent gets its own agent@yourdomain.com address. This is what AgentMail SaaS does.
+Linked inboxes (Gmail/IMAP sync) → agent reads and acts on your real email with permissions. This is what nobody else does.
+
+We should also steal their relay trick as a third option — it's the fastest zero-config path for users who just want to try the product without buying a domain or connecting their real inbox. We could add it as a "quick start" mode.
+For Phase 1, I'd now recommend this order:
+
+Native inbox (Stalwart) — core identity, your domain
+Gmail relay trick — zero-config quick start, steal this from AgenticMail
+Linked inbox sync — the real differentiator, Phase 3
+
+This gets users sending real email in 2 minutes (relay), gives them a proper setup path (native), and delivers the unique value prop later (linked sync with permissions).add this and other ideas that might be good to a new Spec improvements doc.  also, i would like to add a superfile like TUI, but later stage, to see all inboxes in terminal, with superfile like easeMar 102 / 2Synthesized documentation updates and terminal interface conceptsSynthesized documentation updates and terminal interface conceptsHere's what's in the doc:
+Stolen from AgenticMail (3 things):
+
+Gmail relay mode as the zero-config quick start (Tier 1 in a three-tier inbox model: relay → native → linked)
+Interactive CLI shell with arrow key navigation, inline email reading, paginated inbox view
+Outbound guard — regex scanning for leaked API keys, passwords, PII before sending
+
+New ideas (6 things):
+
+Superfile-style TUI (postbox tui) — multi-panel ratatui interface with inbox sidebar, message list, preview pane, vim keybindings, Nerd Font icons, Nord/Dracula/Catppuccin themes, live WebSocket updates. This is the kind of feature that lands on r/unixporn and the front page of HN.
+Email digest endpoint — structured summary of inbox activity for agents that don't need real-time
+Notification providers for approvals — ntfy, Pushover, Telegram, email, webhook, desktop notify (not just the dashboard)
+Agent identity cards — queryable endpoint showing an agent's capabilities, permissions, trust level
+Conversation context extraction — structured thread summary (who said what, open questions, awaiting response from) instead of dumping raw emails into LLM context
+Framework integration examples — working 20-line examples for LangChain, CrewAI, Autogen, Claude Code
+
+Revised phase plan weaves all of this into the existing roadmap. The TUI lands in Phase 6 — it's a power-user delight and GitHub star magnet, but not a launch blocker.
+You now have four spec documents: the full technical spec, licensing & independence, project setup guide, and this improvements doc. Want to nail down the name/domain and start building, or refine further?Postbox spec improvementsDocument · MD Downloadam i overthinking this?Mar 10Weighed planning thoroughness against validation necessityWeighed planning thoroughness against validation necessityYes.
+You have four spec documents, a licensing strategy, a dependency replacement roadmap, a 24-week phased plan, and a competitive teardown of a project with zero users. You haven't written a single line of Rust.
+Here's what actually matters right now:
+Pick a name in the next 5 minutes. It doesn't matter that much. Rust was originally called "Graydon's side project." You can rename later if you really need to. Pick one of the verified-available names, buy the domain, move on.
+Ship a working binary this week. The spec is good — but it's only valuable if code exists. The first binary should do exactly three things: connect to Stalwart, create an inbox via API, send an email. That's it. Everything else is a future PR.
+The spec documents are good insurance, not a prerequisite. You've de-risked the licensing question, the architecture, the dependency strategy. That thinking isn't wasted — it'll save you from wrong turns later. But you've extracted 95% of the value from planning. The remaining 5% only comes from writing code and hitting real problems.
+The competitive landscape confirms your window is open. AgentMail is SaaS-only. AgenticMail is an AI-generated megaproject with zero users. Nobody has built a focused, well-crafted, Rust-based version of this. But that window doesn't stay open forever — this is a hot space and someone else will build it.
+What I'd do tonight:
+cargo init postbox
+# Copy the Cargo.toml deps from the spec
+# Write main.rs: load config, connect to Postgres, start Axum, serve /health
+# Push to GitHub
+# Done. You have a repo.
+The TUI, the progressive trust engine, the Superfile-inspired interface — all great ideas. But they're Phase 6 ideas living rent-free in your head during Phase 0.
+Want to just start coding?do deeper research on comptitors or competitive landscapeMar 10Validated competitive research necessity before development commitmentValidated competitive research necessity before development commitmentFair enough — let's make sure we're not building into a crowded space. Let me do this properly.Synthesized competitive landscape insights into cohesive documentSynthesized competitive landscape insights into cohesive documentNow I have the full picture. Let me write this up properly.Synthesized competitive landscape analysis frameworkSynthesized competitive landscape analysis frameworkHere's the bottom line after deep research across every project in this space:
+One real competitor: AgentMail (YC). Funded, staffed, has customers. But SaaS-only, closed-source, no self-hosted option. They've made a deliberate business decision to NOT be self-hosted — that's our opening.
+One source-available adjacent tool: EmailEngine. Does the "REST API for existing email accounts" part well, built by the Nodemailer creator, has real traction. But it costs $995/year, isn't agent-aware, and has no MCP/permissions/inbox creation.
+One pretend competitor: AgenticMail. 770+ files, zero stars, zero users. AI-generated megaproject. Not a real threat.
+Everything else is a different problem. MailCat (temporary verification mailboxes), ATAT (OpenAI email hack), mcp_agent_mail (inter-agent messaging, not real email), Inbox Zero/Mail-0 (email clients for humans), and dozens of MCP servers that are just thin wrappers around Gmail/Outlook APIs.
+The gap is real and specific: A self-hosted, open-source, agent-aware email API with linked inbox sync and permissions. Nobody credible occupies this space. AgentMail chose SaaS. EmailEngine chose "general-purpose, pay us." AgenticMail chose "claim everything, build nothing."
+The biggest risk isn't competition — it's that AgentMail adds a self-hosted tier, or that the total market turns out to be too small. But YC funding the space validates demand, and their SaaS-only choice gives you a window.
+"Like AgentMail, but you own it. Plus, it can read your Gmail."
+Now can we start coding?Postbox competitive landscapeDocument · MD Downloadlets discuss how to ensure this codebase avoid bloat and AI shite. And also keep performance in mind. What is best/ideal/min requirements in terms of resource usage that we should target, and also overally usage, and what does our current plan seem to indicate, how performant will it be?Mar 10Examined code quality, performance targets, and resource implications for PostBox architectureExamined code quality, performance targets, and resource implications for PostBox architectureGood question, and the right one to ask before writing code. Let me think about this honestly rather than generating another doc.
+Avoiding bloat and AI-generated garbage:
+The biggest tell of AI-generated codebases is breadth without depth — 770 files and 145 "adapters" before a single user. The antidote is a simple rule: nothing gets built until something needs it. Not "might need it someday." Not "the spec says Phase 3." Actually needs it, right now, because a user hit the limitation or a test fails without it.
+Concretely for PostBox:
+Don't create empty module files. Don't write trait StorageBackend with S3 and local implementations on day one — just write to the filesystem directly. When someone actually asks for S3, then add the trait and refactor. Don't build the embedding pipeline until someone tries to search. Don't build the permission engine until someone sends an email they shouldn't have.
+The spec documents we wrote are a map, not a construction plan. They tell you where you're going so you don't paint yourself into an architectural corner. But you build the house one room at a time, and only the rooms you're sleeping in tonight.
+For code review discipline, I'd suggest a hard rule: every PR must be usable by itself. Not "this adds the trait that the next PR will implement." If a PR doesn't change what a user can do, it's probably premature abstraction.
+On AI-assisted code specifically:
+You'll obviously use Claude Code and Copilot for this project. That's fine — the danger isn't using AI to write code, it's accepting AI output without compression. AI tends to generate verbose, overly-commented, over-abstracted code. After every AI-assisted session, do a compression pass: can this function be half the lines? Does this struct need all these fields? Is this error type actually used? Rust's compiler is your best friend here — if you delete something and it compiles, it wasn't needed.
+Performance targets and what they actually mean:
+Let me break this down into what our stack gives us for free vs. what we need to work for.
+For idle memory, a Rust + Axum binary with a Postgres connection pool (5 connections) and no active work will sit at roughly 3-8MB RSS. This is just what the Tokio runtime, the allocator metadata, and the connection pool buffers cost. For comparison, a Node.js Express app idles at 50-80MB (V8 heap), and a Python FastAPI app at 30-50MB. Stalwart will add another 20-40MB idle. Postgres with shared_buffers at the default 128MB will use about 150MB. So the full stack (PostBox + Stalwart + Postgres) idles at roughly 200MB total, with PostBox being the smallest piece. On a 512MB VPS this is tight but workable. On 1GB it's comfortable.
+For API latency, Axum on Tokio can serve ~100K requests/second on a single core for simple JSON responses. Our endpoints mostly do: parse request → query Postgres → serialize response. With a local Postgres and connection pooling, the database roundtrip is 0.5-2ms. JSON serialization for a message list is microseconds. So the realistic p99 for a cached read endpoint is 2-5ms, and for a write endpoint (insert + index) is 5-15ms. This is already faster than what any user or agent will notice — the network latency to reach the server dominates.
+For email parsing, mail-parser processes real-world emails at roughly 5,000-10,000 messages/second on a single core, because it's zero-copy (it references slices of the input buffer rather than allocating new strings). This means inbound email processing will never be the bottleneck — even if you receive 100 emails/second (which would be extraordinary), the parser uses less than 2% of one core.
+For IMAP sync (linked inboxes), each connected account holds one persistent TCP connection in IMAP IDLE state. This costs roughly 10-20KB of memory per connection (the TLS session state + read buffer). 100 linked accounts = about 2MB. Tokio handles thousands of idle connections without breaking a sweat — this is literally what it's designed for. The CPU cost is near-zero when idle (just keepalive pings every 29 minutes per IMAP RFC).
+For semantic search with pgvector, query latency depends on index type and dataset size. With IVFFlat on up to 1M vectors (1M emails), query latency is 5-20ms. With HNSW it's 1-5ms but uses more memory. For a self-hosted personal/team tool, you're unlikely to exceed 100K emails, so this will always be fast.
+For webhook dispatch, sending an HTTP POST to an external URL is I/O-bound. With Tokio and reqwest, you can easily dispatch 1000 concurrent webhook deliveries. The practical limit is the recipient's server, not PostBox.
+What you should actually target:
+Here's what I think are the right minimum requirements and targets, based on the audience (self-hosters on modest hardware):
+Minimum viable host: 1 CPU core, 1GB RAM, 10GB disk. This runs PostBox + Stalwart + Postgres with room to spare. Target this for the Docker Compose default.
+Comfortable host: 2 cores, 2GB RAM, 20GB disk. This handles 50+ linked accounts syncing concurrently and serves API requests without any perceptible latency.
+The performance targets that actually matter for user perception are: first API response under 100ms (including TLS handshake), inbox list under 50ms, send email under 200ms (because SMTP submission to Stalwart takes time), and docker compose up to healthy in under 30 seconds.
+What our current plan indicates:
+The architecture is inherently performant because we're not doing anything expensive. PostBox is essentially a thin API layer over Postgres and Stalwart. The hot path is: HTTP request → SQL query → JSON response. There's no ML inference, no heavy computation, no large in-memory caches. The only potentially expensive operation is embedding generation for semantic search, and that's async (offloaded to Ollama or an external API, not blocking the request path).
+The main performance risk isn't speed — it's memory growth over time. Specifically: if we cache parsed emails in memory instead of re-parsing from the database, memory grows linearly with usage. The fix is simple: don't cache. Parse on demand. mail-parser is fast enough that re-parsing a 50KB email takes microseconds. Disk is cheap, RAM is not (especially on VPSes).
+The other risk is connection exhaustion — if linked inbox sync holds one IMAP connection per account and we don't cap the pool, someone with 500 linked accounts could exhaust file descriptors. The fix: configurable max concurrent syncs (default 50), with a queue for the rest.
+The actual discipline that prevents bloat:
+Honestly, the performance stuff is the easy part. Rust is fast by default. The hard part is architectural discipline. Here's what I'd commit to:
+No feature flags that are never turned off. If something is always on, it's not a feature flag, it's dead code with an if statement around it.
+No "framework" abstractions until the third time you need them. Write the concrete implementation first. When you have three things that look similar, then extract the trait.
+Measure before optimizing. Add tracing spans to the hot paths from day one. When someone reports slowness, look at the traces, don't guess.
+Delete code that isn't tested. If there's no test exercising a code path, that code path is a liability, not a feature. This is the single strongest defense against bloat.
+Keep the dependency tree auditable. Run cargo tree regularly. If you can't explain why a dependency is there, remove it.
+And the most important one: ship v0.1 with fewer features than you think is acceptable. If v0.1 can create an inbox, send an email, and receive a reply — that's enough. Everything else is v0.2.Create a new doc to pass the above design and performance and coding ethos that I can pass to claude/codex to ensure they keep thiis in mind and build the roadmap based on this.Mar 10Prepared to synthesize design principles into comprehensive documentationPrepared to synthesize design principles into comprehensive documentationThis is the document you hand to Claude Code or Codex before they write a single line. It encodes everything we discussed, in a format that's both human-readable and effective as an AI system prompt.
+The key sections and what they prevent:
+Section 1-2 (Anti-bloat rules) — prevents the AgenticMail failure mode of 770 files and 0 users. Every PR must be usable by itself. No abstractions before the third use. Delete untested code.
+Section 3 (Architecture rules) — prevents spaghetti. core/ never imports axum. Each module has its own error type. No global state. Async only where there's actual I/O.
+Section 4-5 (Performance targets + principles) — concrete numbers, not vibes. <10MB idle, <5ms p99 reads, <20MB Docker image. Plus the principles that achieve them: don't cache what's cheap to recompute, bound everything, stream don't buffer.
+Section 6 (Code style) — comments explain WHY not WHAT, tests named descriptively, thiserror not anyhow everywhere.
+Section 8 (What to build) — explicit list of files that should AND should not exist after Phase 0 and Phase 1. This is the most important section for AI agents — it tells them exactly what to create and what to leave alone.
+Section 10 (When in doubt) — five questions to ask before writing any code. If an AI agent internalizes these, the output quality goes up dramatically.
+Drop this file as CLAUDE.md or AGENTS.md in the repo root and reference it in your Claude Code or Codex configuration. Now we really should start coding.Postbox engineering principlesDocument · MD DownloadI want to call this slopbox. An intermediate layer to ensure I use ai to skip all the ai slop coming our way over future years.
+Also, can we have a similar setup for text messages? Allow agents to read all my text as I get them in a separate inbox, and organize/delete if needed? Sending text messages is not too relevant, but can addMar 10Evaluated project rename and architected SMS integration featureEvaluated project rename and architected SMS integration featureLove the name. Love the positioning even more — "use AI to filter the AI slop." That's a pitch that resonates immediately. Let me check if it's actually available.Check slopbox availability across all registriesCheck slopbox availability across all registriesPyPI and GitHub org are taken. Let me check what's actually there.Investigated naming conflicts across multiple platformsInvestigated naming conflicts across multiple platformsBad news — slopbox is taken. There's already a project called denibertovic/slopbox on GitHub — "Sandbox for your AI slop" — it's a Docker sandbox tool for running AI agent code in isolation. Different function but same name and same spirit. PyPI also has it claimed. The crates.io and npm names are free, but the brand collision would be confusing since both projects are in the AI agent tooling space.
+Let me check some variations:Verified availability across registries and prepared to address messaging feature requestVerified availability across registries and prepared to address messaging feature requestFully available across all four registries (crates.io + PyPI + npm + GitHub):
+NameVibeslopgateYour gate against slop. Clean, sounds like infrastructure.slopwallWall that blocks slop. Firewall energy.slopscreenScreens out the slop. Filter energy.unslopboxThe un-slopped version of your inbox. Keeps the slopbox spirit.
+I'd lean slopgate — it's short, punchy, communicates "gateway that filters slop," and works as a CLI command (slopgate start). But your call.
+Now, on the SMS/text message question — this is a genuinely good feature idea and it's simpler than it sounds. For Android specifically, there are a few approaches:
+The cleanest path is KDE Connect / GSConnect which you likely already have on your Fedora + Hyprland setup. It syncs SMS from your phone to your Linux desktop over local network. KDE Connect exposes a D-Bus interface, so slopgate could subscribe to SMS notifications the same way Pulse would. Phone receives text → KDE Connect pushes it to desktop → slopgate reads it from D-Bus → stores in a unified inbox alongside email. No Google Voice, no Twilio, no cloud dependency.
+For iPhone users or cloud-based approaches, Google Voice (what AgenticMail uses) or Twilio are the options, but they add complexity and cost.
+The architecture would be a unified message store — email and SMS live in the same inbox model, just with a channel field:
+messages table:
+  ...
+  channel: "email" | "sms" | "signal" | "whatsapp"  (extensible)
+  provider_id: "kde-connect" | "google-voice" | "twilio"
+  ...
+Same threading, same labels, same search, same permission engine, same API. An agent queries /messages and gets both emails and texts. The agent doesn't care about the transport — it just sees messages.
+This actually strengthens the positioning significantly. Slopgate isn't just "email for agents" — it's "a unified message layer between you and your agents, filtering the slop across all your communication channels."
+Check the domain for your preferred name and let me know. Then we code.Think deeper and review all earlier docs till now to see how this impacts what we're building, and also what new things would be impactfulMar 10Reconsidered product positioning from email tool to unified anti-slop communication layerReconsidered product positioning from email tool to unified anti-slop communication layerLet me actually sit with this for a moment. The name change isn't just cosmetic — it's pointing at a fundamentally different product than what we started with. Let me trace the evolution and be honest about what's happened.
+We started with "clone AgentMail." That was: give AI agents their own email inboxes, send/receive programmatically, self-hosted.
+Then we added linked inboxes: agent connects to YOUR Gmail, reads your real email, operates on it with permissions.
+Then the anti-slop framing landed. And then SMS.
+These aren't incremental features. The linked inbox + SMS + anti-slop framing points at a different product entirely. Let me be explicit about the fork in the road:
+Product A: "Agent email infrastructure" (what AgentMail is, what we originally designed)
+
+Audience: developers building AI agents that need email identity
+Core action: agent creates inbox, sends/receives as itself
+Value: programmatic email for bots
+Competition: AgentMail directly
+
+Product B: "Personal message intelligence layer" (what "slopgate" is pointing at)
+
+Audience: anyone drowning in email/SMS/notification slop
+Core action: AI sits between you and your messages, triages, filters, organizes, drafts responses
+Value: you never read spam, newsletters, or AI-generated outreach again. Your agent handles it.
+Competition: Inbox Zero, SaneBox, Superhuman — but self-hosted and agent-native
+
+These are different products that share the same plumbing (Stalwart, IMAP sync, Postgres, Rust). But the user experience, the API surface, the marketing, and the growth path are completely different.
+Product A is B2B developer infrastructure. Product B is a personal productivity tool that happens to use AI agents under the hood.
+Here's where it gets interesting: Product B is a better product. Here's why:
+Product A (agent email infra) is competing with a YC-funded startup on their core thesis. We'd always be "the self-hosted AgentMail." Product B has no direct competitor. Inbox Zero and SaneBox are AI email assistants, but they're SaaS, they don't do SMS, they don't have MCP, they don't self-host, and they don't have the "your AI agent as a message firewall" framing.
+Product B also maps directly onto Pulse. Pulse is your desktop intelligence daemon — notification triage, clipboard intelligence, workflow learning. Slopgate would be Pulse's communication arm. Pulse handles desktop notifications, Slopgate handles email and SMS. Same philosophy: AI that protects your attention rather than competing for it.
+Product B has a broader audience. Every knowledge worker with an overflowing inbox is a potential user. Product A only appeals to developers building agent systems.
+Product B's anti-slop positioning is timely and emotionally resonant. "Use AI to skip the AI slop" is a pitch that makes people nod immediately. "Self-hosted email API for AI agents" makes developers go "maybe, let me check the docs."
+But Product B also has risks that Product A doesn't:
+It's harder to build. Agent email infra is mostly CRUD + SMTP/IMAP plumbing. A personal message intelligence layer needs to actually be smart — triage rules, spam classification, priority detection, draft generation. The AI quality has to be good or the product is worse than doing nothing.
+It's harder to monetize. Developer infrastructure has clear B2B pricing models. Personal productivity tools compete with free Gmail and $0 willpower. People are notoriously unwilling to pay for email tools (Superhuman being the notable exception at $30/month).
+The "unified message layer" scope is much larger. Email alone is hard. Email + SMS + potentially Signal/WhatsApp/Slack is a multi-protocol integration challenge. Each channel has different APIs, different auth flows, different message formats.
+What I'd actually recommend:
+Build the plumbing for Product A, position and brand it as Product B. Concretely:
+Phase 0-1 stays the same: Rust binary, Stalwart integration, inbox CRUD, send/receive. This is agent email infrastructure. Ship it. Get it working.
+Phase 2 adds Gmail relay + linked inbox sync. At this point you have both "agent creates its own inbox" AND "agent reads your real email." This is where the product identity shifts.
+Phase 3 adds the triage/classification layer: incoming messages get scored, categorized, and routed. This is where it becomes "slopgate" — your agent isn't just reading email, it's filtering it for you.
+Phase 4 adds SMS via KDE Connect (for you personally, on your Fedora setup) and later via other providers. The unified message store goes live.
+The API stays the same underneath. An MCP tool that says slopgate.messages.list returns both emails and texts. An agent that says "what's new?" gets a triaged briefing across all channels.
+On the unified message store specifically:
+This is the architectural change that matters. Instead of messages being email-specific, it becomes channel-agnostic:
+sqlCREATE TABLE messages (
+    id              UUID PRIMARY KEY,
+    inbox_id        UUID NOT NULL,
+    channel         TEXT NOT NULL,        -- 'email' | 'sms' | 'signal' | ...
+    direction       TEXT NOT NULL,        -- 'inbound' | 'outbound'
+    -- Common fields (all channels)
+    from_addr       TEXT NOT NULL,        -- email address, phone number, handle
+    to_addrs        TEXT[] NOT NULL,
+    body_text       TEXT,
+    body_html       TEXT,                 -- null for SMS
+    timestamp       TIMESTAMPTZ NOT NULL,
+    -- Email-specific (null for other channels)
+    subject         TEXT,
+    in_reply_to     TEXT,
+    references      TEXT[],
+    headers         JSONB,
+    -- SMS-specific (null for email)
+    phone_number    TEXT,
+    -- Triage fields (the "slopgate" layer)
+    slop_score      REAL,                 -- 0.0 (important) to 1.0 (pure slop)
+    category        TEXT,                 -- 'personal' | 'work' | 'newsletter' | 'spam' | 'ai_generated' | ...
+    requires_action BOOLEAN DEFAULT false,
+    triaged_at      TIMESTAMPTZ,
+    triaged_by      TEXT,                 -- 'auto' | 'agent' | 'human'
+    -- Standard fields
+    embedding       vector(1536),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+The slop_score and category fields are the product's soul. Every message that enters slopgate gets classified: is this something that needs my attention, or is it slop? The AI agent uses this to decide what to surface, what to auto-archive, what to draft a response for, and what to silently delete.
+For the KDE Connect SMS integration specifically:
+On your Fedora + Hyprland setup, this is elegant. KDE Connect exposes SMS via D-Bus at org.kde.kdeconnect.device.*.sms. Slopgate subscribes to the newMessage signal on this interface. When your phone receives a text, it appears on your desktop via KDE Connect, and simultaneously gets ingested into slopgate's message store, classified, and made available to your agents.
+No cloud dependency. No Google Voice. No Twilio. Just your phone → local WiFi → KDE Connect → D-Bus → slopgate. Completely local, completely private.
+For users who don't run KDE Connect, we can add Twilio/Google Voice later as alternative SMS providers. But for v1, the local-first D-Bus approach fits the self-hosted ethos perfectly.
+What genuinely changes in the existing spec docs:
+The engineering principles doc stays exactly the same — the anti-bloat rules, performance targets, and coding ethos are product-agnostic.
+The technical spec needs the unified message store schema instead of email-only. But the API surface barely changes — you're adding a channel filter parameter to existing endpoints, not new endpoints.
+The competitive landscape shifts. We're no longer just competing with AgentMail. We're in a space where Inbox Zero (24K stars), SaneBox, and Superhuman exist — but none of them are self-hosted, agent-native, or multi-channel.
+The setup guide stays the same. Rust project, same CI, same conventions.
+New things that would be impactful with this framing:
+Daily briefing endpoint. GET /api/v1/briefing returns a structured morning summary: 3 emails that need your attention, 2 texts from family, 1 calendar conflict, everything else was auto-handled. This is the killer feature that makes people use slopgate daily. It's the "inbox zero accomplished before you wake up" experience.
+Slop detection model. A small local classifier (can run on Ollama) that scores incoming messages. Training data: your own read/archive/delete patterns over time. "Nikhil always reads emails from this domain, archives newsletters from that domain, and deletes anything with 'unsubscribe' that he hasn't opened in 30 days." This is genuinely useful and genuinely personal.
+Notification triage that feeds Pulse. If you build Pulse as the desktop daemon and slopgate as the message layer, they share a brain. Pulse already does notification triage — slopgate extends that to email and SMS. Desktop notification: "3 messages need attention. Rest handled." That's the integrated experience.
+Auto-responder with approval. Agent drafts responses to routine emails (meeting confirmations, receipt acknowledgments, simple questions). You review and send in batch once a day. This is the approval workflow from the permission engine, but reframed as a productivity feature rather than a safety feature.
+"Unslopify" view. A read-only digest that strips AI-generated marketing emails, newsletter slop, and automated notifications down to just the human-written, actually-important messages in your inbox. The name "slopgate" earns its keep here — it's literally a gate that separates signal from slop.
+The bottom line: this naming shift reveals that you're not building email infrastructure for agents. You're building an AI-powered message firewall for humans, implemented as infrastructure that agents can also use. That's a much more interesting product.
+Check the domain availability for your preferred name from the list I gave you, and I'll update the spec docs to reflect this unified vision. Or if you want to stick with one of the names, tell me and I'll do the final doc.Give me a final doc which streamlined this vision and ensure everything ties in together. Do deep research and creat a doc on post - post box migration to slopbox. It should also detail out new features and integrations and stuff
+Ultrathink, do a deep review and market research, and create a new follow up addendum md docMar 10Architected PostBox-to-SlopGate rebrand with market analysis and feature integrationArchitected PostBox-to-SlopGate rebrand with market analysis and feature integrationLet me do the market research for this repositioned product first.Recognized market gap and commenced comprehensive migration documentationRecognized market gap and commenced comprehensive migration documentationNow I have the full picture. Let me write this.Synthesized comprehensive documentation for migration and feature integrationSynthesized comprehensive documentation for migration and feature integrationHere's the complete document set you now have, and how they relate:
+slopgate-vision-addendum.md      ← THIS DOC: The product pivot, new features, unified vision
+  ↑ builds on top of
+postbox-full-spec.md             ← Technical architecture (plumbing still valid, rename + schema changes)
+postbox-licensing-and-independence.md  ← Licensing strategy (100% unchanged)
+postbox-competitive-landscape.md ← Market research (needs Inbox Zero/Superhuman/Kagi additions)
+postbox-setup-guide.md           ← Repo setup, CI/CD, conventions (rename, otherwise unchanged)
+postbox-engineering-principles.md ← Coding ethos + performance targets (100% unchanged, THE MOST IMPORTANT DOC)
+postbox-spec-improvements.md     ← Gmail relay, CLI shell, TUI vision (all folded into SlopGate roadmap)
+The key things this addendum establishes:
+The unified message store is the architectural heart. Email and SMS share one schema with channel and provider fields. The slop scoring fields (slop_score, slop_signals, category, triage_status) are what make this SlopGate instead of just another email API.
+The slop classification pipeline runs in two tiers: rule-based (instant, zero-cost, handles 80% of messages) and optional LLM (Ollama, runs async on ambiguous messages). This means SlopGate works well without any LLM configured — the rules alone catch newsletters, cold outreach, and obvious AI slop.
+KDE Connect SMS is the local-first, zero-cloud path to text message integration. D-Bus subscription, same triage pipeline, same unified store. Your Fedora + Hyprland setup is the reference implementation.
+The daily briefing is the killer feature for adoption. "3 things need you, 31 were slop, 2 drafts ready" — this is what makes people use SlopGate every day and tell their friends.
+The Kagi SlopStop parallel is important positioning. Kagi is doing for search what we're doing for email/messages. They've validated the "anti-slop" framing with their community. We're applying the same philosophy to a different channel.
+Now — pick your name (slopgate is verified available on all four registries), check the domain, and let's write Rust.Slopgate vision addendumDocument · MD DownloadWhat happens when kde connect is not connected?Mar 10Examined architectural limitations and fallback strategies honestlyExamined architectural limitations and fallback strategies honestlyHonestly? It doesn't work. SMS stops flowing entirely until the phone reconnects to the same local network. That's a real problem, not an edge case.
+KDE Connect requires your phone and computer on the same WiFi. Phone leaves the house, you switch networks, phone dies, WiFi drops — the D-Bus connection breaks and SlopGate goes blind on SMS. There's no queue, no catch-up, no retry. When the phone reconnects, KDE Connect resumes but there's no reliable "sync all messages I missed while disconnected" mechanism in the current KDE Connect SMS API. You might get some history via the conversation list, but it's not designed as a sync protocol.
+This means KDE Connect works for "I'm at my desk all day and want to see texts on my screen" — which is how most people use it today. It does NOT work for "reliable SMS ingestion that I can depend on for triage." If you leave for lunch, you miss texts until you're back.
+Realistic alternatives that survive disconnection:
+Android option: Tasker + HTTP webhook. Tasker runs on the phone itself, fires an HTTP POST to SlopGate's API every time an SMS arrives, regardless of network. Works over mobile data, WiFi, anywhere with internet. SlopGate exposes a POST /api/v1/ingest/sms endpoint with a shared secret. Tasker sends the sender, body, and timestamp. This is the most reliable self-hosted approach — the phone pushes to the server rather than the server pulling from the phone.
+Android option: ntfy + SMS forwarding. Similar idea — an Android app like "SMS Forwarder" or a Tasker profile pushes SMS to ntfy.sh (self-hostable) or directly to a webhook URL. Works anywhere with internet.
+Android option: ADB over WiFi/USB. Android Debug Bridge can read SMS programmatically via adb shell content query --uri content://sms/inbox. This works over WiFi ADB (not just same network — can be tunneled via WireGuard). But it's fragile, needs developer mode enabled, and the connection can drop.
+Cloud option: Google Messages web pairing. Google Messages for web uses a persistent connection between your phone and Google's servers. There's no official API, but the protocol has been reverse-engineered. Fragile, could break with any Google update.
+The honest architecture:
+SMS should be a provider-based system where KDE Connect is just one provider, and the system degrades gracefully:
+toml[sms]
+# Provider priority — try in order, use first that's available
+providers = ["tasker-webhook", "kde-connect"]
+
+[sms.tasker-webhook]
+enabled = true
+secret = "shared-secret-for-auth"
+# Phone pushes to POST /api/v1/ingest/sms — works anywhere
+
+[sms.kde-connect]
+enabled = true
+device_id = "abc123"
+# Local D-Bus — only works when phone is on same network
+```
+
+When KDE Connect is connected, SlopGate gets SMS via both paths (deduplicated by phone number + timestamp). When it disconnects, the Tasker webhook path still works. If both are down, messages queue on the phone and arrive when any path reconnects.
+
+**For Phase 1, I'd actually recommend:**
+
+Skip KDE Connect as the primary SMS path. Start with the Tasker webhook approach — it's simpler to implement (just an HTTP endpoint), more reliable (works over any internet connection), and doesn't require D-Bus code. KDE Connect becomes a nice-to-have secondary provider for people who want zero-cloud SMS.
+
+The webhook endpoint is trivial:
+```
+POST /api/v1/ingest/sms
+Authorization: Bearer sms_shared_secret
+{
+  "from": "+1234567890",
+  "body": "Can you pick up milk?",
+  "timestamp": "2026-03-10T14:30:00Z"
+}
+That's it. Tasker sends this on every incoming SMS. SlopGate stores it, runs the slop pipeline, done. Works whether you're at your desk or across the world.
+Want me to update the vision doc with this corrected approach, or are you ready to just start building and handle SMS when we get there?Does that work for iPhone and Android both?Mar 10Examined platform limitations and concluded Tasker lacks iPhone compatibilityExamined platform limitations and concluded Tasker lacks iPhone compatibilityNo. Tasker is Android-only. And iPhone is a much harder problem.
+Android: Tasker, SMS Forwarder apps, Automate, MacroDroid — all can intercept incoming SMS and fire webhooks. Works reliably in the background. Android is open enough that this is a solved problem.
+iPhone: Apple deliberately locks SMS access down. No app can read incoming SMS in the background. iOS Shortcuts can't trigger on SMS received. There is no Tasker equivalent for SMS interception on iPhone. This is a deliberate Apple design decision, not a technical limitation.
+What actually works on iPhone:
+The only reliable paths are through Apple's own ecosystem or email-based workarounds:
+iMessage on Mac. If you have a Mac (you don't — you're on Fedora), the Messages app syncs iMessage and SMS. You could read the SQLite database at ~/Library/Messages/chat.db. Irrelevant for your setup.
+Email forwarding via carrier. Some carriers support SMS-to-email forwarding (T-Mobile used to, most have dropped it). Unreliable and carrier-dependent.
+Jailbreak + tweak. A jailbroken iPhone can run background daemons that forward SMS. Not realistic for most users and breaks with every iOS update.
+Google Voice number. Use a Google Voice number instead of your real carrier number. Google Voice forwards SMS to email, which SlopGate can read via IMAP. But this means giving people a different phone number.
+iCloud email notifications. iOS can send email notifications for messages from specific contacts (not all SMS). Very limited.
+The honest truth: there is no good self-hosted iPhone SMS integration. Apple won't allow it. Every solution is either Mac-dependent, carrier-dependent, jailbreak-dependent, or requires changing your phone number.
+What this means for SlopGate:
+SMS support is inherently Android-first. For iPhone users, the realistic options are:
+
+Don't support iPhone SMS at all — be honest about it. "SMS integration requires Android."
+Google Voice as a workaround — works on both platforms but requires a separate number.
+iMessage bridge via Beeper/Matrix — Beeper built an iMessage bridge that works without a Mac, but it's a cloud service and has had legal issues with Apple.
+Focus on what works everywhere: email. Email triage is the core product. SMS is a bonus for Android users.
+
+My recommendation:
+Position SMS as an Android-only feature for now. The Tasker webhook approach is clean and reliable on Android. Don't waste engineering time trying to solve Apple's walled garden — it's a political problem, not a technical one. If someone asks about iPhone, the answer is "we support Google Voice as a workaround, or you can use SlopGate's email triage which works with any phone."
+The product still works for iPhone users — they just get email triage without SMS. That's still valuable. The daily briefing, slop scoring, auto-responder, and the entire email pipeline work identically regardless of phone platform.
+Does this change your appetite for SMS as a feature, or are you fine with Android-only for now?Is tasker easy and free to use and setup for non tech users?Mar 10Weighed Tasker's accessibility for non-technical users honestlyWeighed Tasker's accessibility for non-technical users honestlyNo. Tasker costs $3.49 on Google Play and has one of the steepest learning curves of any Android app. Setting up "when SMS received → HTTP POST to URL with JSON body" requires navigating profiles, tasks, contexts, and HTTP request actions. A technical user takes 10-15 minutes. A non-technical user might never figure it out.
+This is a real problem for the "non-technical users connect to agents" goal from the spec.
+Better Android options that are actually easy:
+SMS Forwarder (free, open source) — there's an app literally called "SMS Forwarder" on F-Droid and Google Play. You enter a webhook URL, pick "forward all SMS," done. Three taps. No programming concepts. But it's a third-party app that may not be maintained forever.
+Automate (free tier) — simpler than Tasker, flowchart-based UI. Still requires understanding what a webhook URL is.
+MacroDroid (free tier, 5 macros) — the most user-friendly Tasker alternative. "When SMS received → HTTP request" is a template you can pick from a list. Closer to "easy" but still requires pasting a URL and understanding JSON.
+The honest assessment:
+None of these are "tap a button and it works" for a non-technical user. Every approach requires installing a third-party app, understanding what a webhook URL is, and pasting configuration. Compare that to email where you click "Connect Gmail" and do an OAuth flow — that's genuinely one-click.
+What this means for the product:
+SMS integration via phone-side apps will always be a power-user feature. There's no way around it unless you build a dedicated SlopGate Android app that handles the SMS forwarding natively — which is a significant engineering investment (Kotlin/Java, Google Play publishing, background service permissions that Android increasingly restricts).
+The realistic tiering becomes:
+For email, everyone gets a smooth experience. OAuth "Connect Gmail" flow, one click, works on any device.
+For SMS on Android with a dedicated SlopGate companion app (future, Phase 7+), a non-technical user installs one app from Google Play, scans a QR code from the SlopGate dashboard to pair, and SMS starts flowing. This is the right UX but it's a separate project.
+For SMS on Android without the companion app (Phase 3), a technical user sets up SMS Forwarder or Tasker with a webhook URL from the SlopGate dashboard. The dashboard shows: "Copy this URL, paste it into SMS Forwarder on your phone." Doable for developers, not for everyone.
+For SMS on Android with KDE Connect (Phase 3 bonus), fully automatic for anyone already running KDE Connect. No extra app needed. But only works on local network.
+For SMS on iPhone, not supported. Google Voice as a documented workaround.
+My revised recommendation:
+Drop SMS from the early phases entirely. It adds complexity, is platform-fragmented, and requires either a companion app (big investment) or user-hostile setup (Tasker/webhook). The core product — email triage with slop detection — works for everyone on every platform. SMS is a Phase 7+ feature that ships as an optional Android companion app when there's enough demand and enough users to justify building it.
+The spec and vision docs should mention SMS as a future direction but not as a launch feature. The unified message store schema still supports it — channel: "sms" is ready when the transport is — but the transport side isn't worth building yet.
+Focus the energy on making email triage genuinely great. That alone is a product.Both versions of the products will be able to connect to my rust overlay bar/daemon via MCP?Mar 10Examined MCP protocol compatibility across product versionsExamined MCP protocol compatibility across product versionsYes. MCP is a standard protocol — anything that speaks MCP can connect to SlopGate's MCP server. Pulse, Claude Code, Cursor, a custom script, whatever. SlopGate doesn't care who's calling.
+But there are two different connection patterns here, and they serve different purposes:
+Pattern 1: Pulse calls SlopGate (on-demand queries)
+Pulse connects to SlopGate as an MCP client. It calls tools when it needs data.
+Pulse (MCP client) → SlopGate (MCP server)
+
+"How many unread messages?"      → slopgate.briefing
+"Any pending approvals?"         → slopgate.approvals.list
+"What's the slop count today?"   → slopgate.analytics.slop
+This works for overlay bar widgets. Pulse polls every 60 seconds (or on a configurable interval), calls slopgate.briefing, and renders "📬 3 | 🗑️ 31" in your Waybar/overlay. Good for status display.
+Pattern 2: SlopGate pushes to Pulse (real-time events)
+MCP isn't designed for this. MCP is request-response — the client asks, the server answers. There's no "server pushes an event to the client unprompted." So for real-time notifications ("urgent email just arrived"), MCP alone isn't enough.
+The options for real-time push:
+WebSocket. SlopGate already has a WebSocket endpoint (planned). Pulse subscribes and gets events instantly. This is the most natural fit — Pulse keeps a persistent connection open, SlopGate pushes message.requires_action events as they happen.
+Webhook. SlopGate POSTs to a local HTTP endpoint that Pulse exposes. Works but requires Pulse to run an HTTP server.
+Unix socket / named pipe. Both are Rust, both are on the same machine. A Unix domain socket is the lowest-latency, simplest option for local IPC. No HTTP overhead, no port allocation.
+D-Bus. Since you're on Hyprland/Sway and Pulse is a systemd service, D-Bus is already available. SlopGate publishes signals on org.slopgate.Events, Pulse subscribes. This is how KDE Connect works, how desktop notifications work, and how most Linux desktop IPC happens.
+What I'd actually recommend for Pulse integration:
+Use both patterns. They're not mutually exclusive.
+┌──────────────┐                    ┌──────────────┐
+│              │  MCP (on-demand)   │              │
+│    Pulse     │ -----------------> │   SlopGate   │
+│  (overlay    │  "give me briefing"│  (MCP server)│
+│   bar/daemon)│ <----------------- │              │
+│              │  {action_items: 3} │              │
+│              │                    │              │
+│              │  WebSocket (push)  │              │
+│              │ <================= │              │
+│              │  message.urgent    │              │
+│              │  briefing.ready    │              │
+└──────────────┘                    └──────────────┘
+MCP for pulling data on demand — overlay bar status, briefing content, inbox counts. Pulse calls slopgate.briefing every N seconds and renders it.
+WebSocket (or D-Bus) for push — "urgent email from a VIP contact just arrived" shows as an immediate desktop notification through Pulse, not as a polling-delayed status update.
+SlopGate's MCP server is already in the spec. The WebSocket endpoint is already in the spec. Pulse just connects to both. No special integration code needed in SlopGate — Pulse is just another client.
+The one thing to think about later is whether Pulse should also expose itself as an MCP server to SlopGate — so SlopGate can call Pulse tools like pulse.notify("urgent email from john") or pulse.clipboard.write(email_body). That would make the integration bidirectional. But that's a Pulse design decision, not a SlopGate one.Yes bidirectional is good, give me a short scope of doc on that
+Also, does agentmail give domains for agents? How does that work? How can I make my agents work with without registering and stuff1:49 AMSynthesized bidirectional MCP scope and zero-config agent email solutionsSynthesized bidirectional MCP scope and zero-config agent email solutionsOn AgentMail's domain model:
+AgentMail provides a default @agentmail.to domain — you spin up inboxes instantly via API with Agentmail no domain verification or waiting. The domain parameter is optional; if not provided, AgentMail uses @agentmail.to automatically. Custom domains require a paid plan. agentmail You can get started instantly with @agentmail.to, but they recommend setting up your own custom domain for production use to improve deliverability. Agentmail
+So it's basically: free tier = anything@agentmail.to, paid = bring your own domain with DNS records for SPF/DKIM/DMARC.
+How SlopGate handles this (already designed, three tiers):
+
+Gmail relay — zero config, zero domain. Your agent is you+agentname@gmail.com. Works in 2 minutes. This is your "no registration" answer.
+Native inbox via Stalwart — you need a domain you control (e.g. slopgate.yourdomain.com). You set MX/SPF/DKIM records. Agent gets research-bot@yourdomain.com. Full control, best deliverability.
+Linked inbox — OAuth into your real Gmail. Agent reads/triages your actual inbox. No new domain at all.
+
+The AgentMail-equivalent "shared domain" model (where SlopGate hosts @slopgate.dev for everyone) doesn't apply to us — we're self-hosted, so every instance runs its own Stalwart. There's no central SlopGate domain. The Gmail relay fills that "instant, no DNS" gap instead.
+Now let me create the bidirectional MCP scope doc.Acknowledged file accessibility and prepared to address inquiriesAcknowledged file accessibility and prepared to address inquiriesThe key architectural decision in there: HTTP+SSE over Unix domain sockets via Axum. Both services already use Axum, so you get standard MCP framing with zero network overhead. Each service is simultaneously a server (exposes tools) and a client (calls the other's tools). Neither depends on the other at compile time — they just discover each other's sockets at runtime and gracefully degrade if one is down.
+On the agent email question — to summarize the practical answer: Gmail relay is your "no registration" path. Agent gets nikhil+research-bot@gmail.com in 2 minutes, no domain, no DNS, no AgentMail account. When you want proper agent identity (bot@yourdomain.com), you point your domain's MX records at your Stalwart instance. No third-party dependency either way.

@@ -1,0 +1,17 @@
+From: third@example.com
+To: second@example.com
+Subject: Re: Re: Deep Thread
+Message-ID: <nested003@example.com>
+In-Reply-To: <nested002@example.com>
+References: <nested001@example.com> <nested002@example.com>
+Date: Thu, 4 Jan 2026 16:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+I agree with both of you.
+
+> Second person's reply here.
+>
+>> Original message from first person.
+>>
+>>> Even deeper quote from prehistory.
+>>> This goes way back.

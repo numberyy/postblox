@@ -1,0 +1,33 @@
+[package]
+name = "postblox"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Self-hosted email infrastructure for AI agents"
+license = "MIT"
+
+[[bin]]
+name = "postblox"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "chrono", "uuid", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+mail-parser = "0.9"
+thiserror = "2"
+anyhow = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
