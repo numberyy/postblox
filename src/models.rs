@@ -154,6 +154,17 @@ pub struct CreateDraft {
     pub in_reply_to_message_id: Option<Uuid>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Domain {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub name: String,
+    pub status: String,
+    pub stalwart_principal_id: Option<String>,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,6 +424,41 @@ mod tests {
         assert!(cd.html_body.is_none());
         assert!(cd.cc_addrs.is_none());
         assert!(cd.in_reply_to_message_id.is_none());
+    }
+
+    #[test]
+    fn test_domain_serialization_roundtrip() {
+        let domain = Domain {
+            id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            name: "example.com".into(),
+            status: "pending".into(),
+            stalwart_principal_id: None,
+            verified_at: None,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&domain).unwrap();
+        let back: Domain = serde_json::from_str(&json).unwrap();
+        assert_eq!(domain, back);
+    }
+
+    #[test]
+    fn test_domain_nullable_fields() {
+        let json = serde_json::json!({
+            "id": Uuid::new_v4(),
+            "org_id": Uuid::new_v4(),
+            "name": "test.com",
+            "status": "verified",
+            "stalwart_principal_id": "principal-123",
+            "verified_at": "2026-03-12T00:00:00Z",
+            "created_at": "2026-03-12T00:00:00Z"
+        });
+        let domain: Domain = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            domain.stalwart_principal_id.as_deref(),
+            Some("principal-123")
+        );
+        assert!(domain.verified_at.is_some());
     }
 
     #[test]

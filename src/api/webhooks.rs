@@ -108,15 +108,7 @@ pub async fn get(
     AuthOrg(org_id): AuthOrg,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
-    let wh = crate::db::webhooks::get_by_id(&state.pool, id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or(ApiError::NotFound)?;
-
-    if wh.org_id != org_id {
-        return Err(ApiError::NotFound);
-    }
-
+    let wh = get_webhook_for_org(&state.pool, id, org_id).await?;
     Ok(Json(WebhookResponse::from(wh)))
 }
 
@@ -125,20 +117,28 @@ pub async fn delete(
     AuthOrg(org_id): AuthOrg,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let wh = crate::db::webhooks::get_by_id(&state.pool, id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or(ApiError::NotFound)?;
+    let wh = get_webhook_for_org(&state.pool, id, org_id).await?;
 
-    if wh.org_id != org_id {
-        return Err(ApiError::NotFound);
-    }
-
-    crate::db::webhooks::delete(&state.pool, id)
+    crate::db::webhooks::delete(&state.pool, wh.id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_webhook_for_org(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+    org_id: Uuid,
+) -> Result<crate::models::Webhook, ApiError> {
+    let wh = crate::db::webhooks::get_by_id(pool, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or(ApiError::NotFound)?;
+    if wh.org_id != org_id {
+        return Err(ApiError::NotFound);
+    }
+    Ok(wh)
 }
 
 #[cfg(test)]

@@ -31,6 +31,15 @@ impl StalwartClient {
         }
     }
 
+    async fn check_response(resp: reqwest::Response) -> Result<reqwest::Response, StalwartError> {
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(StalwartError::Api { status, body });
+        }
+        Ok(resp)
+    }
+
     pub async fn create_account(&self, email: &str, password: &str) -> Result<(), StalwartError> {
         let resp = self
             .http
@@ -45,12 +54,7 @@ impl StalwartClient {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(StalwartError::Api { status, body });
-        }
-
+        Self::check_response(resp).await?;
         Ok(())
     }
 
@@ -62,13 +66,51 @@ impl StalwartClient {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(StalwartError::Api { status, body });
-        }
-
+        Self::check_response(resp).await?;
         Ok(())
+    }
+
+    pub async fn create_domain(&self, name: &str) -> Result<String, StalwartError> {
+        let resp = self
+            .http
+            .post(format!("{}/api/principal", self.base_url))
+            .bearer_auth(&self.admin_token)
+            .json(&serde_json::json!({
+                "type": "domain",
+                "name": name,
+            }))
+            .send()
+            .await?;
+
+        let resp = Self::check_response(resp).await?;
+        let body: serde_json::Value = resp.json().await?;
+        let principal_id = body["data"]["id"].as_str().unwrap_or(name).to_string();
+        Ok(principal_id)
+    }
+
+    pub async fn delete_domain(&self, principal_id: &str) -> Result<(), StalwartError> {
+        let resp = self
+            .http
+            .delete(format!("{}/api/principal/{principal_id}", self.base_url))
+            .bearer_auth(&self.admin_token)
+            .send()
+            .await?;
+
+        Self::check_response(resp).await?;
+        Ok(())
+    }
+
+    pub async fn get_dns_records(&self, domain: &str) -> Result<serde_json::Value, StalwartError> {
+        let resp = self
+            .http
+            .get(format!("{}/api/dns/records/{domain}", self.base_url))
+            .bearer_auth(&self.admin_token)
+            .send()
+            .await?;
+
+        let resp = Self::check_response(resp).await?;
+        let body: serde_json::Value = resp.json().await?;
+        Ok(body)
     }
 
     pub async fn submit_message(
@@ -90,12 +132,7 @@ impl StalwartClient {
 
         let resp = req.body(raw_mime.to_vec()).send().await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(StalwartError::Api { status, body });
-        }
-
+        Self::check_response(resp).await?;
         Ok(())
     }
 }
@@ -134,6 +171,27 @@ mod tests {
         };
         assert!(err.to_string().contains("500"));
         assert!(err.to_string().contains("internal error"));
+    }
+
+    #[test]
+    fn test_stalwart_create_domain_url() {
+        let client = StalwartClient::new("http://localhost:8080", "token");
+        let url = format!("{}/api/principal", client.base_url);
+        assert_eq!(url, "http://localhost:8080/api/principal");
+    }
+
+    #[test]
+    fn test_stalwart_delete_domain_url() {
+        let client = StalwartClient::new("http://localhost:8080/", "token");
+        let url = format!("{}/api/principal/{}", client.base_url, "domain-123");
+        assert_eq!(url, "http://localhost:8080/api/principal/domain-123");
+    }
+
+    #[test]
+    fn test_stalwart_dns_records_url() {
+        let client = StalwartClient::new("http://localhost:8080", "token");
+        let url = format!("{}/api/dns/records/{}", client.base_url, "example.com");
+        assert_eq!(url, "http://localhost:8080/api/dns/records/example.com");
     }
 
     #[tokio::test]

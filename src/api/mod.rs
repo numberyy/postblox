@@ -5,13 +5,17 @@ use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+pub mod api_keys;
 pub mod auth;
+pub mod briefing;
+pub mod domains;
 pub mod drafts;
 pub mod error;
 pub mod inbound;
 pub mod inboxes;
 pub mod labels;
 pub mod messages;
+pub mod organizations;
 pub mod search;
 pub mod threads;
 pub mod webhooks;
@@ -96,7 +100,14 @@ pub fn router(state: AppState) -> axum::Router {
             "/inboxes/{inbox_id}/drafts/{id}/send",
             post(drafts::send_draft),
         )
-        .route("/search", get(search::search));
+        .route("/organizations", post(organizations::bootstrap))
+        .route("/api-keys", get(api_keys::list).post(api_keys::create))
+        .route("/api-keys/{id}", axum::routing::delete(api_keys::delete))
+        .route("/briefing", get(briefing::get))
+        .route("/search", get(search::search))
+        .route("/domains", get(domains::list).post(domains::create))
+        .route("/domains/{id}", get(domains::get).delete(domains::delete))
+        .route("/domains/{id}/verify", post(domains::verify));
 
     axum::Router::new()
         .route("/health", get(health))
