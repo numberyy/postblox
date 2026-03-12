@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::auth::AuthOrg;
 use super::error::ApiError;
 use super::{clamp_pagination, get_inbox_for_org, AppState, PaginationParams};
-use crate::models::{Draft, Message};
+use crate::models::{Draft, Message, SendMode};
 
 #[derive(Deserialize)]
 pub struct CreateDraftRequest {
@@ -211,6 +211,26 @@ pub async fn send_draft(
         )));
     }
 
+    let send_mode = match crate::db::permissions::get_by_inbox(&state.pool, inbox_id).await {
+        Ok(Some(perm)) => perm.mode(),
+        Ok(None) => SendMode::default(),
+        Err(e) => return Err(ApiError::Internal(e.to_string())),
+    };
+
+    match send_mode {
+        SendMode::Shadow => {
+            return Err(ApiError::Forbidden(
+                "inbox is in shadow mode, sending disabled".into(),
+            ));
+        }
+        SendMode::Approval => {
+            // Store message but don't send — approval queue handled by approval system
+        }
+        SendMode::AutoApprove | SendMode::Autonomous => {
+            // Proceed to send
+        }
+    }
+
     let cc: Vec<String> = draft
         .cc_addrs
         .as_ref()
@@ -220,16 +240,6 @@ pub async fn send_draft(
         .unwrap_or_default();
 
     let message_id = format!("{}@postblox", Uuid::new_v4());
-    let mime_message_id = format!("<{message_id}>");
-    let raw_mime = crate::mail::builder::build_mime(
-        &inbox.email,
-        &to,
-        &cc,
-        draft.subject.as_deref().unwrap_or(""),
-        draft.text_body.as_deref(),
-        draft.html_body.as_deref(),
-        &mime_message_id,
-    );
 
     let in_reply_to = if let Some(reply_id) = draft.in_reply_to_message_id {
         let orig = crate::db::messages::get_by_id(&state.pool, reply_id)
@@ -243,7 +253,7 @@ pub async fn send_draft(
     let cm = crate::models::CreateMessage {
         inbox_id,
         thread_id: None,
-        message_id_header: Some(message_id),
+        message_id_header: Some(message_id.clone()),
         in_reply_to: in_reply_to.clone(),
         references_header: in_reply_to,
         from_addr: inbox.email.clone(),
@@ -265,6 +275,54 @@ pub async fn send_draft(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+    if let Err(e) = crate::db::drafts::delete(&state.pool, id).await {
+        tracing::warn!("failed to delete draft {id} after send: {e}");
+    }
+
+    if send_mode == SendMode::Approval {
+        let approval = crate::db::approvals::create(
+            &state.pool,
+            &crate::models::CreateApproval {
+                org_id,
+                inbox_id,
+                message_id: msg.id,
+            },
+        )
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        let pool = state.pool.clone();
+        let webhook_client = state.webhook_client.clone();
+        let msg_id = msg.id;
+        tokio::spawn(async move {
+            crate::events::dispatch(
+                &pool,
+                org_id,
+                crate::events::PostbloxEvent::ApprovalRequested {
+                    message_id: msg_id,
+                    inbox_id,
+                    approval_id: approval.id,
+                },
+                &webhook_client,
+            )
+            .await;
+        });
+
+        return Ok((StatusCode::ACCEPTED, Json(msg)));
+    }
+
+    // Build MIME only when actually sending (skipped for Approval mode above)
+    let mime_message_id = format!("<{message_id}>");
+    let raw_mime = crate::mail::builder::build_mime(
+        &inbox.email,
+        &to,
+        &cc,
+        msg.subject.as_deref().unwrap_or(""),
+        msg.text_body.as_deref(),
+        msg.html_body.as_deref(),
+        &mime_message_id,
+    );
+
     if let Some(ref stalwart) = state.stalwart {
         let to_refs: Vec<&str> = to.iter().map(|s| s.as_str()).collect();
         if let Err(e) = stalwart
@@ -276,10 +334,6 @@ pub async fn send_draft(
         }
     } else {
         tracing::warn!("stalwart not configured, skipping email delivery");
-    }
-
-    if let Err(e) = crate::db::drafts::delete(&state.pool, id).await {
-        tracing::warn!("failed to delete draft {id} after send: {e}");
     }
 
     let pool = state.pool.clone();

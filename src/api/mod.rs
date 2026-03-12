@@ -6,6 +6,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 pub mod api_keys;
+pub mod approvals;
+pub mod audit;
 pub mod auth;
 pub mod briefing;
 pub mod domains;
@@ -18,6 +20,7 @@ pub mod labels;
 pub mod linked_accounts;
 pub mod messages;
 pub mod organizations;
+pub mod permissions;
 pub mod search;
 pub mod threads;
 pub mod webhooks;
@@ -123,7 +126,17 @@ pub fn router(state: AppState) -> axum::Router {
             "/linked-accounts/{id}",
             get(linked_accounts::get).delete(linked_accounts::delete),
         )
-        .route("/linked-accounts/{id}/sync", post(linked_accounts::sync));
+        .route("/linked-accounts/{id}/sync", post(linked_accounts::sync))
+        .route(
+            "/inboxes/{inbox_id}/permissions",
+            get(permissions::get).put(permissions::upsert),
+        )
+        .route("/audit", get(audit::list))
+        .route("/approvals", get(approvals::list))
+        .route("/approvals/{id}", get(approvals::get))
+        .route("/approvals/{id}/approve", post(approvals::approve))
+        .route("/approvals/{id}/reject", post(approvals::reject))
+        .route("/approvals/batch", post(approvals::batch));
 
     axum::Router::new()
         .route("/health", get(health))

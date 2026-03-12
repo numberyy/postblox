@@ -3,13 +3,31 @@ pub mod webhooks;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-pub const KNOWN_EVENTS: &[&str] = &["message.received", "message.sent", "message.classified"];
+pub const KNOWN_EVENTS: &[&str] = &[
+    "message.received",
+    "message.sent",
+    "message.classified",
+    "approval.requested",
+];
 
-#[allow(clippy::enum_variant_names)]
 pub enum PostbloxEvent {
-    MessageReceived { message_id: Uuid, inbox_id: Uuid },
-    MessageSent { message_id: Uuid, inbox_id: Uuid },
-    MessageClassified { message_id: Uuid, inbox_id: Uuid },
+    MessageReceived {
+        message_id: Uuid,
+        inbox_id: Uuid,
+    },
+    MessageSent {
+        message_id: Uuid,
+        inbox_id: Uuid,
+    },
+    MessageClassified {
+        message_id: Uuid,
+        inbox_id: Uuid,
+    },
+    ApprovalRequested {
+        message_id: Uuid,
+        inbox_id: Uuid,
+        approval_id: Uuid,
+    },
 }
 
 impl PostbloxEvent {
@@ -18,6 +36,7 @@ impl PostbloxEvent {
             Self::MessageReceived { .. } => "message.received",
             Self::MessageSent { .. } => "message.sent",
             Self::MessageClassified { .. } => "message.classified",
+            Self::ApprovalRequested { .. } => "approval.requested",
         }
     }
 
@@ -38,7 +57,32 @@ impl PostbloxEvent {
                 "message_id": message_id,
                 "inbox_id": inbox_id,
             }),
+            Self::ApprovalRequested {
+                message_id,
+                inbox_id,
+                approval_id,
+            } => serde_json::json!({
+                "message_id": message_id,
+                "inbox_id": inbox_id,
+                "approval_id": approval_id,
+            }),
         }
+    }
+}
+
+pub async fn audit(
+    pool: &PgPool,
+    org_id: Uuid,
+    inbox_id: Option<Uuid>,
+    action: crate::models::AuditAction,
+    actor: &str,
+    details: serde_json::Value,
+) {
+    if let Err(e) =
+        crate::db::audit::create_entry(pool, org_id, inbox_id, &action.to_string(), actor, details)
+            .await
+    {
+        tracing::error!("failed to create audit entry: {e}");
     }
 }
 
@@ -120,5 +164,36 @@ mod tests {
         let data = event.data();
         assert_eq!(data["message_id"], msg_id.to_string());
         assert_eq!(data["inbox_id"], inbox_id.to_string());
+    }
+
+    #[test]
+    fn test_event_name_approval_requested() {
+        let event = PostbloxEvent::ApprovalRequested {
+            message_id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+            approval_id: Uuid::new_v4(),
+        };
+        assert_eq!(event.event_name(), "approval.requested");
+    }
+
+    #[test]
+    fn test_event_data_approval_requested_contains_ids() {
+        let msg_id = Uuid::new_v4();
+        let inbox_id = Uuid::new_v4();
+        let approval_id = Uuid::new_v4();
+        let event = PostbloxEvent::ApprovalRequested {
+            message_id: msg_id,
+            inbox_id,
+            approval_id,
+        };
+        let data = event.data();
+        assert_eq!(data["message_id"], msg_id.to_string());
+        assert_eq!(data["inbox_id"], inbox_id.to_string());
+        assert_eq!(data["approval_id"], approval_id.to_string());
+    }
+
+    #[test]
+    fn test_known_events_includes_approval_requested() {
+        assert!(KNOWN_EVENTS.contains(&"approval.requested"));
     }
 }

@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::auth::AuthOrg;
 use super::error::ApiError;
 use super::{get_inbox_for_org, AppState};
-use crate::models::Message;
+use crate::models::{Message, SendMode};
 
 #[derive(Deserialize)]
 pub struct SendMessageRequest {
@@ -56,24 +56,34 @@ pub async fn send(
         )));
     }
 
+    let send_mode = match crate::db::permissions::get_by_inbox(&state.pool, inbox_id).await {
+        Ok(Some(perm)) => perm.mode(),
+        Ok(None) => SendMode::default(),
+        Err(e) => return Err(ApiError::Internal(e.to_string())),
+    };
+
+    match send_mode {
+        SendMode::Shadow => {
+            return Err(ApiError::Forbidden(
+                "inbox is in shadow mode, sending disabled".into(),
+            ));
+        }
+        SendMode::Approval => {
+            // Store message but don't send — approval queue handled by approval system
+        }
+        SendMode::AutoApprove | SendMode::Autonomous => {
+            // Proceed to send
+        }
+    }
+
     // Store without angle brackets for consistent threading with inbound (parser strips them).
     let message_id = format!("{}@postblox", Uuid::new_v4());
-    let mime_message_id = format!("<{message_id}>");
-    let raw_mime = crate::mail::builder::build_mime(
-        &inbox.email,
-        &req.to,
-        req.cc.as_deref().unwrap_or(&[]),
-        req.subject.as_deref().unwrap_or(""),
-        req.text_body.as_deref(),
-        req.html_body.as_deref(),
-        &mime_message_id,
-    );
 
     // DB write first so the message is tracked even if delivery fails.
     let cm = crate::models::CreateMessage {
         inbox_id,
         thread_id: None,
-        message_id_header: Some(message_id),
+        message_id_header: Some(message_id.clone()),
         in_reply_to: None,
         references_header: None,
         from_addr: inbox.email.clone(),
@@ -90,6 +100,50 @@ pub async fn send(
     let msg = crate::db::messages::create(&state.pool, &cm)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    if send_mode == SendMode::Approval {
+        let approval = crate::db::approvals::create(
+            &state.pool,
+            &crate::models::CreateApproval {
+                org_id,
+                inbox_id,
+                message_id: msg.id,
+            },
+        )
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        let pool = state.pool.clone();
+        let webhook_client = state.webhook_client.clone();
+        let msg_id = msg.id;
+        tokio::spawn(async move {
+            crate::events::dispatch(
+                &pool,
+                org_id,
+                crate::events::PostbloxEvent::ApprovalRequested {
+                    message_id: msg_id,
+                    inbox_id,
+                    approval_id: approval.id,
+                },
+                &webhook_client,
+            )
+            .await;
+        });
+
+        return Ok((StatusCode::ACCEPTED, Json(msg)));
+    }
+
+    // Build MIME only when actually sending (skipped for Approval mode above)
+    let mime_message_id = format!("<{message_id}>");
+    let raw_mime = crate::mail::builder::build_mime(
+        &inbox.email,
+        &req.to,
+        req.cc.as_deref().unwrap_or(&[]),
+        req.subject.as_deref().unwrap_or(""),
+        req.text_body.as_deref(),
+        req.html_body.as_deref(),
+        &mime_message_id,
+    );
 
     if let Some(ref stalwart) = state.stalwart {
         let to_refs: Vec<&str> = req.to.iter().map(|s| s.as_str()).collect();

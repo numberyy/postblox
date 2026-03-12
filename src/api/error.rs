@@ -7,6 +7,7 @@ pub enum ApiError {
     NotFound,
     BadRequest(String),
     Unauthorized,
+    Forbidden(String),
     Conflict(String),
     Internal(String),
 }
@@ -17,6 +18,7 @@ impl IntoResponse for ApiError {
             Self::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
+            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             Self::Conflict(msg) => (StatusCode::CONFLICT, msg),
             Self::Internal(msg) => {
                 tracing::error!("internal error: {msg}");
@@ -61,6 +63,12 @@ mod tests {
     fn test_unauthorized_returns_401() {
         let resp = ApiError::Unauthorized.into_response();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_forbidden_returns_403() {
+        let resp = ApiError::Forbidden("nope".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]

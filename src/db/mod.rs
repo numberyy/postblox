@@ -3,6 +3,8 @@
 use sqlx::{postgres::PgPoolOptions, PgPool};
 
 pub mod api_keys;
+pub mod approvals;
+pub mod audit;
 pub mod briefing;
 pub mod domains;
 pub mod drafts;
@@ -12,6 +14,7 @@ pub mod labels;
 pub mod linked_accounts;
 pub mod messages;
 pub mod organizations;
+pub mod permissions;
 pub mod slop;
 pub mod slop_feedback;
 pub mod threads;

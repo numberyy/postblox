@@ -1,8 +1,68 @@
-#![allow(dead_code)] // Create* structs used only in tests until Phase 4
+#![allow(dead_code)]
+
+use std::fmt;
+use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendMode {
+    Shadow,
+    #[default]
+    Approval,
+    AutoApprove,
+    Autonomous,
+}
+
+impl fmt::Display for SendMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Shadow => write!(f, "shadow"),
+            Self::Approval => write!(f, "approval"),
+            Self::AutoApprove => write!(f, "auto_approve"),
+            Self::Autonomous => write!(f, "autonomous"),
+        }
+    }
+}
+
+impl FromStr for SendMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "shadow" => Ok(Self::Shadow),
+            "approval" => Ok(Self::Approval),
+            "auto_approve" => Ok(Self::AutoApprove),
+            "autonomous" => Ok(Self::Autonomous),
+            other => Err(format!("invalid send mode: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Permission {
+    pub id: Uuid,
+    pub inbox_id: Uuid,
+    pub send_mode: String,
+    pub rules: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Permission {
+    pub fn mode(&self) -> SendMode {
+        self.send_mode.parse().unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatePermission {
+    pub inbox_id: Uuid,
+    pub send_mode: Option<SendMode>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Organization {
@@ -233,9 +293,245 @@ pub struct SlopFeedback {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditAction {
+    MessageSent,
+    MessageReceived,
+    MessageApproved,
+    MessageRejected,
+    PermissionChanged,
+    InboxCreated,
+    InboxDeleted,
+    WebhookCreated,
+    WebhookDeleted,
+    DomainCreated,
+    SyncTriggered,
+}
+
+impl fmt::Display for AuditAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::MessageSent => "message_sent",
+            Self::MessageReceived => "message_received",
+            Self::MessageApproved => "message_approved",
+            Self::MessageRejected => "message_rejected",
+            Self::PermissionChanged => "permission_changed",
+            Self::InboxCreated => "inbox_created",
+            Self::InboxDeleted => "inbox_deleted",
+            Self::WebhookCreated => "webhook_created",
+            Self::WebhookDeleted => "webhook_deleted",
+            Self::DomainCreated => "domain_created",
+            Self::SyncTriggered => "sync_triggered",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for AuditAction {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "message_sent" => Ok(Self::MessageSent),
+            "message_received" => Ok(Self::MessageReceived),
+            "message_approved" => Ok(Self::MessageApproved),
+            "message_rejected" => Ok(Self::MessageRejected),
+            "permission_changed" => Ok(Self::PermissionChanged),
+            "inbox_created" => Ok(Self::InboxCreated),
+            "inbox_deleted" => Ok(Self::InboxDeleted),
+            "webhook_created" => Ok(Self::WebhookCreated),
+            "webhook_deleted" => Ok(Self::WebhookDeleted),
+            "domain_created" => Ok(Self::DomainCreated),
+            "sync_triggered" => Ok(Self::SyncTriggered),
+            other => Err(format!("unknown audit action: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AuditEntry {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub inbox_id: Option<Uuid>,
+    pub action: String,
+    pub actor: String,
+    pub details: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+impl fmt::Display for ApprovalStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl FromStr for ApprovalStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "approved" => Ok(Self::Approved),
+            "rejected" => Ok(Self::Rejected),
+            other => Err(format!("unknown approval status: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Approval {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub inbox_id: Uuid,
+    pub message_id: Uuid,
+    pub status: String,
+    pub decided_by: Option<String>,
+    pub decided_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateApproval {
+    pub org_id: Uuid,
+    pub inbox_id: Uuid,
+    pub message_id: Uuid,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_send_mode_display_all_variants() {
+        assert_eq!(SendMode::Shadow.to_string(), "shadow");
+        assert_eq!(SendMode::Approval.to_string(), "approval");
+        assert_eq!(SendMode::AutoApprove.to_string(), "auto_approve");
+        assert_eq!(SendMode::Autonomous.to_string(), "autonomous");
+    }
+
+    #[test]
+    fn test_send_mode_from_str_roundtrip() {
+        for mode in [
+            SendMode::Shadow,
+            SendMode::Approval,
+            SendMode::AutoApprove,
+            SendMode::Autonomous,
+        ] {
+            let s = mode.to_string();
+            let parsed: SendMode = s.parse().unwrap();
+            assert_eq!(parsed, mode);
+        }
+    }
+
+    #[test]
+    fn test_send_mode_from_str_invalid_returns_err() {
+        let result: Result<SendMode, _> = "invalid".parse();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid send mode"));
+    }
+
+    #[test]
+    fn test_send_mode_default_is_approval() {
+        assert_eq!(SendMode::default(), SendMode::Approval);
+    }
+
+    #[test]
+    fn test_send_mode_serde_roundtrip() {
+        let mode = SendMode::AutoApprove;
+        let json = serde_json::to_string(&mode).unwrap();
+        assert_eq!(json, "\"auto_approve\"");
+        let back: SendMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, mode);
+    }
+
+    #[test]
+    fn test_send_mode_serde_all_variants() {
+        for (mode, expected_json) in [
+            (SendMode::Shadow, "\"shadow\""),
+            (SendMode::Approval, "\"approval\""),
+            (SendMode::AutoApprove, "\"auto_approve\""),
+            (SendMode::Autonomous, "\"autonomous\""),
+        ] {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, expected_json);
+            let back: SendMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, mode);
+        }
+    }
+
+    #[test]
+    fn test_permission_mode_parses_send_mode() {
+        let perm = Permission {
+            id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+            send_mode: "autonomous".into(),
+            rules: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        assert_eq!(perm.mode(), SendMode::Autonomous);
+    }
+
+    #[test]
+    fn test_permission_mode_defaults_on_invalid() {
+        let perm = Permission {
+            id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+            send_mode: "garbage".into(),
+            rules: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        assert_eq!(perm.mode(), SendMode::Approval);
+    }
+
+    #[test]
+    fn test_permission_serialization_roundtrip() {
+        let perm = Permission {
+            id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+            send_mode: "approval".into(),
+            rules: serde_json::json!({"max_daily": 100}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&perm).unwrap();
+        let back: Permission = serde_json::from_str(&json).unwrap();
+        assert_eq!(perm, back);
+    }
+
+    #[test]
+    fn test_create_permission_defaults_send_mode() {
+        let json = serde_json::json!({
+            "inbox_id": Uuid::new_v4()
+        });
+        let cp: CreatePermission = serde_json::from_value(json).unwrap();
+        assert!(cp.send_mode.is_none());
+    }
+
+    #[test]
+    fn test_create_permission_with_explicit_mode() {
+        let json = serde_json::json!({
+            "inbox_id": Uuid::new_v4(),
+            "send_mode": "autonomous"
+        });
+        let cp: CreatePermission = serde_json::from_value(json).unwrap();
+        assert_eq!(cp.send_mode, Some(SendMode::Autonomous));
+    }
 
     #[test]
     fn test_organization_serialization_roundtrip() {
@@ -640,5 +936,176 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn test_audit_action_display_all_variants() {
+        assert_eq!(AuditAction::MessageSent.to_string(), "message_sent");
+        assert_eq!(AuditAction::MessageReceived.to_string(), "message_received");
+        assert_eq!(AuditAction::MessageApproved.to_string(), "message_approved");
+        assert_eq!(AuditAction::MessageRejected.to_string(), "message_rejected");
+        assert_eq!(
+            AuditAction::PermissionChanged.to_string(),
+            "permission_changed"
+        );
+        assert_eq!(AuditAction::InboxCreated.to_string(), "inbox_created");
+        assert_eq!(AuditAction::InboxDeleted.to_string(), "inbox_deleted");
+        assert_eq!(AuditAction::WebhookCreated.to_string(), "webhook_created");
+        assert_eq!(AuditAction::WebhookDeleted.to_string(), "webhook_deleted");
+        assert_eq!(AuditAction::DomainCreated.to_string(), "domain_created");
+        assert_eq!(AuditAction::SyncTriggered.to_string(), "sync_triggered");
+    }
+
+    #[test]
+    fn test_audit_action_from_str_roundtrip() {
+        let actions = [
+            AuditAction::MessageSent,
+            AuditAction::MessageReceived,
+            AuditAction::MessageApproved,
+            AuditAction::MessageRejected,
+            AuditAction::PermissionChanged,
+            AuditAction::InboxCreated,
+            AuditAction::InboxDeleted,
+            AuditAction::WebhookCreated,
+            AuditAction::WebhookDeleted,
+            AuditAction::DomainCreated,
+            AuditAction::SyncTriggered,
+        ];
+        for action in actions {
+            let s = action.to_string();
+            let parsed: AuditAction = s.parse().unwrap();
+            assert_eq!(parsed, action);
+        }
+    }
+
+    #[test]
+    fn test_audit_action_from_str_unknown_returns_err() {
+        let result: Result<AuditAction, _> = "nonexistent".parse();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown audit action"));
+    }
+
+    #[test]
+    fn test_audit_action_serde_roundtrip() {
+        let action = AuditAction::MessageApproved;
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(json, "\"message_approved\"");
+        let back: AuditAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, action);
+    }
+
+    #[test]
+    fn test_audit_entry_serialization_roundtrip() {
+        let entry = AuditEntry {
+            id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            inbox_id: Some(Uuid::new_v4()),
+            action: "message_sent".into(),
+            actor: "api_key:pb_1234".into(),
+            details: serde_json::json!({"to": "user@example.com"}),
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, back);
+    }
+
+    #[test]
+    fn test_audit_entry_nullable_inbox_id() {
+        let entry = AuditEntry {
+            id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            inbox_id: None,
+            action: "domain_created".into(),
+            actor: "system".into(),
+            details: serde_json::json!({}),
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert!(back.inbox_id.is_none());
+    }
+
+    #[test]
+    fn test_approval_status_display_all_variants() {
+        assert_eq!(ApprovalStatus::Pending.to_string(), "pending");
+        assert_eq!(ApprovalStatus::Approved.to_string(), "approved");
+        assert_eq!(ApprovalStatus::Rejected.to_string(), "rejected");
+    }
+
+    #[test]
+    fn test_approval_status_from_str_roundtrip() {
+        for status in [
+            ApprovalStatus::Pending,
+            ApprovalStatus::Approved,
+            ApprovalStatus::Rejected,
+        ] {
+            let s = status.to_string();
+            let parsed: ApprovalStatus = s.parse().unwrap();
+            assert_eq!(parsed, status);
+        }
+    }
+
+    #[test]
+    fn test_approval_status_from_str_unknown_returns_err() {
+        let result: Result<ApprovalStatus, _> = "unknown".parse();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown approval status"));
+    }
+
+    #[test]
+    fn test_approval_status_serde_roundtrip() {
+        let status = ApprovalStatus::Rejected;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, "\"rejected\"");
+        let back: ApprovalStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, status);
+    }
+
+    #[test]
+    fn test_approval_serialization_roundtrip() {
+        let approval = Approval {
+            id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+            message_id: Uuid::new_v4(),
+            status: "pending".into(),
+            decided_by: None,
+            decided_at: None,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&approval).unwrap();
+        let back: Approval = serde_json::from_str(&json).unwrap();
+        assert_eq!(approval, back);
+    }
+
+    #[test]
+    fn test_approval_with_decision() {
+        let approval = Approval {
+            id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+            message_id: Uuid::new_v4(),
+            status: "approved".into(),
+            decided_by: Some("admin@example.com".into()),
+            decided_at: Some(Utc::now()),
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&approval).unwrap();
+        let back: Approval = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.decided_by.as_deref(), Some("admin@example.com"));
+        assert!(back.decided_at.is_some());
+    }
+
+    #[test]
+    fn test_create_approval_serialization_roundtrip() {
+        let ca = CreateApproval {
+            org_id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+            message_id: Uuid::new_v4(),
+        };
+        let json = serde_json::to_string(&ca).unwrap();
+        let back: CreateApproval = serde_json::from_str(&json).unwrap();
+        assert_eq!(ca, back);
     }
 }
