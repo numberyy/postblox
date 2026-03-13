@@ -52,7 +52,7 @@ pub async fn list(
 ) -> Result<Json<Vec<Inbox>>, ApiError> {
     let inboxes = crate::db::inboxes::list_by_org(&state.pool, org_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(inboxes))
 }
@@ -81,7 +81,7 @@ pub async fn delete(
 
     crate::db::inboxes::delete(&state.pool, id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -48,7 +48,7 @@ pub async fn list(
 
     let labels = crate::db::labels::list_by_inbox(&state.pool, inbox_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(labels))
 }
@@ -62,7 +62,7 @@ pub async fn delete(
 
     let label = crate::db::labels::get_by_id(&state.pool, id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
 
     if label.inbox_id != inbox_id {
@@ -71,7 +71,7 @@ pub async fn delete(
 
     crate::db::labels::delete(&state.pool, id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -86,7 +86,7 @@ pub async fn add_to_message(
 
     let msg = crate::db::messages::get_by_id(&state.pool, message_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
     if msg.inbox_id != inbox_id {
         return Err(ApiError::NotFound);
@@ -94,7 +94,7 @@ pub async fn add_to_message(
 
     let label = crate::db::labels::get_by_id(&state.pool, req.label_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
     if label.inbox_id != inbox_id {
         return Err(ApiError::NotFound);
@@ -102,7 +102,7 @@ pub async fn add_to_message(
 
     crate::db::labels::add_to_message(&state.pool, message_id, req.label_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -116,7 +116,7 @@ pub async fn remove_from_message(
 
     let msg = crate::db::messages::get_by_id(&state.pool, message_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
     if msg.inbox_id != inbox_id {
         return Err(ApiError::NotFound);
@@ -124,7 +124,7 @@ pub async fn remove_from_message(
 
     let label = crate::db::labels::get_by_id(&state.pool, label_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
     if label.inbox_id != inbox_id {
         return Err(ApiError::NotFound);
@@ -132,7 +132,7 @@ pub async fn remove_from_message(
 
     crate::db::labels::remove_from_message(&state.pool, message_id, label_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -146,7 +146,7 @@ pub async fn list_for_message(
 
     let msg = crate::db::messages::get_by_id(&state.pool, message_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
     if msg.inbox_id != inbox_id {
         return Err(ApiError::NotFound);
@@ -154,7 +154,7 @@ pub async fn list_for_message(
 
     let labels = crate::db::labels::list_for_message(&state.pool, message_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(labels))
 }

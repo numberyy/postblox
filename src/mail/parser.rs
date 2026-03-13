@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use mail_parser::{Address, HeaderValue, MessageParser};
 
 use crate::mail::error::MailError;
@@ -14,8 +13,6 @@ pub struct ParsedEmail {
     pub subject: Option<String>,
     pub text_body: Option<String>,
     pub html_body: Option<String>,
-    #[allow(dead_code)] // populated by parser, consumed when we add date-based sorting
-    pub date: Option<DateTime<Utc>>,
     pub raw_headers: serde_json::Value,
 }
 
@@ -56,10 +53,6 @@ pub fn parse(raw: &[u8]) -> Result<ParsedEmail, MailError> {
         .map(|s| s.into_owned())
         .filter(|s| !s.is_empty());
 
-    let date = message
-        .date()
-        .and_then(|dt| DateTime::from_timestamp(dt.to_timestamp(), 0));
-
     let raw_headers = build_raw_headers(&message);
 
     Ok(ParsedEmail {
@@ -72,7 +65,6 @@ pub fn parse(raw: &[u8]) -> Result<ParsedEmail, MailError> {
         subject,
         text_body,
         html_body,
-        date,
         raw_headers,
     })
 }
@@ -166,7 +158,6 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("simple test email"));
-        assert!(email.date.is_some());
         assert!(email.in_reply_to.is_none());
         assert!(email.references.is_empty());
         assert!(email.cc.is_empty());

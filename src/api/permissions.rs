@@ -23,8 +23,8 @@ pub async fn get(
 
     let perm = crate::db::permissions::get_by_inbox(&state.pool, inbox_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or(ApiError::NotFound)?;
+        .map_err(ApiError::from_sqlx)?
+        .unwrap_or_else(|| Permission::default_for_inbox(inbox_id));
 
     Ok(Json(perm))
 }
@@ -50,7 +50,7 @@ pub async fn upsert(
 
     let perm = crate::db::permissions::upsert(&state.pool, inbox_id, mode, &rules)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     let pool = state.pool.clone();
     tokio::spawn(async move {

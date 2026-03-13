@@ -101,7 +101,6 @@ mod tests {
             subject: subject.map(String::from),
             text_body: None,
             html_body: None,
-            date: None,
             raw_headers: serde_json::Value::Null,
         }
     }

@@ -21,7 +21,7 @@ pub async fn list(
 ) -> Result<Json<Vec<NotificationConfig>>, ApiError> {
     let configs = crate::db::notifications::list_active(&state.pool, org_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(configs))
 }
@@ -39,7 +39,7 @@ pub async fn create(
 
     let nc = crate::db::notifications::create(&state.pool, &input)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok((StatusCode::CREATED, Json(nc)))
 }
@@ -51,7 +51,7 @@ pub async fn delete(
 ) -> Result<StatusCode, ApiError> {
     let deleted = crate::db::notifications::delete(&state.pool, id, org_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     if deleted {
         Ok(StatusCode::NO_CONTENT)
@@ -93,6 +93,16 @@ mod tests {
         });
         let req: CreateNotificationRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.provider, NotificationProvider::Webhook);
+    }
+
+    #[test]
+    fn test_create_notification_request_deserialize_desktop() {
+        let json = serde_json::json!({
+            "provider": "desktop",
+            "config": {}
+        });
+        let req: CreateNotificationRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.provider, NotificationProvider::Desktop);
     }
 
     #[test]

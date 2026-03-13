@@ -98,7 +98,7 @@ pub async fn list(
 ) -> Result<Json<Vec<KeyResponse>>, ApiError> {
     let keys = crate::db::api_keys::list_by_org(&state.pool, org_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(keys.into_iter().map(KeyResponse::from).collect()))
 }
@@ -110,7 +110,7 @@ pub async fn delete(
 ) -> Result<StatusCode, ApiError> {
     let deleted = crate::db::api_keys::delete(&state.pool, id, org_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     if !deleted {
         return Err(ApiError::NotFound);

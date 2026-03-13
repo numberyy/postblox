@@ -6,8 +6,7 @@ use uuid::Uuid;
 
 use super::auth::AuthOrg;
 use super::error::ApiError;
-use super::{get_inbox_for_org, AppState};
-use crate::core::slop;
+use super::{check_send_allowed, get_inbox_for_org, spawn_approval_event, AppState, SendCheck};
 use crate::models::{Message, SendMode};
 
 #[derive(Deserialize)]
@@ -41,75 +40,18 @@ pub async fn send(
         ));
     }
 
-    if let Err(violations) = crate::mail::guard::scan(
-        req.subject.as_deref(),
-        req.text_body.as_deref(),
-        req.html_body.as_deref(),
-        &state.guard_patterns,
-    ) {
-        let details: Vec<String> = violations
-            .iter()
-            .map(|v| format!("{} in {}", v.pattern_name, v.field))
-            .collect();
-        return Err(ApiError::BadRequest(format!(
-            "message blocked: detected {}",
-            details.join(", ")
-        )));
-    }
-
-    let permission = match crate::db::permissions::get_by_inbox(&state.pool, inbox_id).await {
-        Ok(perm) => perm,
-        Err(e) => return Err(ApiError::Internal(e.to_string())),
-    };
-    let send_mode = permission.as_ref().map(|p| p.mode()).unwrap_or_default();
-
-    match send_mode {
-        SendMode::Shadow => {
-            return Err(ApiError::Forbidden(
-                "inbox is in shadow mode, sending disabled".into(),
-            ));
-        }
-        SendMode::Approval => {}
-        SendMode::AutoApprove => {
-            if let Some(ref perm) = permission {
-                let slop_score = {
-                    let input = slop::ClassifierInput {
-                        from_addr: &inbox.email,
-                        subject: req.subject.as_deref(),
-                        text_body: req.text_body.as_deref(),
-                        raw_headers: None,
-                        sender_slop_ratio: None,
-                    };
-                    slop::classify(&input).score as f64
-                };
-                if let crate::core::rules::RuleVerdict::Block { reason, .. } =
-                    perm.rules().evaluate(
-                        &req.to,
-                        req.subject.as_deref().unwrap_or(""),
-                        req.text_body.as_deref().unwrap_or(""),
-                        Some(slop_score),
-                    )
-                {
-                    return Err(ApiError::Forbidden(format!("rule check failed: {reason}")));
-                }
-            }
-        }
-        SendMode::Autonomous => {}
-    }
-
-    if let Err(e) = crate::hooks::run_before_send_hooks(
-        &state.hooks,
-        &serde_json::json!({
-            "to": req.to,
-            "subject": req.subject,
-            "body": req.text_body,
-            "inbox_id": inbox_id,
-        }),
+    let send_mode = check_send_allowed(
+        &state,
+        inbox_id,
+        &SendCheck {
+            to: &req.to,
+            subject: req.subject.as_deref(),
+            text_body: req.text_body.as_deref(),
+            html_body: req.html_body.as_deref(),
+            from_addr: &inbox.email,
+        },
     )
-    .await
-    {
-        return Err(ApiError::Forbidden(e.to_string()));
-    }
+    .await?;
 
     // Store without angle brackets for consistent threading with inbound (parser strips them).
     let message_id = format!("{}@postblox", Uuid::new_v4());
@@ -134,7 +76,7 @@ pub async fn send(
 
     let msg = crate::db::messages::create(&state.pool, &cm)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     if send_mode == SendMode::Approval {
         let approval = crate::db::approvals::create(
@@ -146,27 +88,9 @@ pub async fn send(
             },
         )
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
-        let pool = state.pool.clone();
-        let webhook_client = state.webhook_client.clone();
-        let hooks = state.hooks.clone();
-        let msg_id = msg.id;
-        tokio::spawn(async move {
-            crate::events::dispatch(
-                &pool,
-                org_id,
-                crate::events::PostbloxEvent::ApprovalRequested {
-                    message_id: msg_id,
-                    inbox_id,
-                    approval_id: approval.id,
-                },
-                &webhook_client,
-                &hooks,
-            )
-            .await;
-        });
-
+        spawn_approval_event(&state, org_id, inbox_id, msg.id, approval.id);
         return Ok((StatusCode::ACCEPTED, Json(msg)));
     }
 
@@ -207,7 +131,7 @@ pub async fn list(
     let messages = if let Some(thread_id) = params.thread_id {
         let thread = crate::db::threads::get_by_id(&state.pool, thread_id)
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .map_err(ApiError::from_sqlx)?
             .ok_or(ApiError::NotFound)?;
         if thread.inbox_id != inbox_id {
             return Err(ApiError::NotFound);
@@ -218,7 +142,7 @@ pub async fn list(
     } else {
         crate::db::messages::list_by_inbox(&state.pool, inbox_id, limit, offset).await
     }
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(messages))
 }
@@ -232,7 +156,7 @@ pub async fn get(
 
     let msg = crate::db::messages::get_by_id(&state.pool, id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
 
     if msg.inbox_id != inbox_id {

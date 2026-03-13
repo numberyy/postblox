@@ -89,7 +89,7 @@ pub async fn list(
 ) -> Result<Json<Vec<Domain>>, ApiError> {
     let domains = crate::db::domains::list_by_org(&state.pool, org_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
     Ok(Json(domains))
 }
 
@@ -139,13 +139,13 @@ pub async fn verify(
     if verified {
         let updated = crate::db::domains::set_verified(&state.pool, domain.id)
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .map_err(ApiError::from_sqlx)?
             .ok_or(ApiError::NotFound)?;
         Ok(Json(updated))
     } else {
         let updated = crate::db::domains::update_status(&state.pool, domain.id, "failed", None)
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .map_err(ApiError::from_sqlx)?
             .ok_or(ApiError::NotFound)?;
         Ok(Json(updated))
     }
@@ -168,7 +168,7 @@ pub async fn delete(
 
     crate::db::domains::delete(&state.pool, id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -180,7 +180,7 @@ async fn get_domain_for_org(
 ) -> Result<Domain, ApiError> {
     let domain = crate::db::domains::get_by_id(pool, id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
     if domain.org_id != org_id {
         return Err(ApiError::NotFound);

@@ -63,7 +63,7 @@ pub async fn list(
 ) -> Result<Json<Vec<crate::models::LinkedAccount>>, ApiError> {
     let accounts = crate::db::linked_accounts::list_by_org(&state.pool, org_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
     Ok(Json(accounts))
 }
 
@@ -84,7 +84,7 @@ pub async fn delete(
     get_account_for_org(&state.pool, id, org_id).await?;
     crate::db::linked_accounts::delete(&state.pool, id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -102,7 +102,7 @@ pub async fn sync(
         crate::sync::SyncStatus::Syncing,
     )
     .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    .map_err(ApiError::from_sqlx)?;
 
     match crate::sync::imap::one_shot_sync(&state.pool, &account, &inbox).await {
         Ok(result) => {
@@ -143,7 +143,7 @@ async fn get_account_for_org(
 ) -> Result<crate::models::LinkedAccount, ApiError> {
     let account = crate::db::linked_accounts::get_by_id(pool, id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
     if account.org_id != org_id {
         return Err(ApiError::NotFound);

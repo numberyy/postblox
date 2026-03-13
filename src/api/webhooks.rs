@@ -96,7 +96,7 @@ pub async fn list(
 ) -> Result<Json<Vec<WebhookResponse>>, ApiError> {
     let webhooks = crate::db::webhooks::list_by_org(&state.pool, org_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(
         webhooks.into_iter().map(WebhookResponse::from).collect(),
@@ -121,7 +121,7 @@ pub async fn delete(
 
     crate::db::webhooks::delete(&state.pool, wh.id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -133,7 +133,7 @@ async fn get_webhook_for_org(
 ) -> Result<crate::models::Webhook, ApiError> {
     let wh = crate::db::webhooks::get_by_id(pool, id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
     if wh.org_id != org_id {
         return Err(ApiError::NotFound);

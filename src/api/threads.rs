@@ -19,7 +19,7 @@ pub async fn list(
 
     let threads = crate::db::threads::list_by_inbox(&state.pool, inbox_id, limit, offset)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(threads))
 }
@@ -33,7 +33,7 @@ pub async fn get(
 
     let thread = crate::db::threads::get_by_id(&state.pool, id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
 
     if thread.inbox_id != inbox_id {

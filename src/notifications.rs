@@ -63,6 +63,26 @@ pub async fn notify_org(
                     }
                 });
             }
+            "desktop" => {
+                let title = title.to_string();
+                let body = body.to_string();
+                tokio::spawn(async move {
+                    match tokio::process::Command::new("notify-send")
+                        .arg(&title)
+                        .arg(&body)
+                        .output()
+                        .await
+                    {
+                        Ok(out) if !out.status.success() => {
+                            tracing::warn!("notify-send exited with {}", out.status);
+                        }
+                        Err(e) => {
+                            tracing::warn!("desktop notification failed (notify-send not available?): {e}");
+                        }
+                        _ => {}
+                    }
+                });
+            }
             "email" => {
                 tracing::debug!(config_id = %nc.id, "email notification provider not yet implemented");
             }

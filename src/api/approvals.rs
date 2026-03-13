@@ -9,6 +9,54 @@ use super::error::ApiError;
 use super::AppState;
 use crate::models::{Approval, ApprovalStatus};
 
+async fn record_trust_and_maybe_upgrade(
+    pool: &sqlx::PgPool,
+    org_id: Uuid,
+    inbox_id: Uuid,
+    approved: bool,
+    threshold: i32,
+    webhook_client: &reqwest::Client,
+    hooks: &[crate::hooks::HookConfig],
+) {
+    if let Err(e) = crate::db::trust::record_send_outcome(pool, inbox_id, approved).await {
+        tracing::error!("failed to record trust outcome: {e}");
+    }
+    if !approved {
+        return;
+    }
+    match crate::db::trust::check_and_upgrade(pool, inbox_id, threshold).await {
+        Ok(Some(score)) => {
+            crate::events::audit(
+                pool,
+                org_id,
+                Some(inbox_id),
+                crate::models::AuditAction::PermissionChanged,
+                "system:trust_auto_upgrade",
+                serde_json::json!({
+                    "new_mode": "auto_approve",
+                    "approved_count": score.approved_count,
+                    "threshold": threshold,
+                }),
+            )
+            .await;
+            crate::events::dispatch(
+                pool,
+                org_id,
+                crate::events::PostbloxEvent::TrustChanged {
+                    inbox_id,
+                    new_mode: crate::models::SendMode::AutoApprove,
+                    approved_count: score.approved_count,
+                },
+                webhook_client,
+                hooks,
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(e) => tracing::error!("failed to check trust upgrade: {e}"),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct ApprovalListParams {
     pub limit: Option<i64>,
@@ -44,7 +92,7 @@ pub async fn list(
         limit,
     )
     .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(approvals))
 }
@@ -56,7 +104,7 @@ pub async fn get(
 ) -> Result<Json<Approval>, ApiError> {
     crate::db::approvals::get(&state.pool, org_id, id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .map(Json)
         .ok_or(ApiError::NotFound)
 }
@@ -69,7 +117,7 @@ pub async fn approve(
 ) -> Result<Json<Approval>, ApiError> {
     let approval = crate::db::approvals::approve(&state.pool, org_id, id, &req.decided_by)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
 
     let (msg_result, inbox_result) = tokio::join!(
@@ -77,10 +125,10 @@ pub async fn approve(
         crate::db::inboxes::get_by_id(&state.pool, approval.inbox_id),
     );
     let msg = msg_result
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::Internal("approved message not found".into()))?;
     let inbox = inbox_result
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::Internal("inbox not found".into()))?;
 
     let (to, cc) = super::deliver::extract_addrs(&msg);
@@ -122,40 +170,10 @@ pub async fn approve(
         )
         .await;
 
-        if let Err(e) = crate::db::trust::record_send_outcome(&pool, inbox_id, true).await {
-            tracing::error!("failed to record trust outcome: {e}");
-        }
-        match crate::db::trust::check_and_upgrade(&pool, inbox_id, threshold).await {
-            Ok(Some(score)) => {
-                crate::events::audit(
-                    &pool,
-                    org_id,
-                    Some(inbox_id),
-                    crate::models::AuditAction::PermissionChanged,
-                    "system:trust_auto_upgrade",
-                    serde_json::json!({
-                        "new_mode": "auto_approve",
-                        "approved_count": score.approved_count,
-                        "threshold": threshold,
-                    }),
-                )
-                .await;
-                crate::events::dispatch(
-                    &pool,
-                    org_id,
-                    crate::events::PostbloxEvent::TrustChanged {
-                        inbox_id,
-                        new_mode: crate::models::SendMode::AutoApprove,
-                        approved_count: score.approved_count,
-                    },
-                    &webhook_client,
-                    &hooks,
-                )
-                .await;
-            }
-            Ok(None) => {}
-            Err(e) => tracing::error!("failed to check trust upgrade: {e}"),
-        }
+        record_trust_and_maybe_upgrade(
+            &pool, org_id, inbox_id, true, threshold, &webhook_client, &hooks,
+        )
+        .await;
     });
 
     Ok(Json(approval))
@@ -169,7 +187,7 @@ pub async fn reject(
 ) -> Result<Json<Approval>, ApiError> {
     let approval = crate::db::approvals::reject(&state.pool, org_id, id, &req.decided_by)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
 
     let pool = state.pool.clone();
@@ -217,7 +235,7 @@ pub async fn batch(
         &req.decided_by,
     )
     .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    .map_err(ApiError::from_sqlx)?;
 
     let state_clone = state.clone();
     let status = req.status;
@@ -290,46 +308,16 @@ pub async fn batch(
             }
 
             let approved = status == ApprovalStatus::Approved;
-            if let Err(e) =
-                crate::db::trust::record_send_outcome(&state_clone.pool, d.inbox_id, approved).await
-            {
-                tracing::error!("failed to record trust outcome: {e}");
-            }
-            if approved {
-                match crate::db::trust::check_and_upgrade(&state_clone.pool, d.inbox_id, threshold)
-                    .await
-                {
-                    Ok(Some(score)) => {
-                        crate::events::audit(
-                            &state_clone.pool,
-                            org_id,
-                            Some(d.inbox_id),
-                            crate::models::AuditAction::PermissionChanged,
-                            "system:trust_auto_upgrade",
-                            serde_json::json!({
-                                "new_mode": "auto_approve",
-                                "approved_count": score.approved_count,
-                                "threshold": threshold,
-                            }),
-                        )
-                        .await;
-                        crate::events::dispatch(
-                            &state_clone.pool,
-                            org_id,
-                            crate::events::PostbloxEvent::TrustChanged {
-                                inbox_id: d.inbox_id,
-                                new_mode: crate::models::SendMode::AutoApprove,
-                                approved_count: score.approved_count,
-                            },
-                            &state_clone.webhook_client,
-                            &state_clone.hooks,
-                        )
-                        .await;
-                    }
-                    Ok(None) => {}
-                    Err(e) => tracing::error!("failed to check trust upgrade: {e}"),
-                }
-            }
+            record_trust_and_maybe_upgrade(
+                &state_clone.pool,
+                org_id,
+                d.inbox_id,
+                approved,
+                threshold,
+                &state_clone.webhook_client,
+                &state_clone.hooks,
+            )
+            .await;
         }
     });
 

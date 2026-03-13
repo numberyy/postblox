@@ -35,8 +35,6 @@ pub struct AppState {
     pub webhook_client: reqwest::Client,
     pub inbound_token: Option<String>,
     pub guard_patterns: Vec<crate::mail::guard::GuardPattern>,
-    #[allow(dead_code)] // used once relay sending is wired up
-    pub relay: Option<crate::config::RelayConfig>,
     pub embedding_provider: Option<std::sync::Arc<dyn crate::embeddings::EmbeddingProvider>>,
     pub embedding_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
     pub trust_auto_upgrade_threshold: i32,
@@ -68,6 +66,113 @@ pub async fn get_inbox_for_org(
         return Err(error::ApiError::NotFound);
     }
     Ok(inbox)
+}
+
+pub struct SendCheck<'a> {
+    pub to: &'a [String],
+    pub subject: Option<&'a str>,
+    pub text_body: Option<&'a str>,
+    pub html_body: Option<&'a str>,
+    pub from_addr: &'a str,
+}
+
+pub async fn check_send_allowed(
+    state: &AppState,
+    inbox_id: Uuid,
+    check: &SendCheck<'_>,
+) -> Result<crate::models::SendMode, error::ApiError> {
+    if let Err(violations) = crate::mail::guard::scan(
+        check.subject,
+        check.text_body,
+        check.html_body,
+        &state.guard_patterns,
+    ) {
+        let details: Vec<String> = violations
+            .iter()
+            .map(|v| format!("{} in {}", v.pattern_name, v.field))
+            .collect();
+        return Err(error::ApiError::BadRequest(format!(
+            "message blocked: detected {}",
+            details.join(", ")
+        )));
+    }
+
+    let permission = crate::db::permissions::get_by_inbox(&state.pool, inbox_id)
+        .await
+        .map_err(|e| error::ApiError::Internal(e.to_string()))?;
+    let send_mode = permission.as_ref().map(|p| p.mode()).unwrap_or_default();
+
+    match send_mode {
+        crate::models::SendMode::Shadow => {
+            return Err(error::ApiError::Forbidden(
+                "inbox is in shadow mode, sending disabled".into(),
+            ));
+        }
+        crate::models::SendMode::Approval => {}
+        crate::models::SendMode::AutoApprove => {
+            if let Some(ref perm) = permission {
+                let slop_score = {
+                    let input = crate::core::slop::ClassifierInput {
+                        from_addr: check.from_addr,
+                        subject: check.subject,
+                        text_body: check.text_body,
+                        raw_headers: None,
+                        sender_slop_ratio: None,
+                    };
+                    crate::core::slop::classify(&input).score as f64
+                };
+                if let crate::core::rules::RuleVerdict::Block { reason, .. } =
+                    perm.rules().evaluate(
+                        check.to,
+                        check.subject.unwrap_or(""),
+                        check.text_body.unwrap_or(""),
+                        Some(slop_score),
+                    )
+                {
+                    return Err(error::ApiError::Forbidden(format!(
+                        "rule check failed: {reason}"
+                    )));
+                }
+            }
+        }
+        crate::models::SendMode::Autonomous => {}
+    }
+
+    if let Err(e) = crate::hooks::run_before_send_hooks(
+        &state.hooks,
+        &serde_json::json!({
+            "to": check.to,
+            "subject": check.subject,
+            "body": check.text_body,
+            "inbox_id": inbox_id,
+        }),
+    )
+    .await
+    {
+        return Err(error::ApiError::Forbidden(e.to_string()));
+    }
+
+    Ok(send_mode)
+}
+
+pub fn spawn_approval_event(state: &AppState, org_id: Uuid, inbox_id: Uuid, msg_id: Uuid, approval_id: Uuid) {
+    let pool = state.pool.clone();
+    let webhook_client = state.webhook_client.clone();
+    let hooks = state.hooks.clone();
+    tokio::spawn(async move {
+        crate::events::dispatch(
+            &pool,
+            org_id,
+            crate::events::PostbloxEvent::ApprovalRequested {
+                message_id: msg_id,
+                inbox_id,
+                approval_id,
+            },
+            &webhook_client,
+            &hooks,
+        )
+        .await;
+    });
 }
 
 pub fn router(state: AppState) -> axum::Router {

@@ -17,12 +17,12 @@ pub enum SendMode {
 
 impl fmt::Display for SendMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Shadow => write!(f, "shadow"),
-            Self::Approval => write!(f, "approval"),
-            Self::AutoApprove => write!(f, "auto_approve"),
-            Self::Autonomous => write!(f, "autonomous"),
-        }
+        f.write_str(match self {
+            Self::Shadow => "shadow",
+            Self::Approval => "approval",
+            Self::AutoApprove => "auto_approve",
+            Self::Autonomous => "autonomous",
+        })
     }
 }
 
@@ -51,6 +51,18 @@ pub struct Permission {
 }
 
 impl Permission {
+    pub fn default_for_inbox(inbox_id: Uuid) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::nil(),
+            inbox_id,
+            send_mode: SendMode::Approval.to_string(),
+            rules: serde_json::json!([]),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     pub fn mode(&self) -> SendMode {
         self.send_mode.parse().unwrap_or_default()
     }
@@ -317,7 +329,7 @@ pub enum AuditAction {
 
 impl fmt::Display for AuditAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
+        f.write_str(match self {
             Self::MessageSent => "message_sent",
             Self::MessageReceived => "message_received",
             Self::MessageApproved => "message_approved",
@@ -329,8 +341,7 @@ impl fmt::Display for AuditAction {
             Self::WebhookDeleted => "webhook_deleted",
             Self::DomainCreated => "domain_created",
             Self::SyncTriggered => "sync_triggered",
-        };
-        write!(f, "{s}")
+        })
     }
 }
 
@@ -376,12 +387,11 @@ pub enum ApprovalStatus {
 
 impl fmt::Display for ApprovalStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
+        f.write_str(match self {
             Self::Pending => "pending",
             Self::Approved => "approved",
             Self::Rejected => "rejected",
-        };
-        write!(f, "{s}")
+        })
     }
 }
 
@@ -437,16 +447,17 @@ pub enum NotificationProvider {
     Ntfy,
     Email,
     Webhook,
+    Desktop,
 }
 
 impl fmt::Display for NotificationProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
+        f.write_str(match self {
             Self::Ntfy => "ntfy",
             Self::Email => "email",
             Self::Webhook => "webhook",
-        };
-        write!(f, "{s}")
+            Self::Desktop => "desktop",
+        })
     }
 }
 
@@ -458,6 +469,7 @@ impl FromStr for NotificationProvider {
             "ntfy" => Ok(Self::Ntfy),
             "email" => Ok(Self::Email),
             "webhook" => Ok(Self::Webhook),
+            "desktop" => Ok(Self::Desktop),
             other => Err(format!("unknown notification provider: {other}")),
         }
     }
@@ -1200,6 +1212,7 @@ mod tests {
         assert_eq!(NotificationProvider::Ntfy.to_string(), "ntfy");
         assert_eq!(NotificationProvider::Email.to_string(), "email");
         assert_eq!(NotificationProvider::Webhook.to_string(), "webhook");
+        assert_eq!(NotificationProvider::Desktop.to_string(), "desktop");
     }
 
     #[test]
@@ -1208,6 +1221,7 @@ mod tests {
             NotificationProvider::Ntfy,
             NotificationProvider::Email,
             NotificationProvider::Webhook,
+            NotificationProvider::Desktop,
         ] {
             let s = provider.to_string();
             let parsed: NotificationProvider = s.parse().unwrap();

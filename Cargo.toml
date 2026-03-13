@@ -38,6 +38,7 @@ tokio-rustls = "0.26"
 futures = "0.3"
 webpki-roots = "1"
 chrono-tz = "0.10"
+lettre = { version = "0.11.19", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "pool"] }
 
 [profile.release]
 opt-level = "z"

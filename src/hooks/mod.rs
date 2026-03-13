@@ -238,6 +238,111 @@ mod tests {
         assert!(matches!(result, Err(HookError::Blocked(_))));
     }
 
+    #[tokio::test]
+    async fn test_run_one_invalid_json_returns_error() {
+        let hook = HookConfig {
+            event: "test".into(),
+            command: "bash".into(),
+            args: vec![
+                "-c".into(),
+                "cat > /dev/null; echo 'not valid json'".into(),
+            ],
+            timeout_secs: 5,
+        };
+        let data = serde_json::json!({});
+        let result = run_one(&hook, "test", &data).await;
+        assert!(matches!(result, Err(HookError::Json(_))));
+    }
+
+    #[tokio::test]
+    async fn test_run_before_send_fail_closed_on_invalid_json() {
+        let hooks = vec![HookConfig {
+            event: "before_send".into(),
+            command: "bash".into(),
+            args: vec![
+                "-c".into(),
+                "cat > /dev/null; echo 'garbage output'".into(),
+            ],
+            timeout_secs: 5,
+        }];
+        let data = serde_json::json!({"to": ["a@b.com"]});
+        let result = run_before_send_hooks(&hooks, &data).await;
+        assert!(
+            matches!(result, Err(HookError::Blocked(ref msg)) if msg.contains("fail-closed")),
+            "invalid JSON from hook should block (fail-closed), got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_before_send_block_action() {
+        let hooks = vec![HookConfig {
+            event: "before_send".into(),
+            // Output valid JSON with action=block
+            command: "bash".into(),
+            args: vec![
+                "-c".into(),
+                r#"cat > /dev/null; echo '{"action":"block","reason":"no way"}'"#.into(),
+            ],
+            timeout_secs: 5,
+        }];
+        let data = serde_json::json!({"to": ["a@b.com"]});
+        let result = run_before_send_hooks(&hooks, &data).await;
+        assert!(
+            matches!(result, Err(HookError::Blocked(ref msg)) if msg.contains("no way")),
+            "got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_before_send_allow_action_passes() {
+        let hooks = vec![HookConfig {
+            event: "before_send".into(),
+            command: "bash".into(),
+            args: vec!["-c".into(), r#"cat > /dev/null; echo '{"action":"allow"}'"#.into()],
+            timeout_secs: 5,
+        }];
+        let data = serde_json::json!({"to": ["a@b.com"]});
+        let result = run_before_send_hooks(&hooks, &data).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_before_send_empty_json_passes() {
+        let hooks = vec![HookConfig {
+            event: "before_send".into(),
+            command: "bash".into(),
+            args: vec!["-c".into(), "cat > /dev/null; echo '{}'".into()],
+            timeout_secs: 5,
+        }];
+        let data = serde_json::json!({"to": ["a@b.com"]});
+        let result = run_before_send_hooks(&hooks, &data).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_before_send_multiple_hooks_first_blocks() {
+        let hooks = vec![
+            HookConfig {
+                event: "before_send".into(),
+                command: "bash".into(),
+                args: vec![
+                    "-c".into(),
+                    r#"cat > /dev/null; echo '{"action":"block","reason":"first hook"}'"#.into(),
+                ],
+                timeout_secs: 5,
+            },
+            HookConfig {
+                event: "before_send".into(),
+                command: "bash".into(),
+                args: vec!["-c".into(), r#"cat > /dev/null; echo '{"action":"allow"}'"#.into()],
+                timeout_secs: 5,
+            },
+        ];
+        let data = serde_json::json!({"to": ["a@b.com"]});
+        let result = run_before_send_hooks(&hooks, &data).await;
+        assert!(matches!(result, Err(HookError::Blocked(ref msg)) if msg.contains("first hook")));
+    }
+
     #[test]
     fn test_run_event_hooks_no_matching_does_not_panic() {
         let hooks = vec![HookConfig {

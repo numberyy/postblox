@@ -6,11 +6,6 @@ use crate::models::{CreateMessage, Message};
 pub const SELECT_COLS: &str = "\
     id, inbox_id, thread_id, message_id_header, in_reply_to, \
     references_header, from_addr, to_addrs, cc_addrs, subject, text_body, html_body, \
-    extracted_text, direction, raw_headers, created_at";
-
-const SELECT_COLS_WITH_SLOP: &str = "\
-    id, inbox_id, thread_id, message_id_header, in_reply_to, \
-    references_header, from_addr, to_addrs, cc_addrs, subject, text_body, html_body, \
     extracted_text, direction, raw_headers, created_at, \
     slop_score, slop_signals, category, priority, triage_status, requires_action";
 
@@ -43,7 +38,7 @@ pub async fn create(pool: &PgPool, msg: &CreateMessage) -> Result<Message, sqlx:
 }
 
 pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Message>, sqlx::Error> {
-    let query = format!("SELECT {SELECT_COLS_WITH_SLOP} FROM messages WHERE id = $1");
+    let query = format!("SELECT {SELECT_COLS} FROM messages WHERE id = $1");
     sqlx::query_as(&query).bind(id).fetch_optional(pool).await
 }
 
@@ -72,7 +67,7 @@ pub async fn list_by_inbox_unslopified(
     offset: i64,
 ) -> Result<Vec<Message>, sqlx::Error> {
     let query = format!(
-        "SELECT {SELECT_COLS_WITH_SLOP} FROM messages WHERE inbox_id = $1 \
+        "SELECT {SELECT_COLS} FROM messages WHERE inbox_id = $1 \
          AND (triage_status IS NULL OR triage_status = 'inbox') \
          ORDER BY created_at DESC LIMIT $2 OFFSET $3"
     );
@@ -423,5 +418,223 @@ mod tests {
         let inbox = setup_inbox(&pool).await;
         let msgs = list_by_inbox(&pool, inbox.id, 10, 0).await.unwrap();
         assert!(msgs.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_cross_inbox_isolation_get() {
+        let pool = crate::db::test_pool().await;
+        let inbox_a = setup_inbox(&pool).await;
+        let inbox_b = setup_inbox(&pool).await;
+
+        let cm = test_create_message(inbox_a.id);
+        let msg = create(&pool, &cm).await.unwrap();
+
+        // Message should be found in inbox_a
+        let found = get_by_id(&pool, msg.id).await.unwrap().unwrap();
+        assert_eq!(found.inbox_id, inbox_a.id);
+
+        // Message should NOT appear in inbox_b's list
+        let b_msgs = list_by_inbox(&pool, inbox_b.id, 100, 0).await.unwrap();
+        assert!(
+            b_msgs.iter().all(|m| m.inbox_id == inbox_b.id),
+            "inbox_b list should not contain inbox_a messages"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_cross_inbox_isolation_list() {
+        let pool = crate::db::test_pool().await;
+        let inbox_a = setup_inbox(&pool).await;
+        let inbox_b = setup_inbox(&pool).await;
+
+        // Create messages in both inboxes
+        for _ in 0..3 {
+            let mut cm = test_create_message(inbox_a.id);
+            cm.message_id_header = Some(format!("<{}>", Uuid::new_v4()));
+            create(&pool, &cm).await.unwrap();
+        }
+        for _ in 0..2 {
+            let mut cm = test_create_message(inbox_b.id);
+            cm.message_id_header = Some(format!("<{}>", Uuid::new_v4()));
+            create(&pool, &cm).await.unwrap();
+        }
+
+        let a_msgs = list_by_inbox(&pool, inbox_a.id, 100, 0).await.unwrap();
+        let b_msgs = list_by_inbox(&pool, inbox_b.id, 100, 0).await.unwrap();
+        assert!(a_msgs.len() >= 3);
+        assert!(b_msgs.len() >= 2);
+        assert!(a_msgs.iter().all(|m| m.inbox_id == inbox_a.id));
+        assert!(b_msgs.iter().all(|m| m.inbox_id == inbox_b.id));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_find_by_message_id_header_dedup() {
+        let pool = crate::db::test_pool().await;
+        let inbox = setup_inbox(&pool).await;
+        let mid = format!("dedup-{}@example.com", Uuid::new_v4());
+
+        let mut cm = test_create_message(inbox.id);
+        cm.message_id_header = Some(mid.clone());
+        create(&pool, &cm).await.unwrap();
+
+        // Should find the existing message
+        let found = find_by_message_id_header(&pool, inbox.id, &mid)
+            .await
+            .unwrap();
+        assert!(found.is_some());
+
+        // Different inbox, same message_id — should NOT find it
+        let inbox_b = setup_inbox(&pool).await;
+        let not_found = find_by_message_id_header(&pool, inbox_b.id, &mid)
+            .await
+            .unwrap();
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_message_without_message_id_header() {
+        let pool = crate::db::test_pool().await;
+        let inbox = setup_inbox(&pool).await;
+
+        let mut cm = test_create_message(inbox.id);
+        cm.message_id_header = None;
+        let msg = create(&pool, &cm).await.unwrap();
+
+        assert!(msg.message_id_header.is_none());
+        let fetched = get_by_id(&pool, msg.id).await.unwrap().unwrap();
+        assert!(fetched.message_id_header.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_message_id_headers_by_inbox_groups_by_thread() {
+        let pool = crate::db::test_pool().await;
+        let inbox = setup_inbox(&pool).await;
+        let thread = crate::db::threads::create(&pool, inbox.id, Some("MID Test"))
+            .await
+            .unwrap();
+
+        let mid1 = format!("<mid1-{}>", Uuid::new_v4());
+        let mid2 = format!("<mid2-{}>", Uuid::new_v4());
+
+        let mut cm1 = test_create_message(inbox.id);
+        cm1.thread_id = Some(thread.id);
+        cm1.message_id_header = Some(mid1.clone());
+        create(&pool, &cm1).await.unwrap();
+
+        let mut cm2 = test_create_message(inbox.id);
+        cm2.thread_id = Some(thread.id);
+        cm2.message_id_header = Some(mid2.clone());
+        create(&pool, &cm2).await.unwrap();
+
+        let map = message_id_headers_by_inbox(&pool, inbox.id, 100)
+            .await
+            .unwrap();
+        let ids = map.get(&thread.id).unwrap();
+        assert!(ids.contains(&mid1));
+        assert!(ids.contains(&mid2));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_message_id_headers_by_inbox_skips_null_thread() {
+        let pool = crate::db::test_pool().await;
+        let inbox = setup_inbox(&pool).await;
+
+        // Message with no thread — should be excluded
+        let mut cm = test_create_message(inbox.id);
+        cm.thread_id = None;
+        cm.message_id_header = Some(format!("<no-thread-{}>", Uuid::new_v4()));
+        create(&pool, &cm).await.unwrap();
+
+        let map = message_id_headers_by_inbox(&pool, inbox.id, 100)
+            .await
+            .unwrap();
+        assert!(map.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_find_existing_message_ids_returns_matches() {
+        let pool = crate::db::test_pool().await;
+        let inbox = setup_inbox(&pool).await;
+
+        let mid1 = format!("<existing-{}>", Uuid::new_v4());
+        let mid2 = format!("<existing-{}>", Uuid::new_v4());
+        let mid_missing = format!("<missing-{}>", Uuid::new_v4());
+
+        let mut cm1 = test_create_message(inbox.id);
+        cm1.message_id_header = Some(mid1.clone());
+        create(&pool, &cm1).await.unwrap();
+
+        let mut cm2 = test_create_message(inbox.id);
+        cm2.message_id_header = Some(mid2.clone());
+        create(&pool, &cm2).await.unwrap();
+
+        let existing = find_existing_message_ids(
+            &pool,
+            inbox.id,
+            &[mid1.as_str(), mid2.as_str(), mid_missing.as_str()],
+        )
+        .await
+        .unwrap();
+
+        assert!(existing.contains(&mid1));
+        assert!(existing.contains(&mid2));
+        assert!(!existing.contains(&mid_missing));
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_find_existing_message_ids_empty_input() {
+        let pool = crate::db::test_pool().await;
+        let inbox = setup_inbox(&pool).await;
+
+        let result = find_existing_message_ids(&pool, inbox.id, &[])
+            .await
+            .unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_list_by_inbox_unslopified_filters_slopified() {
+        let pool = crate::db::test_pool().await;
+        let inbox = setup_inbox(&pool).await;
+
+        // Create a normal message (triage_status NULL → should appear)
+        let cm1 = test_create_message(inbox.id);
+        create(&pool, &cm1).await.unwrap();
+
+        // Create a message and set its triage_status to 'slopified'
+        let mut cm2 = test_create_message(inbox.id);
+        cm2.message_id_header = Some(format!("<slop-{}>", Uuid::new_v4()));
+        let slop_msg = create(&pool, &cm2).await.unwrap();
+        sqlx::query("UPDATE messages SET triage_status = 'slopified' WHERE id = $1")
+            .bind(slop_msg.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Create a message with triage_status = 'inbox' → should appear
+        let mut cm3 = test_create_message(inbox.id);
+        cm3.message_id_header = Some(format!("<inbox-{}>", Uuid::new_v4()));
+        let inbox_msg = create(&pool, &cm3).await.unwrap();
+        sqlx::query("UPDATE messages SET triage_status = 'inbox' WHERE id = $1")
+            .bind(inbox_msg.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let results = list_by_inbox_unslopified(&pool, inbox.id, 100, 0)
+            .await
+            .unwrap();
+        // Should include the NULL and 'inbox' messages, exclude 'slopified'
+        assert!(results.iter().all(|m| m.triage_status.as_deref() != Some("slopified")));
+        assert!(results.len() >= 2);
     }
 }

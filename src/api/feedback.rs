@@ -22,7 +22,7 @@ pub async fn submit(
 ) -> Result<(StatusCode, Json<SlopFeedback>), ApiError> {
     let msg = crate::db::messages::get_by_id(&state.pool, req.message_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
 
     super::get_inbox_for_org(&state.pool, msg.inbox_id, org_id).await?;
@@ -31,8 +31,8 @@ pub async fn submit(
         crate::db::slop_feedback::create(&state.pool, org_id, req.message_id, req.is_slop),
         crate::db::slop::upsert_sender_reputation(&state.pool, org_id, &msg.from_addr, req.is_slop),
     );
-    let feedback = feedback_result.map_err(|e| ApiError::Internal(e.to_string()))?;
-    rep_result.map_err(|e| ApiError::Internal(e.to_string()))?;
+    let feedback = feedback_result.map_err(ApiError::from_sqlx)?;
+    rep_result.map_err(ApiError::from_sqlx)?;
 
     Ok((StatusCode::CREATED, Json(feedback)))
 }

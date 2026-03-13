@@ -34,7 +34,7 @@ pub async fn receive_inbound(
     for to_addr in &parsed.to {
         if let Some(found) = crate::db::inboxes::get_by_email(&state.pool, to_addr)
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .map_err(ApiError::from_sqlx)?
         {
             inbox = Some(found);
             break;
@@ -53,7 +53,7 @@ pub async fn receive_inbound(
     if let Some(ref mid) = parsed.message_id {
         if crate::db::messages::find_by_message_id_header(&state.pool, inbox.id, mid)
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .map_err(ApiError::from_sqlx)?
             .is_some()
         {
             tracing::debug!(message_id = %mid, "duplicate inbound email, skipping");
@@ -70,8 +70,8 @@ pub async fn receive_inbound(
         crate::db::threads::list_by_inbox(&state.pool, inbox.id, 10_000, 0),
         crate::db::messages::message_id_headers_by_inbox(&state.pool, inbox.id, 10_000),
     );
-    let threads = threads_result.map_err(|e| ApiError::Internal(e.to_string()))?;
-    let mid_map = mid_map_result.map_err(|e| ApiError::Internal(e.to_string()))?;
+    let threads = threads_result.map_err(ApiError::from_sqlx)?;
+    let mid_map = mid_map_result.map_err(ApiError::from_sqlx)?;
 
     let thread_refs: Vec<_> = threads
         .iter()
@@ -89,7 +89,7 @@ pub async fn receive_inbound(
         crate::mail::ThreadMatch::Existing(id) => {
             crate::db::threads::increment_message_count(&state.pool, id, Utc::now())
                 .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+                .map_err(ApiError::from_sqlx)?;
             id
         }
         crate::mail::ThreadMatch::New => {
@@ -100,7 +100,7 @@ pub async fn receive_inbound(
                 Utc::now(),
             )
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+            .map_err(ApiError::from_sqlx)?;
             thread.id
         }
     };
@@ -110,7 +110,7 @@ pub async fn receive_inbound(
 
     let msg = crate::db::messages::create(&state.pool, &cm)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     let sender_rep =
         match crate::db::slop::get_sender_reputation(&state.pool, inbox.org_id, &parsed.from).await

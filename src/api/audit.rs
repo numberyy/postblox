@@ -38,7 +38,7 @@ pub async fn list(
         params.before,
     )
     .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(entries))
 }

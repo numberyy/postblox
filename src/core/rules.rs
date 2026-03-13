@@ -20,6 +20,9 @@ pub enum Rule {
     SlopThreshold {
         threshold: f64,
     },
+    DollarAmount {
+        max_amount: f64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -131,9 +134,62 @@ impl RuleSet {
                         }
                     }
                 }
+                Rule::DollarAmount { max_amount } => {
+                    if let Some(amount) = extract_max_dollar_amount(subject, text_body) {
+                        if amount > *max_amount {
+                            return RuleVerdict::Block {
+                                rule: "dollar_amount".into(),
+                                reason: format!(
+                                    "dollar amount ${amount:.2} exceeds limit ${max_amount:.2}"
+                                ),
+                            };
+                        }
+                    }
+                }
             }
         }
         RuleVerdict::Allow
+    }
+}
+
+fn extract_max_dollar_amount(subject: &str, body: &str) -> Option<f64> {
+    fn scan(text: &str) -> Option<f64> {
+        let mut max: Option<f64> = None;
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'$' {
+                i += 1;
+                // skip whitespace after $
+                while i < bytes.len() && bytes[i] == b' ' {
+                    i += 1;
+                }
+                let start = i;
+                // consume digits, commas, dots
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_digit() || bytes[i] == b',' || bytes[i] == b'.')
+                {
+                    i += 1;
+                }
+                if i > start {
+                    let raw: String = text[start..i].chars().filter(|c| *c != ',').collect();
+                    if let Ok(val) = raw.parse::<f64>() {
+                        max = Some(max.map_or(val, |m: f64| m.max(val)));
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+        max
+    }
+
+    let a = scan(subject);
+    let b = scan(body);
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        _ => None,
     }
 }
 
@@ -494,6 +550,7 @@ mod tests {
                 keywords: vec!["spam".into()],
             },
             Rule::SlopThreshold { threshold: 0.8 },
+            Rule::DollarAmount { max_amount: 5000.0 },
         ];
         let json = serde_json::to_string(&rules).unwrap();
         let back: Vec<Rule> = serde_json::from_str(&json).unwrap();
@@ -525,6 +582,88 @@ mod tests {
         let json = r#"{"type":"unknown","foo":"bar"}"#;
         let result = serde_json::from_str::<Rule>(json);
         assert!(result.is_err());
+    }
+
+    // === DollarAmount ===
+
+    #[test]
+    fn test_dollar_amount_blocks_above_limit() {
+        let rs = RuleSet(vec![Rule::DollarAmount { max_amount: 1000.0 }]);
+        let v = rs.evaluate(&[addr("a@b.com")], "", "Please pay $5,000 for services", None);
+        assert!(matches!(v, RuleVerdict::Block { rule, .. } if rule == "dollar_amount"));
+    }
+
+    #[test]
+    fn test_dollar_amount_allows_below_limit() {
+        let rs = RuleSet(vec![Rule::DollarAmount { max_amount: 1000.0 }]);
+        assert_eq!(
+            rs.evaluate(&[addr("a@b.com")], "", "Total: $500.00", None),
+            RuleVerdict::Allow,
+        );
+    }
+
+    #[test]
+    fn test_dollar_amount_allows_at_exactly_limit() {
+        let rs = RuleSet(vec![Rule::DollarAmount { max_amount: 1000.0 }]);
+        assert_eq!(
+            rs.evaluate(&[addr("a@b.com")], "", "Amount: $1000", None),
+            RuleVerdict::Allow,
+        );
+    }
+
+    #[test]
+    fn test_dollar_amount_detects_in_subject() {
+        let rs = RuleSet(vec![Rule::DollarAmount { max_amount: 500.0 }]);
+        let v = rs.evaluate(&[addr("a@b.com")], "Invoice for $10,000.00", "", None);
+        assert!(matches!(v, RuleVerdict::Block { .. }));
+    }
+
+    #[test]
+    fn test_dollar_amount_no_amounts_allows() {
+        let rs = RuleSet(vec![Rule::DollarAmount { max_amount: 100.0 }]);
+        assert_eq!(
+            rs.evaluate(&[addr("a@b.com")], "Hello", "No money here", None),
+            RuleVerdict::Allow,
+        );
+    }
+
+    #[test]
+    fn test_dollar_amount_comma_separated_thousands() {
+        let rs = RuleSet(vec![Rule::DollarAmount { max_amount: 5000.0 }]);
+        let v = rs.evaluate(&[addr("a@b.com")], "", "Transfer $1,234,567.89", None);
+        assert!(matches!(v, RuleVerdict::Block { .. }));
+    }
+
+    #[test]
+    fn test_dollar_amount_picks_largest_amount() {
+        let rs = RuleSet(vec![Rule::DollarAmount { max_amount: 500.0 }]);
+        let v = rs.evaluate(&[addr("a@b.com")], "$50 fee", "Main charge: $1000", None);
+        assert!(matches!(v, RuleVerdict::Block { .. }));
+    }
+
+    #[test]
+    fn test_dollar_amount_bare_dollar_sign_no_number() {
+        let rs = RuleSet(vec![Rule::DollarAmount { max_amount: 100.0 }]);
+        assert_eq!(
+            rs.evaluate(&[addr("a@b.com")], "$ only", "", None),
+            RuleVerdict::Allow,
+        );
+    }
+
+    #[test]
+    fn test_dollar_amount_zero() {
+        let rs = RuleSet(vec![Rule::DollarAmount { max_amount: 100.0 }]);
+        assert_eq!(
+            rs.evaluate(&[addr("a@b.com")], "", "Total: $0.00", None),
+            RuleVerdict::Allow,
+        );
+    }
+
+    #[test]
+    fn test_dollar_amount_decimal_only() {
+        let rs = RuleSet(vec![Rule::DollarAmount { max_amount: 1.0 }]);
+        let v = rs.evaluate(&[addr("a@b.com")], "", "Fee: $1.50", None);
+        assert!(matches!(v, RuleVerdict::Block { .. }));
     }
 
     // === Edge cases ===

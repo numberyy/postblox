@@ -51,14 +51,14 @@ pub async fn search(
             threshold,
         )
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
         return Ok(Json(results));
     }
 
     let results = crate::db::messages::search(&state.pool, org_id, &params.q, limit, offset)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(results))
 }

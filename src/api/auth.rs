@@ -24,7 +24,7 @@ impl FromRequestParts<AppState> for AuthOrg {
         let prefix = &token[..8];
         let stored = crate::db::api_keys::find_by_prefix(&state.pool, prefix)
             .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .map_err(ApiError::from_sqlx)?
             .ok_or(ApiError::Unauthorized)?;
 
         let token_hash = hash_key(&token);

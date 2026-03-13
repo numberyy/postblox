@@ -31,7 +31,13 @@ async fn main() -> anyhow::Result<()> {
         (Some(url), Some(token)) => {
             let user = config.stalwart_admin_user.as_deref().unwrap_or("admin");
             tracing::info!("stalwart client configured at {url}");
-            Some(stalwart::StalwartClient::new(url, user, token))
+            Some(stalwart::StalwartClient::new(
+                url,
+                user,
+                token,
+                config.stalwart_smtp_host.as_deref(),
+                config.stalwart_smtp_port,
+            ))
         }
         _ => {
             tracing::info!("stalwart not configured, email delivery disabled");
@@ -80,10 +86,6 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-    if config.relay.is_some() {
-        tracing::info!("SMTP relay configured");
-    }
-
     let raw_hooks = config.hooks.unwrap_or_default();
     for h in &raw_hooks {
         if h.event != "before_send" && !events::KNOWN_EVENTS.contains(&h.event.as_str()) {
@@ -98,7 +100,6 @@ async fn main() -> anyhow::Result<()> {
         webhook_client,
         inbound_token: config.stalwart_inbound_token,
         guard_patterns,
-        relay: config.relay,
         embedding_provider,
         embedding_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(20)),
         trust_auto_upgrade_threshold: config.trust_auto_upgrade_threshold,

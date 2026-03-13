@@ -537,6 +537,56 @@ pub fn tool_definitions() -> Vec<Value> {
                 "required": ["notification_id"]
             }
         }),
+        json!({
+            "name": "postblox_reply",
+            "description": "Reply to a message. Automatically threads the reply and sets the recipient to the original sender.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "message_id": { "type": "string", "description": "UUID of the message to reply to" },
+                    "text_body": { "type": "string", "description": "Plain text reply body" },
+                    "html_body": { "type": "string", "description": "HTML reply body" },
+                    "cc": { "type": "array", "items": { "type": "string" }, "description": "CC recipients" }
+                },
+                "required": ["inbox_id", "message_id", "text_body"]
+            }
+        }),
+        json!({
+            "name": "postblox_link_inbox",
+            "description": "Link an external IMAP inbox for syncing emails into postblox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the postblox inbox to sync into" },
+                    "imap_host": { "type": "string", "description": "IMAP server hostname" },
+                    "imap_port": { "type": "integer", "description": "IMAP port (default: 993)" },
+                    "username": { "type": "string", "description": "IMAP username" },
+                    "password": { "type": "string", "description": "IMAP password" }
+                },
+                "required": ["inbox_id", "imap_host", "username", "password"]
+            }
+        }),
+        json!({
+            "name": "postblox_list_linked_inboxes",
+            "description": "List all linked external inboxes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        json!({
+            "name": "postblox_sync_linked_inbox",
+            "description": "Trigger an IMAP sync for a linked inbox.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "linked_account_id": { "type": "string", "description": "UUID of the linked account" }
+                },
+                "required": ["linked_account_id"]
+            }
+        }),
     ]
 }
 
@@ -920,6 +970,83 @@ pub async fn dispatch(
             client.delete(&format!("/notifications/{id}")).await
         }
 
+        "postblox_reply" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let message_id = require_str(&args, "message_id")?;
+            let text_body = require_str(&args, "text_body")?;
+
+            // Fetch original message to get sender and subject
+            let orig_json = client
+                .get(&format!("/inboxes/{inbox_id}/messages/{message_id}"))
+                .await?;
+            let orig: Value = serde_json::from_str(&orig_json)
+                .map_err(|e| McpError::Api(format!("failed to parse message: {e}")))?;
+
+            let reply_to = orig["from_addr"].as_str().unwrap_or("").to_string();
+            let subject = orig["subject"]
+                .as_str()
+                .map(|s| {
+                    if s.starts_with("Re: ") || s.starts_with("re: ") {
+                        s.to_string()
+                    } else {
+                        format!("Re: {s}")
+                    }
+                })
+                .unwrap_or_else(|| "Re: ".to_string());
+
+            // Create draft with in_reply_to
+            let mut draft_body = json!({
+                "to": [reply_to],
+                "subject": subject,
+                "text_body": text_body,
+                "in_reply_to_message_id": message_id,
+            });
+            if let Some(hb) = optional_str(&args, "html_body") {
+                draft_body["html_body"] = json!(hb);
+            }
+            if let Some(cc) = args.get("cc").cloned() {
+                draft_body["cc"] = cc;
+            }
+            let draft_json = client
+                .post(&format!("/inboxes/{inbox_id}/drafts"), draft_body)
+                .await?;
+            let draft: Value = serde_json::from_str(&draft_json)
+                .map_err(|e| McpError::Api(format!("failed to parse draft: {e}")))?;
+            let draft_id = draft["id"]
+                .as_str()
+                .ok_or_else(|| McpError::Api("draft missing id".into()))?;
+
+            // Send the draft
+            client
+                .post(
+                    &format!("/inboxes/{inbox_id}/drafts/{draft_id}/send"),
+                    json!({}),
+                )
+                .await
+        }
+
+        "postblox_link_inbox" => {
+            let mut body = json!({
+                "inbox_id": require_str(&args, "inbox_id")?,
+                "imap_host": require_str(&args, "imap_host")?,
+                "username": require_str(&args, "username")?,
+                "password": require_str(&args, "password")?,
+            });
+            if let Some(port) = optional_i64(&args, "imap_port") {
+                body["imap_port"] = json!(port);
+            }
+            client.post("/linked-accounts", body).await
+        }
+
+        "postblox_list_linked_inboxes" => client.get("/linked-accounts").await,
+
+        "postblox_sync_linked_inbox" => {
+            let id = require_str(&args, "linked_account_id")?;
+            client
+                .post(&format!("/linked-accounts/{id}/sync"), json!({}))
+                .await
+        }
+
         _ => Err(McpError::UnknownTool(name.into())),
     }
 }
@@ -955,7 +1082,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let defs = tool_definitions();
-        assert_eq!(defs.len(), 40);
+        assert_eq!(defs.len(), 44);
     }
 
     #[test]

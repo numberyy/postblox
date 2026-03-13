@@ -51,7 +51,7 @@ pub async fn get(
         crate::db::briefing::top_senders(&state.pool, org_id, since),
         crate::db::briefing::top_subjects(&state.pool, org_id, since),
     )
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    .map_err(ApiError::from_sqlx)?;
 
     let (total_received, total_sent) = by_inbox
         .iter()

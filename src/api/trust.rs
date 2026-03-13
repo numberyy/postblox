@@ -16,7 +16,7 @@ pub async fn get(
 
     let score = crate::db::trust::get_or_create(&state.pool, inbox_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(score))
 }

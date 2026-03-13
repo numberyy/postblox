@@ -20,16 +20,6 @@ pub async fn create(pool: &PgPool, input: &CreateApproval) -> Result<Approval, s
         .await
 }
 
-#[allow(dead_code)]
-pub async fn list_pending(
-    pool: &PgPool,
-    org_id: Uuid,
-    offset: i64,
-    limit: i64,
-) -> Result<Vec<Approval>, sqlx::Error> {
-    list_by_status(pool, org_id, Some("pending"), offset, limit).await
-}
-
 pub async fn list_by_status(
     pool: &PgPool,
     org_id: Uuid,
@@ -236,7 +226,7 @@ mod tests {
         // Approve the first one
         approve(&pool, org_id, a1.id, "admin").await.unwrap();
 
-        let pending = list_pending(&pool, org_id, 0, 100).await.unwrap();
+        let pending = list_by_status(&pool, org_id, Some("pending"), 0, 100).await.unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].message_id, msg2.id);
     }
@@ -496,6 +486,96 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // needs real DB
+    async fn test_approve_nonexistent_returns_none() {
+        let pool = crate::db::test_pool().await;
+        let org = crate::db::organizations::create(&pool, "Ghost Approval Org")
+            .await
+            .unwrap();
+        let result = approve(&pool, org.id, Uuid::new_v4(), "admin")
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore] // needs real DB
+    async fn test_approval_cascade_deletes_on_message_delete() {
+        let pool = crate::db::test_pool().await;
+        let (org_id, inbox_id, message_id) = setup_approval(&pool).await;
+
+        let input = CreateApproval {
+            org_id,
+            inbox_id,
+            message_id,
+        };
+        let approval = create(&pool, &input).await.unwrap();
+
+        // Delete the message — ON DELETE CASCADE should remove the approval
+        sqlx::query("DELETE FROM messages WHERE id = $1")
+            .bind(message_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let fetched = get(&pool, org_id, approval.id).await.unwrap();
+        assert!(fetched.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore] // needs real DB
+    async fn test_list_all_statuses() {
+        let pool = crate::db::test_pool().await;
+        let (org_id, inbox_id, message_id) = setup_approval(&pool).await;
+
+        let a1 = create(
+            &pool,
+            &CreateApproval {
+                org_id,
+                inbox_id,
+                message_id,
+            },
+        )
+        .await
+        .unwrap();
+
+        let cm2 = crate::models::CreateMessage {
+            inbox_id,
+            thread_id: None,
+            message_id_header: Some(format!("<{}>", Uuid::new_v4())),
+            in_reply_to: None,
+            references_header: None,
+            from_addr: "sender@example.com".into(),
+            to_addrs: serde_json::json!(["rcpt@example.com"]),
+            cc_addrs: None,
+            subject: Some("All status".into()),
+            text_body: Some("Body".into()),
+            html_body: None,
+            extracted_text: None,
+            direction: "outbound".into(),
+            raw_headers: None,
+        };
+        let msg2 = crate::db::messages::create(&pool, &cm2).await.unwrap();
+        create(
+            &pool,
+            &CreateApproval {
+                org_id,
+                inbox_id,
+                message_id: msg2.id,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Approve a1
+        approve(&pool, org_id, a1.id, "admin").await.unwrap();
+
+        // list_by_status with None returns all (both pending and approved)
+        let all = list_by_status(&pool, org_id, None, 0, 100).await.unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    #[ignore] // needs real DB
     async fn test_list_pending_pagination() {
         let pool = crate::db::test_pool().await;
         let (org_id, inbox_id, _) = setup_approval(&pool).await;
@@ -530,10 +610,10 @@ mod tests {
             .unwrap();
         }
 
-        let page1 = list_pending(&pool, org_id, 0, 3).await.unwrap();
+        let page1 = list_by_status(&pool, org_id, Some("pending"), 0, 3).await.unwrap();
         assert_eq!(page1.len(), 3);
 
-        let page2 = list_pending(&pool, org_id, 3, 3).await.unwrap();
+        let page2 = list_by_status(&pool, org_id, Some("pending"), 3, 3).await.unwrap();
         assert_eq!(page2.len(), 2);
     }
 }
