@@ -8,6 +8,7 @@ mod core;
 mod db;
 mod embeddings;
 mod events;
+mod hooks;
 mod mail;
 mod models;
 mod notifications;
@@ -23,10 +24,14 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::load()?;
     let pool = db::connect(&config.database_url).await?;
 
+    sqlx::migrate!("./migrations").run(&pool).await?;
+    tracing::info!("migrations applied");
+
     let stalwart_client = match (&config.stalwart_url, &config.stalwart_admin_token) {
         (Some(url), Some(token)) => {
+            let user = config.stalwart_admin_user.as_deref().unwrap_or("admin");
             tracing::info!("stalwart client configured at {url}");
-            Some(stalwart::StalwartClient::new(url, token))
+            Some(stalwart::StalwartClient::new(url, user, token))
         }
         _ => {
             tracing::info!("stalwart not configured, email delivery disabled");
@@ -79,6 +84,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("SMTP relay configured");
     }
 
+    let raw_hooks = config.hooks.unwrap_or_default();
+    for h in &raw_hooks {
+        if h.event != "before_send" && !events::KNOWN_EVENTS.contains(&h.event.as_str()) {
+            tracing::warn!("unknown hook event '{}' — will never fire", h.event);
+        }
+    }
+    let hooks: std::sync::Arc<[hooks::HookConfig]> = raw_hooks.into();
+
     let state = api::AppState {
         pool,
         stalwart: stalwart_client,
@@ -89,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
         embedding_provider,
         embedding_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(20)),
         trust_auto_upgrade_threshold: config.trust_auto_upgrade_threshold,
+        hooks,
     };
     let app = api::router(state);
 

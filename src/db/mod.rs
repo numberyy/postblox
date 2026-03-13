@@ -35,9 +35,14 @@ pub async fn connect(database_url: &str) -> anyhow::Result<PgPool> {
 pub(crate) async fn test_pool() -> PgPool {
     let url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for integration tests");
-    PgPoolOptions::new()
+    let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect(&url)
         .await
-        .expect("failed to connect to test database")
+        .expect("failed to connect to test database");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("failed to run migrations");
+    pool
 }

@@ -14,11 +14,12 @@ pub enum StalwartError {
 pub struct StalwartClient {
     http: reqwest::Client,
     base_url: String,
+    admin_user: String,
     admin_token: String,
 }
 
 impl StalwartClient {
-    pub fn new(base_url: &str, admin_token: &str) -> Self {
+    pub fn new(base_url: &str, admin_user: &str, admin_token: &str) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -27,6 +28,7 @@ impl StalwartClient {
         Self {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
+            admin_user: admin_user.to_string(),
             admin_token: admin_token.to_string(),
         }
     }
@@ -44,7 +46,7 @@ impl StalwartClient {
         let resp = self
             .http
             .post(format!("{}/api/principal", self.base_url))
-            .bearer_auth(&self.admin_token)
+            .basic_auth(&self.admin_user, Some(&self.admin_token))
             .json(&serde_json::json!({
                 "type": "individual",
                 "name": email,
@@ -62,7 +64,7 @@ impl StalwartClient {
         let resp = self
             .http
             .delete(format!("{}/api/principal/{email}", self.base_url))
-            .bearer_auth(&self.admin_token)
+            .basic_auth(&self.admin_user, Some(&self.admin_token))
             .send()
             .await?;
 
@@ -74,7 +76,7 @@ impl StalwartClient {
         let resp = self
             .http
             .post(format!("{}/api/principal", self.base_url))
-            .bearer_auth(&self.admin_token)
+            .basic_auth(&self.admin_user, Some(&self.admin_token))
             .json(&serde_json::json!({
                 "type": "domain",
                 "name": name,
@@ -92,7 +94,7 @@ impl StalwartClient {
         let resp = self
             .http
             .delete(format!("{}/api/principal/{principal_id}", self.base_url))
-            .bearer_auth(&self.admin_token)
+            .basic_auth(&self.admin_user, Some(&self.admin_token))
             .send()
             .await?;
 
@@ -104,7 +106,7 @@ impl StalwartClient {
         let resp = self
             .http
             .get(format!("{}/api/dns/records/{domain}", self.base_url))
-            .bearer_auth(&self.admin_token)
+            .basic_auth(&self.admin_user, Some(&self.admin_token))
             .send()
             .await?;
 
@@ -122,7 +124,7 @@ impl StalwartClient {
         let mut req = self
             .http
             .post(format!("{}/api/queue/messages", self.base_url))
-            .bearer_auth(&self.admin_token)
+            .basic_auth(&self.admin_user, Some(&self.admin_token))
             .header("content-type", "message/rfc822")
             .query(&[("from", from)]);
 
@@ -143,13 +145,13 @@ mod tests {
 
     #[test]
     fn test_stalwart_client_trims_trailing_slash() {
-        let client = StalwartClient::new("http://localhost:8080/", "token");
+        let client = StalwartClient::new("http://localhost:8080/", "admin", "token");
         assert_eq!(client.base_url, "http://localhost:8080");
     }
 
     #[test]
     fn test_stalwart_client_no_trailing_slash() {
-        let client = StalwartClient::new("http://localhost:8080", "token");
+        let client = StalwartClient::new("http://localhost:8080", "admin", "token");
         assert_eq!(client.base_url, "http://localhost:8080");
     }
 
@@ -175,29 +177,31 @@ mod tests {
 
     #[test]
     fn test_stalwart_create_domain_url() {
-        let client = StalwartClient::new("http://localhost:8080", "token");
+        let client = StalwartClient::new("http://localhost:8080", "admin", "token");
         let url = format!("{}/api/principal", client.base_url);
         assert_eq!(url, "http://localhost:8080/api/principal");
     }
 
     #[test]
     fn test_stalwart_delete_domain_url() {
-        let client = StalwartClient::new("http://localhost:8080/", "token");
+        let client = StalwartClient::new("http://localhost:8080/", "admin", "token");
         let url = format!("{}/api/principal/{}", client.base_url, "domain-123");
         assert_eq!(url, "http://localhost:8080/api/principal/domain-123");
     }
 
     #[test]
     fn test_stalwart_dns_records_url() {
-        let client = StalwartClient::new("http://localhost:8080", "token");
+        let client = StalwartClient::new("http://localhost:8080", "admin", "token");
         let url = format!("{}/api/dns/records/{}", client.base_url, "example.com");
         assert_eq!(url, "http://localhost:8080/api/dns/records/example.com");
     }
 
     #[tokio::test]
-    #[ignore] // requires running Stalwart server
+    #[ignore] // requires running Stalwart server + STALWART_ADMIN_TOKEN env
     async fn test_stalwart_create_and_delete_account() {
-        let client = StalwartClient::new("http://localhost:8080", "admin-token");
+        let token = std::env::var("STALWART_ADMIN_TOKEN")
+            .expect("STALWART_ADMIN_TOKEN must be set for stalwart integration tests");
+        let client = StalwartClient::new("http://localhost:8080", "admin", &token);
         let email = format!("test-{}@postblox.local", uuid::Uuid::new_v4());
         client.create_account(&email, "password123").await.unwrap();
         client.delete_account(&email).await.unwrap();

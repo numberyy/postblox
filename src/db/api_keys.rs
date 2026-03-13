@@ -64,6 +64,10 @@ pub async fn touch_last_used(pool: &PgPool, id: Uuid) -> Result<(), sqlx::Error>
 mod tests {
     use super::*;
 
+    fn unique_prefix() -> String {
+        format!("pb_{}", &Uuid::new_v4().to_string()[..8])
+    }
+
     #[tokio::test]
     #[ignore]
     async fn test_api_key_create_and_find_by_prefix() {
@@ -72,14 +76,15 @@ mod tests {
             .await
             .unwrap();
 
-        let key = create(&pool, org.id, "hash_abc", "pb_test1", Some("my key"))
+        let prefix = unique_prefix();
+        let key = create(&pool, org.id, "hash_abc", &prefix, Some("my key"))
             .await
             .unwrap();
-        assert_eq!(key.prefix, "pb_test1");
+        assert_eq!(key.prefix, prefix);
         assert_eq!(key.name.as_deref(), Some("my key"));
         assert!(key.last_used_at.is_none());
 
-        let found = find_by_prefix(&pool, "pb_test1").await.unwrap().unwrap();
+        let found = find_by_prefix(&pool, &prefix).await.unwrap().unwrap();
         assert_eq!(found.id, key.id);
     }
 
@@ -99,8 +104,12 @@ mod tests {
             .await
             .unwrap();
 
-        create(&pool, org.id, "h1", "pb_list1", None).await.unwrap();
-        create(&pool, org.id, "h2", "pb_list2", None).await.unwrap();
+        create(&pool, org.id, "h1", &unique_prefix(), None)
+            .await
+            .unwrap();
+        create(&pool, org.id, "h2", &unique_prefix(), None)
+            .await
+            .unwrap();
 
         let keys = list_by_org(&pool, org.id).await.unwrap();
         assert_eq!(keys.len(), 2);
@@ -124,9 +133,10 @@ mod tests {
         let org = crate::db::organizations::create(&pool, "Delete Key Org")
             .await
             .unwrap();
-        let key = create(&pool, org.id, "h", "pb_del01", None).await.unwrap();
+        let prefix = unique_prefix();
+        let key = create(&pool, org.id, "h", &prefix, None).await.unwrap();
         assert!(delete(&pool, key.id, org.id).await.unwrap());
-        assert!(find_by_prefix(&pool, "pb_del01").await.unwrap().is_none());
+        assert!(find_by_prefix(&pool, &prefix).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -136,13 +146,13 @@ mod tests {
         let org = crate::db::organizations::create(&pool, "Del Wrong Org")
             .await
             .unwrap();
-        let key = create(&pool, org.id, "h", "pb_del02", None).await.unwrap();
+        let prefix = unique_prefix();
+        let key = create(&pool, org.id, "h", &prefix, None).await.unwrap();
         let other_org = crate::db::organizations::create(&pool, "Del Other Org")
             .await
             .unwrap();
         assert!(!delete(&pool, key.id, other_org.id).await.unwrap());
-        // Key still exists
-        assert!(find_by_prefix(&pool, "pb_del02").await.unwrap().is_some());
+        assert!(find_by_prefix(&pool, &prefix).await.unwrap().is_some());
     }
 
     #[tokio::test]
@@ -162,12 +172,13 @@ mod tests {
         let org = crate::db::organizations::create(&pool, "Touch Org")
             .await
             .unwrap();
-        let key = create(&pool, org.id, "h", "pb_touch", None).await.unwrap();
+        let prefix = unique_prefix();
+        let key = create(&pool, org.id, "h", &prefix, None).await.unwrap();
         assert!(key.last_used_at.is_none());
 
         touch_last_used(&pool, key.id).await.unwrap();
 
-        let updated = find_by_prefix(&pool, "pb_touch").await.unwrap().unwrap();
+        let updated = find_by_prefix(&pool, &prefix).await.unwrap().unwrap();
         assert!(updated.last_used_at.is_some());
     }
 }

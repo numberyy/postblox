@@ -1,0 +1,6 @@
+target/
+.git/
+plans/
+tests/
+.mcp.json
+.claude/

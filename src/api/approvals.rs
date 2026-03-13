@@ -106,6 +106,7 @@ pub async fn approve(
 
     let pool = state.pool.clone();
     let webhook_client = state.webhook_client.clone();
+    let hooks = state.hooks.clone();
     let msg_id = approval.message_id;
     let inbox_id = approval.inbox_id;
     let decided_by = req.decided_by.clone();
@@ -148,6 +149,7 @@ pub async fn approve(
                         approved_count: score.approved_count,
                     },
                     &webhook_client,
+                    &hooks,
                 )
                 .await;
             }
@@ -320,6 +322,7 @@ pub async fn batch(
                                 approved_count: score.approved_count,
                             },
                             &state_clone.webhook_client,
+                            &state_clone.hooks,
                         )
                         .await;
                     }

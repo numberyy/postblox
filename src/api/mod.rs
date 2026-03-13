@@ -40,6 +40,7 @@ pub struct AppState {
     pub embedding_provider: Option<std::sync::Arc<dyn crate::embeddings::EmbeddingProvider>>,
     pub embedding_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
     pub trust_auto_upgrade_threshold: i32,
+    pub hooks: std::sync::Arc<[crate::hooks::HookConfig]>,
 }
 
 #[derive(Deserialize)]

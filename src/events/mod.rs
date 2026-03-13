@@ -102,7 +102,13 @@ pub async fn audit(
     }
 }
 
-pub async fn dispatch(pool: &PgPool, org_id: Uuid, event: PostbloxEvent, client: &reqwest::Client) {
+pub async fn dispatch(
+    pool: &PgPool,
+    org_id: Uuid,
+    event: PostbloxEvent,
+    client: &reqwest::Client,
+    hooks: &[crate::hooks::HookConfig],
+) {
     // Fire notifications for relevant events
     match &event {
         PostbloxEvent::ApprovalRequested {
@@ -143,23 +149,24 @@ pub async fn dispatch(pool: &PgPool, org_id: Uuid, event: PostbloxEvent, client:
     let event_name = event.event_name();
     let data = event.data();
 
-    let hooks = match crate::db::webhooks::list_active_for_event(pool, org_id, event_name).await {
+    let wh_list = match crate::db::webhooks::list_active_for_event(pool, org_id, event_name).await {
         Ok(h) => h,
         Err(e) => {
             tracing::error!("failed to query webhooks for {event_name}: {e}");
+            crate::hooks::run_event_hooks(hooks, event_name, data);
             return;
         }
     };
 
-    if hooks.is_empty() {
+    if wh_list.is_empty() && hooks.iter().all(|h| h.event != event_name) {
         return;
     }
 
-    if hooks.len() > 20 {
-        tracing::warn!(org_id = %org_id, count = hooks.len(), "exceeds webhook concurrency limit, delivering first 20");
+    if wh_list.len() > 20 {
+        tracing::warn!(org_id = %org_id, count = wh_list.len(), "exceeds webhook concurrency limit, delivering first 20");
     }
 
-    for wh in hooks.into_iter().take(20) {
+    for wh in wh_list.into_iter().take(20) {
         let client = client.clone();
         let name = event_name.to_string();
         let payload = data.clone();
@@ -169,6 +176,8 @@ pub async fn dispatch(pool: &PgPool, org_id: Uuid, event: PostbloxEvent, client:
             }
         });
     }
+
+    crate::hooks::run_event_hooks(hooks, event_name, data);
 }
 
 #[cfg(test)]

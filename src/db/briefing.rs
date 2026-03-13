@@ -36,7 +36,7 @@ pub async fn stats_by_inbox(
          LEFT JOIN messages m ON m.inbox_id = i.id AND m.created_at >= $2 \
          WHERE i.org_id = $1 \
          GROUP BY i.id, i.email \
-         ORDER BY received + sent DESC",
+         ORDER BY COUNT(m.id) DESC",
     )
     .bind(org_id)
     .bind(since)

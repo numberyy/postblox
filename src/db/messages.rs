@@ -43,7 +43,7 @@ pub async fn create(pool: &PgPool, msg: &CreateMessage) -> Result<Message, sqlx:
 }
 
 pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Message>, sqlx::Error> {
-    let query = format!("SELECT {SELECT_COLS} FROM messages WHERE id = $1");
+    let query = format!("SELECT {SELECT_COLS_WITH_SLOP} FROM messages WHERE id = $1");
     sqlx::query_as(&query).bind(id).fetch_optional(pool).await
 }
 
@@ -124,12 +124,10 @@ pub async fn search(
     offset: i64,
 ) -> Result<Vec<Message>, sqlx::Error> {
     let sql = format!(
-        "SELECT {SELECT_COLS} \
-         FROM messages m \
-         JOIN inboxes i ON m.inbox_id = i.id, \
-         plainto_tsquery('english', $2) q \
-         WHERE i.org_id = $1 AND m.search_vector @@ q \
-         ORDER BY ts_rank(m.search_vector, q) DESC, m.created_at DESC \
+        "SELECT {SELECT_COLS} FROM messages \
+         WHERE inbox_id IN (SELECT id FROM inboxes WHERE org_id = $1) \
+         AND search_vector @@ plainto_tsquery('english', $2) \
+         ORDER BY ts_rank(search_vector, plainto_tsquery('english', $2)) DESC, created_at DESC \
          LIMIT $3 OFFSET $4"
     );
     sqlx::query_as(&sql)

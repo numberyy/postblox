@@ -252,6 +252,20 @@ pub async fn send_draft(
         SendMode::Autonomous => {}
     }
 
+    if let Err(e) = crate::hooks::run_before_send_hooks(
+        &state.hooks,
+        &serde_json::json!({
+            "to": to,
+            "subject": draft.subject,
+            "body": draft.text_body,
+            "inbox_id": inbox_id,
+        }),
+    )
+    .await
+    {
+        return Err(ApiError::Forbidden(e.to_string()));
+    }
+
     let cc: Vec<String> = draft
         .cc_addrs
         .as_ref()
@@ -314,6 +328,7 @@ pub async fn send_draft(
 
         let pool = state.pool.clone();
         let webhook_client = state.webhook_client.clone();
+        let hooks = state.hooks.clone();
         let msg_id = msg.id;
         tokio::spawn(async move {
             crate::events::dispatch(
@@ -325,6 +340,7 @@ pub async fn send_draft(
                     approval_id: approval.id,
                 },
                 &webhook_client,
+                &hooks,
             )
             .await;
         });

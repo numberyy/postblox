@@ -97,6 +97,20 @@ pub async fn send(
         SendMode::Autonomous => {}
     }
 
+    if let Err(e) = crate::hooks::run_before_send_hooks(
+        &state.hooks,
+        &serde_json::json!({
+            "to": req.to,
+            "subject": req.subject,
+            "body": req.text_body,
+            "inbox_id": inbox_id,
+        }),
+    )
+    .await
+    {
+        return Err(ApiError::Forbidden(e.to_string()));
+    }
+
     // Store without angle brackets for consistent threading with inbound (parser strips them).
     let message_id = format!("{}@postblox", Uuid::new_v4());
 
@@ -136,6 +150,7 @@ pub async fn send(
 
         let pool = state.pool.clone();
         let webhook_client = state.webhook_client.clone();
+        let hooks = state.hooks.clone();
         let msg_id = msg.id;
         tokio::spawn(async move {
             crate::events::dispatch(
@@ -147,6 +162,7 @@ pub async fn send(
                     approval_id: approval.id,
                 },
                 &webhook_client,
+                &hooks,
             )
             .await;
         });

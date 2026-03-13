@@ -1,0 +1,36 @@
+database_url = "postgres://postblox:postblox@localhost:5432/postblox"
+
+# host = "0.0.0.0"
+# port = 3000
+
+# stalwart_url = "http://localhost:8080"
+# stalwart_admin_user = "admin"
+# stalwart_admin_token = "your-admin-password"
+# stalwart_inbound_token = "your-inbound-webhook-token"
+
+# embedding_url = "http://localhost:11434/v1/embeddings"
+# embedding_model = "nomic-embed-text"
+# embedding_api_key = "optional-api-key"
+
+# trust_auto_upgrade_threshold = 10
+
+# [relay]
+# host = "smtp.example.com"
+# port = 587
+# username = "user@example.com"
+# password = "your-password"
+# starttls = true
+
+# [[guard_patterns]]
+# name = "block-marketing"
+# pattern = "unsubscribe|marketing|newsletter"
+
+# [[hooks]]
+# event = "message.received"
+# command = "/usr/local/bin/notify"
+# args = ["--channel", "email"]
+# timeout_secs = 5
+
+# [[hooks]]
+# event = "before_send"
+# command = "/usr/local/bin/check-outbound"

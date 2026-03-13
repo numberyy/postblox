@@ -52,6 +52,7 @@ pub async fn deliver_message(
 
     let pool = state.pool.clone();
     let webhook_client = state.webhook_client.clone();
+    let hooks = state.hooks.clone();
     tokio::spawn(async move {
         crate::events::dispatch(
             &pool,
@@ -61,6 +62,7 @@ pub async fn deliver_message(
                 inbox_id,
             },
             &webhook_client,
+            &hooks,
         )
         .await;
     });

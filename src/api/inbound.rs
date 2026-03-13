@@ -157,6 +157,7 @@ pub async fn receive_inbound(
 
     let pool = state.pool.clone();
     let webhook_client = state.webhook_client.clone();
+    let hooks = state.hooks.clone();
     let org_id = inbox.org_id;
     let inbox_id = inbox.id;
     let msg_id = msg.id;
@@ -169,6 +170,7 @@ pub async fn receive_inbound(
                 inbox_id,
             },
             &webhook_client,
+            &hooks,
         )
         .await;
         crate::events::dispatch(
@@ -179,6 +181,7 @@ pub async fn receive_inbound(
                 inbox_id,
             },
             &webhook_client,
+            &hooks,
         )
         .await;
     });
