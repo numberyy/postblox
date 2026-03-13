@@ -49,13 +49,13 @@ impl StatusBar {
     }
 }
 
-fn mode_hints(mode: Mode, vim_mode: bool) -> String {
+fn mode_hints(mode: Mode, vim_mode: bool) -> &'static str {
     match mode {
-        Mode::Compose => "Ctrl+Enter: send │ Tab: field │ Esc: cancel".into(),
-        Mode::Search => "Enter: select │ Esc: cancel".into(),
-        Mode::Help => "Press any key to close".into(),
-        Mode::Normal if vim_mode => "j/k ↑↓ Tab c r / ? q".into(),
-        Mode::Normal => "↑↓ Tab Enter Esc Ctrl+N/R/F ?".into(),
+        Mode::Compose => "Ctrl+Enter: send │ Tab: field │ Esc: cancel",
+        Mode::Search => "Enter: select │ Esc: cancel",
+        Mode::Help => "Press any key to close",
+        Mode::Normal if vim_mode => "j/k ↑↓ Tab c r / ? q",
+        Mode::Normal => "↑↓ Tab Enter Esc Ctrl+N/R/F ?",
     }
 }
 

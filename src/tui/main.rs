@@ -4,8 +4,6 @@ mod client;
 mod components;
 #[allow(dead_code)] // Wired in Round 3 when data layer integrates
 mod config;
-#[allow(dead_code)] // Wired in Round 3 when data layer integrates
-mod event;
 mod keys;
 mod layout;
 #[allow(dead_code)] // Wired in Round 3 when data layer integrates

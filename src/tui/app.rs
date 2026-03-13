@@ -47,6 +47,7 @@ pub struct App {
     search: SearchPanel,
     briefing: BriefingPanel,
     status_bar: StatusBar,
+    theme: Theme,
     focus: Panel,
     mode: Mode,
     vim_mode: bool,
@@ -73,6 +74,7 @@ impl App {
             search: SearchPanel::new(),
             briefing: BriefingPanel::new(),
             status_bar: StatusBar::new(config.vim_mode),
+            theme: Theme::from_name(&config.theme),
             focus: Panel::Sidebar,
             mode: Mode::Normal,
             vim_mode: config.vim_mode,
@@ -107,7 +109,6 @@ impl App {
             }
         }
 
-        drop(_guard);
         Ok(())
     }
 
@@ -283,7 +284,7 @@ impl App {
 
     fn handle_select(&mut self) {
         if self.focus == Panel::Sidebar {
-            let idx = self.inbox_list.logical_selected_pub();
+            let idx = self.inbox_list.logical_selected();
             let inboxes_count = self.inbox_list.inbox_count();
             if idx < inboxes_count {
                 self.sidebar_view = SidebarView::Inboxes;
@@ -323,19 +324,19 @@ impl App {
     }
 
     fn render(&mut self, frame: &mut ratatui::Frame) {
-        let theme = Theme::from_name("nord");
+        let theme = &self.theme;
         let area = frame.area();
         let layout = layout::compute(area);
 
         self.inbox_list
-            .render(frame, layout.sidebar, &theme, self.focus == Panel::Sidebar);
+            .render(frame, layout.sidebar, theme, self.focus == Panel::Sidebar);
 
         match self.sidebar_view {
             SidebarView::Inboxes => {
                 self.message_list.render(
                     frame,
                     layout.message_list,
-                    &theme,
+                    theme,
                     self.focus == Panel::MessageList,
                 );
             }
@@ -343,7 +344,7 @@ impl App {
                 self.approvals.render(
                     frame,
                     layout.message_list,
-                    &theme,
+                    theme,
                     self.focus == Panel::MessageList,
                 );
             }
@@ -351,7 +352,7 @@ impl App {
                 self.briefing.render(
                     frame,
                     layout.message_list,
-                    &theme,
+                    theme,
                     self.focus == Panel::MessageList,
                 );
             }
@@ -359,7 +360,7 @@ impl App {
                 self.search.render_results(
                     frame,
                     layout.message_list,
-                    &theme,
+                    theme,
                     self.focus == Panel::MessageList,
                 );
             }
@@ -367,21 +368,21 @@ impl App {
 
         if self.mode == Mode::Compose {
             self.compose
-                .render(frame, layout.preview, &theme, self.focus == Panel::Preview);
+                .render(frame, layout.preview, theme, self.focus == Panel::Preview);
         } else {
             self.preview
-                .render(frame, layout.preview, &theme, self.focus == Panel::Preview);
+                .render(frame, layout.preview, theme, self.focus == Panel::Preview);
         }
 
         self.status_bar
-            .render(frame, layout.status_bar, &theme, self.mode);
+            .render(frame, layout.status_bar, theme, self.mode);
 
         if self.mode == Mode::Search {
-            self.search.render_input(frame, layout.status_bar, &theme);
+            self.search.render_input(frame, layout.status_bar, theme);
         }
 
         if self.mode == Mode::Help {
-            render_help_overlay(frame, area, &theme);
+            render_help_overlay(frame, area, theme);
         }
     }
 }

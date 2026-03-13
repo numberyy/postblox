@@ -35,7 +35,7 @@ impl Compose {
     }
 
     pub fn new_reply(to: &str, subject: &str) -> Self {
-        let re_subject = if subject.starts_with("Re: ") {
+        let re_subject = if subject.starts_with("Re: ") || subject.starts_with("re: ") {
             subject.to_string()
         } else {
             format!("Re: {subject}")
@@ -188,6 +188,12 @@ mod tests {
     fn test_new_reply_no_double_re() {
         let c = Compose::new_reply("alice@co.com", "Re: Meeting");
         assert_eq!(c.subject, "Re: Meeting");
+    }
+
+    #[test]
+    fn test_new_reply_no_double_re_lowercase() {
+        let c = Compose::new_reply("alice@co.com", "re: Meeting");
+        assert_eq!(c.subject, "re: Meeting");
     }
 
     #[test]

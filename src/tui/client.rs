@@ -102,16 +102,15 @@ pub struct PostbloxClient {
 }
 
 impl PostbloxClient {
-    pub fn new(base_url: String, api_key: String) -> Self {
+    pub fn new(base_url: String, api_key: String) -> Result<Self, ClientError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("failed to build http client");
-        Self {
+            .build()?;
+        Ok(Self {
             http,
             base_url,
             api_key,
-        }
+        })
     }
 
     fn url(&self, path: &str) -> String {
@@ -289,7 +288,7 @@ mod tests {
     use super::*;
 
     fn test_client() -> PostbloxClient {
-        PostbloxClient::new("http://localhost:3000".into(), "test-key".into())
+        PostbloxClient::new("http://localhost:3000".into(), "test-key".into()).unwrap()
     }
 
     #[test]
@@ -300,7 +299,7 @@ mod tests {
 
     #[test]
     fn test_url_trailing_slash_stripped() {
-        let c = PostbloxClient::new("http://localhost:3000/".into(), "k".into());
+        let c = PostbloxClient::new("http://localhost:3000/".into(), "k".into()).unwrap();
         assert_eq!(c.url("/inboxes"), "http://localhost:3000/api/v1/inboxes");
     }
 
@@ -322,13 +321,13 @@ mod tests {
 
     #[test]
     fn test_ws_url_https() {
-        let c = PostbloxClient::new("https://mail.example.com".into(), "key123".into());
+        let c = PostbloxClient::new("https://mail.example.com".into(), "key123".into()).unwrap();
         assert_eq!(c.ws_url(), "wss://mail.example.com/api/v1/ws?key=key123");
     }
 
     #[test]
     fn test_ws_url_trailing_slash() {
-        let c = PostbloxClient::new("http://localhost:3000/".into(), "k".into());
+        let c = PostbloxClient::new("http://localhost:3000/".into(), "k".into()).unwrap();
         assert_eq!(c.ws_url(), "ws://localhost:3000/api/v1/ws?key=k");
     }
 
@@ -337,7 +336,8 @@ mod tests {
         let c = PostbloxClient::new(
             "http://localhost:3000".into(),
             "key+with=special&chars".into(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             c.ws_url(),
             "ws://localhost:3000/api/v1/ws?key=key%2Bwith%3Dspecial%26chars"

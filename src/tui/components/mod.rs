@@ -15,6 +15,9 @@ pub mod search;
 pub mod status_bar;
 
 pub fn truncate<'a>(s: &'a str, max: usize) -> Cow<'a, str> {
+    if max == 0 {
+        return Cow::Borrowed("");
+    }
     if s.chars().count() <= max {
         Cow::Borrowed(s)
     } else {
@@ -68,5 +71,15 @@ mod tests {
     #[test]
     fn test_truncate_unicode_emoji() {
         assert_eq!(truncate("🎉🎊🎈🎁🎂🎃", 4), "🎉🎊🎈…");
+    }
+
+    #[test]
+    fn test_truncate_max_zero() {
+        assert_eq!(truncate("hello", 0), "");
+    }
+
+    #[test]
+    fn test_truncate_max_one() {
+        assert_eq!(truncate("hello", 1), "…");
     }
 }

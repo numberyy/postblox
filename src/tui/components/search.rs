@@ -1,4 +1,4 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
@@ -111,10 +111,7 @@ impl SearchPanel {
             return;
         }
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1)])
-            .split(block.inner(area));
+        let inner = block.inner(area);
 
         let items: Vec<ListItem> = self
             .results
@@ -144,11 +141,11 @@ impl SearchPanel {
         // Show snippet for selected
         if let Some(idx) = self.state.selected() {
             if let Some(result) = self.results.get(idx) {
-                if chunks[0].height > 2 {
+                if inner.height > 2 {
                     let snippet_area = Rect {
-                        y: chunks[0].y + chunks[0].height.saturating_sub(1),
+                        y: inner.y + inner.height.saturating_sub(1),
                         height: 1,
-                        ..chunks[0]
+                        ..inner
                     };
                     let snippet = Paragraph::new(Line::from(Span::styled(
                         format!("  …{}", truncate(&result.snippet, 60)),

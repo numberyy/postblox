@@ -106,8 +106,11 @@ fn render_entry<'a>(entry: &MessageEntry, theme: &Theme) -> ListItem<'a> {
 }
 
 pub fn format_age(date: DateTime<Utc>) -> String {
-    let delta = Utc::now().signed_duration_since(date);
-    let secs = delta.num_seconds();
+    format_age_from(Utc::now(), date)
+}
+
+fn format_age_from(now: DateTime<Utc>, date: DateTime<Utc>) -> String {
+    let secs = now.signed_duration_since(date).num_seconds().max(0);
     if secs < 60 {
         format!("{secs}s ago")
     } else if secs < 3600 {
@@ -234,6 +237,13 @@ mod tests {
         let date = Utc::now() - chrono::Duration::days(3);
         let age = format_age(date);
         assert!(age.contains("d ago"), "got: {age}");
+    }
+
+    #[test]
+    fn test_format_age_future_date_clamps_to_zero() {
+        let date = Utc::now() + chrono::Duration::hours(1);
+        let age = format_age(date);
+        assert_eq!(age, "0s ago");
     }
 
     #[test]

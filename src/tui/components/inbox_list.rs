@@ -73,10 +73,6 @@ impl InboxList {
         }
     }
 
-    pub fn logical_selected_pub(&self) -> usize {
-        self.logical_selected()
-    }
-
     pub fn inbox_count(&self) -> usize {
         self.items
             .iter()
@@ -84,7 +80,7 @@ impl InboxList {
             .count()
     }
 
-    fn logical_selected(&self) -> usize {
+    pub fn logical_selected(&self) -> usize {
         let vis = self.state.selected().unwrap_or(0);
         from_visual_index(&self.items, vis)
     }

@@ -18,7 +18,7 @@ pub enum WsEvent {
     TrustChanged {
         inbox_id: Uuid,
         new_mode: String,
-        approved_count: i32,
+        approved_count: i64,
     },
     Connected,
     Disconnected,
@@ -139,7 +139,7 @@ fn parse_ws_event(text: &str) -> Option<WsEvent> {
         "trust.changed" => {
             let inbox_id = parse_uuid(&msg.data, "inbox_id")?;
             let new_mode = msg.data["new_mode"].as_str()?.to_string();
-            let approved_count = msg.data["approved_count"].as_i64()? as i32;
+            let approved_count = msg.data["approved_count"].as_i64()?;
             Some(WsEvent::TrustChanged {
                 inbox_id,
                 new_mode,
