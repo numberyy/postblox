@@ -161,10 +161,10 @@ pub async fn dispatch(
         }
     };
 
-    if wh_list.is_empty()
-        && hooks.iter().all(|h| h.event != event_name)
-        && ws_hub.connection_count(org_id) == 0
-    {
+    if wh_list.is_empty() && hooks.iter().all(|h| h.event != event_name) {
+        // broadcast() no-ops internally when no receivers — skip webhook/hook
+        // work but still call broadcast to avoid a second lock acquisition
+        ws_hub.broadcast(org_id, event_name, &data);
         return;
     }
 

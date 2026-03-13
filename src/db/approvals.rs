@@ -63,13 +63,12 @@ pub async fn count_by_status(
     org_id: Uuid,
     status: ApprovalStatus,
 ) -> Result<i64, sqlx::Error> {
-    let row: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM approvals WHERE org_id = $1 AND status = $2",
-    )
-    .bind(org_id)
-    .bind(status.to_string())
-    .fetch_one(pool)
-    .await?;
+    let row: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM approvals WHERE org_id = $1 AND status = $2")
+            .bind(org_id)
+            .bind(status.to_string())
+            .fetch_one(pool)
+            .await?;
     Ok(row.0)
 }
 

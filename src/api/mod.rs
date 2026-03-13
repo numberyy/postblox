@@ -1,7 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -306,60 +304,6 @@ async fn ws_upgrade(
 
     let hub = state.ws_hub.clone();
     let org_id = stored.org_id;
-    ws.on_upgrade(move |socket| handle_ws(socket, hub, org_id))
+    ws.on_upgrade(move |socket| async move { hub.handle_ws(socket, org_id).await })
         .into_response()
-}
-
-async fn handle_ws(
-    mut socket: WebSocket,
-    hub: Arc<crate::events::websocket::WebSocketHub>,
-    org_id: Uuid,
-) {
-    let mut rx = match hub.subscribe(org_id) {
-        Some(rx) => rx,
-        None => {
-            let _ = socket.send(Message::Close(None)).await;
-            return;
-        }
-    };
-
-    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
-    let mut awaiting_pong = false;
-
-    loop {
-        tokio::select! {
-            msg = rx.recv() => {
-                match msg {
-                    Ok(text) => {
-                        if socket.send(Message::Text(text.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::debug!(org_id = %org_id, skipped = n, "ws client lagged");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            _ = ping_interval.tick() => {
-                if awaiting_pong {
-                    tracing::debug!(org_id = %org_id, "ws client pong timeout, disconnecting");
-                    break;
-                }
-                if socket.send(Message::Ping(vec![].into())).await.is_err() {
-                    break;
-                }
-                awaiting_pong = true;
-            }
-            msg = socket.recv() => {
-                match msg {
-                    Some(Ok(Message::Pong(_))) => { awaiting_pong = false; }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    hub.unsubscribe(org_id);
 }

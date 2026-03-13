@@ -1,10 +1,12 @@
+pub mod ws;
+
 use std::sync::Arc;
 
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::{header, request::Parts, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use axum::Extension;
+use axum::{Extension, Form};
 use minijinja::Environment;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -15,17 +17,56 @@ type Templates = Arc<Environment<'static>>;
 
 pub fn build_templates() -> Environment<'static> {
     let mut env = Environment::new();
-    env.add_template("base.html", include_str!("../../templates/base.html")).unwrap();
-    env.add_template("inboxes.html", include_str!("../../templates/inboxes.html")).unwrap();
-    env.add_template("inbox_detail.html", include_str!("../../templates/inbox_detail.html")).unwrap();
-    env.add_template("messages_rows.html", include_str!("../../templates/messages_rows.html")).unwrap();
-    env.add_template("message.html", include_str!("../../templates/message.html")).unwrap();
-    env.add_template("thread.html", include_str!("../../templates/thread.html")).unwrap();
-    env.add_template("approvals.html", include_str!("../../templates/approvals.html")).unwrap();
-    env.add_template("briefing.html", include_str!("../../templates/briefing.html")).unwrap();
-    env.add_template("search.html", include_str!("../../templates/search.html")).unwrap();
-    env.add_template("search_results.html", include_str!("../../templates/search_results.html")).unwrap();
-    env.add_template("unauthorized.html", include_str!("../../templates/unauthorized.html")).unwrap();
+    env.add_template("base.html", include_str!("../../templates/base.html"))
+        .unwrap();
+    env.add_template("inboxes.html", include_str!("../../templates/inboxes.html"))
+        .unwrap();
+    env.add_template(
+        "inbox_detail.html",
+        include_str!("../../templates/inbox_detail.html"),
+    )
+    .unwrap();
+    env.add_template(
+        "messages_rows.html",
+        include_str!("../../templates/messages_rows.html"),
+    )
+    .unwrap();
+    env.add_template("message.html", include_str!("../../templates/message.html"))
+        .unwrap();
+    env.add_template("thread.html", include_str!("../../templates/thread.html"))
+        .unwrap();
+    env.add_template(
+        "approvals.html",
+        include_str!("../../templates/approvals.html"),
+    )
+    .unwrap();
+    env.add_template(
+        "briefing.html",
+        include_str!("../../templates/briefing.html"),
+    )
+    .unwrap();
+    env.add_template("search.html", include_str!("../../templates/search.html"))
+        .unwrap();
+    env.add_template(
+        "search_results.html",
+        include_str!("../../templates/search_results.html"),
+    )
+    .unwrap();
+    env.add_template(
+        "unauthorized.html",
+        include_str!("../../templates/unauthorized.html"),
+    )
+    .unwrap();
+    env.add_template(
+        "settings.html",
+        include_str!("../../templates/settings.html"),
+    )
+    .unwrap();
+    env.add_template(
+        "analytics.html",
+        include_str!("../../templates/analytics.html"),
+    )
+    .unwrap();
     env
 }
 
@@ -45,8 +86,21 @@ pub fn router(templates: Environment<'static>, state: AppState) -> axum::Router 
         .route("/briefing", get(briefing))
         .route("/search", get(search_page))
         .route("/search/results", get(search_results))
+        .route("/settings", get(settings_page))
+        .route("/settings/inbox/{id}/mode", post(settings_change_mode))
+        .route(
+            "/settings/notifications",
+            post(settings_create_notification),
+        )
+        .route(
+            "/settings/notifications/{id}/delete",
+            post(settings_delete_notification),
+        )
+        .route("/analytics", get(analytics_page))
+        .route("/ws", get(ws::ws_upgrade))
         .route("/static/style.css", get(static_css))
         .route("/static/htmx.min.js", get(static_htmx))
+        .route("/static/ws.js", get(static_ws_js))
         .layer(Extension(tpl))
         .with_state(state)
 }
@@ -95,16 +149,7 @@ fn unauthorized() -> Response {
 }
 
 fn extract_key_from_cookie(parts: &Parts) -> Option<String> {
-    let cookie_header = parts.headers.get(header::COOKIE)?.to_str().ok()?;
-    for part in cookie_header.split(';') {
-        let part = part.trim();
-        if let Some(val) = part.strip_prefix("postblox_key=") {
-            if !val.is_empty() {
-                return Some(val.to_string());
-            }
-        }
-    }
-    None
+    ws::extract_key_from_cookie(&parts.headers)
 }
 
 fn extract_key_from_query(parts: &Parts) -> Option<String> {
@@ -119,7 +164,10 @@ fn extract_key_from_query(parts: &Parts) -> Option<String> {
     None
 }
 
-fn maybe_set_cookie(cookie_key: Option<Extension<SetCookieKey>>, mut response: Response) -> Response {
+fn maybe_set_cookie(
+    cookie_key: Option<Extension<SetCookieKey>>,
+    mut response: Response,
+) -> Response {
     if let Some(Extension(SetCookieKey(Some(key)))) = cookie_key {
         let cookie = format!("postblox_key={key}; Path=/dashboard; HttpOnly; SameSite=Strict");
         if let Ok(val) = cookie.parse() {
@@ -197,7 +245,6 @@ async fn inboxes_list(
     maybe_set_cookie(cookie_ext, resp)
 }
 
-
 async fn inbox_detail(
     State(state): State<AppState>,
     Extension(tpl): Extension<Templates>,
@@ -210,19 +257,20 @@ async fn inbox_detail(
         Err(e) => return error_response(&e.to_string()),
     };
 
-    let perm = crate::db::permissions::get_by_inbox(&state.pool, inbox.id)
-        .await
-        .ok()
-        .flatten();
+    let limit: i64 = 25;
+    let (perm_result, labels_result, messages_result) = tokio::join!(
+        crate::db::permissions::get_by_inbox(&state.pool, inbox.id),
+        crate::db::labels::list_by_inbox(&state.pool, inbox.id),
+        crate::db::messages::list_by_inbox(&state.pool, inbox.id, limit, 0),
+    );
+
+    let perm = perm_result.ok().flatten();
     let send_mode = perm
         .as_ref()
         .map(|p| p.mode().to_string())
         .unwrap_or_else(|| crate::models::SendMode::default().to_string());
 
-    let labels = log_err_default(
-        "labels",
-        crate::db::labels::list_by_inbox(&state.pool, inbox.id).await,
-    );
+    let labels = log_err_default("labels", labels_result);
     let label_data: Vec<_> = labels
         .iter()
         .map(|l| {
@@ -233,11 +281,7 @@ async fn inbox_detail(
         })
         .collect();
 
-    let limit: i64 = 25;
-    let messages = log_err_default(
-        "messages",
-        crate::db::messages::list_by_inbox(&state.pool, inbox.id, limit, 0).await,
-    );
+    let messages = log_err_default("messages", messages_result);
     let has_more = messages.len() as i64 >= limit;
     let msg_data = messages_to_value(&messages);
 
@@ -395,12 +439,11 @@ async fn approvals_list(
     Extension(tpl): Extension<Templates>,
     DashboardOrg(org_id): DashboardOrg,
 ) -> Response {
-    let pending = match crate::db::approvals::list_pending_with_details(&state.pool, org_id, 100)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => return error_response(&e.to_string()),
-    };
+    let pending =
+        match crate::db::approvals::list_pending_with_details(&state.pool, org_id, 100).await {
+            Ok(v) => v,
+            Err(e) => return error_response(&e.to_string()),
+        };
 
     let items: Vec<_> = pending
         .iter()
@@ -433,7 +476,12 @@ impl FromRequestParts<AppState> for HtmxRequest {
         parts: &mut Parts,
         _state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        if parts.headers.get("hx-request").and_then(|v| v.to_str().ok()) == Some("true") {
+        if parts
+            .headers
+            .get("hx-request")
+            .and_then(|v| v.to_str().ok())
+            == Some("true")
+        {
             Ok(HtmxRequest)
         } else {
             Err((StatusCode::FORBIDDEN, Html("CSRF check failed".to_string())).into_response())
@@ -460,7 +508,10 @@ async fn approval_approve(
                 if let (Ok(Some(msg)), Ok(Some(inbox))) = (msg_result, inbox_result) {
                     let (to, cc) = crate::api::deliver::extract_addrs(&msg);
                     let _ = crate::api::deliver::deliver_message(
-                        &state_clone, org_id, inbox_id, msg_id,
+                        &state_clone,
+                        org_id,
+                        inbox_id,
+                        msg_id,
                         &crate::api::deliver::DeliveryParams {
                             from: &inbox.email,
                             to: &to,
@@ -468,9 +519,13 @@ async fn approval_approve(
                             subject: msg.subject.as_deref().unwrap_or(""),
                             text_body: msg.text_body.as_deref(),
                             html_body: msg.html_body.as_deref(),
-                            message_id_header: msg.message_id_header.as_deref().unwrap_or("unknown@postblox"),
+                            message_id_header: msg
+                                .message_id_header
+                                .as_deref()
+                                .unwrap_or("unknown@postblox"),
                         },
-                    ).await;
+                    )
+                    .await;
                 }
                 crate::events::audit(
                     &state_clone.pool, org_id, Some(inbox_id),
@@ -479,13 +534,22 @@ async fn approval_approve(
                     serde_json::json!({"approval_id": id.to_string(), "message_id": msg_id.to_string()}),
                 ).await;
                 crate::api::approvals::record_trust_and_maybe_upgrade(
-                    &state_clone, org_id, inbox_id, true,
-                ).await;
+                    &state_clone,
+                    org_id,
+                    inbox_id,
+                    true,
+                )
+                .await;
             });
             approval_row(id, "var(--green)", true, "Approved")
         }
         Ok(None) => approval_row(id, "var(--muted)", false, "Already decided"),
-        Err(e) => approval_row(id, "var(--red)", false, &format!("Error: {}", escape_html(&e.to_string()))),
+        Err(e) => approval_row(
+            id,
+            "var(--red)",
+            false,
+            &format!("Error: {}", escape_html(&e.to_string())),
+        ),
     }
 }
 
@@ -508,13 +572,22 @@ async fn approval_reject(
                     serde_json::json!({"approval_id": id.to_string(), "message_id": msg_id.to_string()}),
                 ).await;
                 crate::api::approvals::record_trust_and_maybe_upgrade(
-                    &state_clone, org_id, inbox_id, false,
-                ).await;
+                    &state_clone,
+                    org_id,
+                    inbox_id,
+                    false,
+                )
+                .await;
             });
             approval_row(id, "var(--red)", true, "Rejected")
         }
         Ok(None) => approval_row(id, "var(--muted)", false, "Already decided"),
-        Err(e) => approval_row(id, "var(--red)", false, &format!("Error: {}", escape_html(&e.to_string()))),
+        Err(e) => approval_row(
+            id,
+            "var(--red)",
+            false,
+            &format!("Error: {}", escape_html(&e.to_string())),
+        ),
     }
 }
 
@@ -641,6 +714,296 @@ async fn search_results(
     )
 }
 
+// --- Settings & Analytics handlers ---
+
+async fn settings_page(
+    State(state): State<AppState>,
+    Extension(tpl): Extension<Templates>,
+    DashboardOrg(org_id): DashboardOrg,
+) -> Response {
+    let inboxes = match crate::db::inboxes::list_by_org(&state.pool, org_id).await {
+        Ok(v) => v,
+        Err(e) => return error_response(&e.to_string()),
+    };
+
+    let inbox_ids: Vec<Uuid> = inboxes.iter().map(|i| i.id).collect();
+    let perms = log_err_default(
+        "permissions",
+        crate::db::permissions::get_by_inbox_ids(&state.pool, &inbox_ids).await,
+    );
+    let perm_map: std::collections::HashMap<Uuid, &crate::models::Permission> =
+        perms.iter().map(|p| (p.inbox_id, p)).collect();
+
+    let inbox_data: Vec<_> = inboxes
+        .iter()
+        .map(|inbox| {
+            let fallback = crate::models::Permission::default_for_inbox(inbox.id);
+            let perm = perm_map.get(&inbox.id).copied().unwrap_or(&fallback);
+            let rules_display: Vec<String> = perm.rules().0.iter().map(format_rule).collect();
+            minijinja::context! {
+                id => inbox.id.to_string(),
+                email => inbox.email,
+                send_mode => perm.mode().to_string(),
+                rules => rules_display,
+            }
+        })
+        .collect();
+
+    let modes = vec!["shadow", "approval", "auto_approve", "autonomous"];
+
+    let notifications = log_err_default(
+        "notifications",
+        crate::db::notifications::list_active(&state.pool, org_id).await,
+    );
+    let notif_data: Vec<_> = notifications
+        .iter()
+        .map(|n| {
+            minijinja::context! {
+                id => n.id.to_string(),
+                provider => n.provider,
+                config => n.config.to_string(),
+                created_at => n.created_at.format("%Y-%m-%d %H:%M").to_string(),
+            }
+        })
+        .collect();
+
+    let webhooks = log_err_default(
+        "webhooks",
+        crate::db::webhooks::list_by_org(&state.pool, org_id).await,
+    );
+    let webhook_data: Vec<_> = webhooks
+        .iter()
+        .map(|wh| {
+            let events: Vec<String> = wh
+                .events
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            minijinja::context! {
+                url => wh.url,
+                events => events,
+                created_at => wh.created_at.format("%Y-%m-%d %H:%M").to_string(),
+            }
+        })
+        .collect();
+
+    render(
+        &tpl,
+        "settings.html",
+        minijinja::context! {
+            inboxes => inbox_data,
+            modes => modes,
+            notifications => notif_data,
+            webhooks => webhook_data,
+        },
+    )
+}
+
+fn format_rule(rule: &crate::core::rules::Rule) -> String {
+    use crate::core::rules::Rule;
+    match rule {
+        Rule::DomainAllowlist { domains } => format!("DomainAllowlist: {}", domains.join(", ")),
+        Rule::DomainBlocklist { domains } => format!("DomainBlocklist: {}", domains.join(", ")),
+        Rule::TimeWindow {
+            start_hour,
+            end_hour,
+            timezone,
+        } => format!("TimeWindow: {start_hour}:00–{end_hour}:00 {timezone}"),
+        Rule::KeywordBlocklist { keywords } => {
+            format!("KeywordBlocklist: {}", keywords.join(", "))
+        }
+        Rule::SlopThreshold { threshold } => format!("SlopThreshold: {threshold}"),
+        Rule::DollarAmount { max_amount } => format!("DollarAmount: max ${max_amount}"),
+    }
+}
+
+#[derive(Deserialize)]
+struct ChangeModeForm {
+    send_mode: String,
+}
+
+async fn settings_change_mode(
+    State(state): State<AppState>,
+    DashboardOrg(org_id): DashboardOrg,
+    HtmxRequest: HtmxRequest,
+    Path(id): Path<Uuid>,
+    Form(form): Form<ChangeModeForm>,
+) -> Response {
+    let inbox = match crate::db::inboxes::get_by_id(&state.pool, id).await {
+        Ok(Some(i)) if i.org_id == org_id => i,
+        _ => return error_response("inbox not found"),
+    };
+
+    let mode: crate::models::SendMode = match form.send_mode.parse() {
+        Ok(m) => m,
+        Err(_) => return error_response("invalid send mode"),
+    };
+
+    let existing_rules = crate::db::permissions::get_by_inbox(&state.pool, inbox.id)
+        .await
+        .ok()
+        .flatten()
+        .map(|p| p.rules)
+        .unwrap_or_else(|| serde_json::json!([]));
+
+    let perm =
+        match crate::db::permissions::upsert(&state.pool, inbox.id, mode, &existing_rules).await {
+            Ok(p) => p,
+            Err(e) => return error_response(&e.to_string()),
+        };
+
+    let rules_display: Vec<String> = perm.rules().0.iter().map(format_rule).collect();
+    let rules_html = if rules_display.is_empty() {
+        "<span style=\"color:var(--muted)\">none</span>".to_string()
+    } else {
+        rules_display
+            .iter()
+            .map(|r| format!("<span class=\"badge badge-gray\">{}</span>", escape_html(r)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    let modes = ["shadow", "approval", "auto_approve", "autonomous"];
+    let mode_str = perm.mode().to_string();
+    let options: String = modes
+        .iter()
+        .map(|m| {
+            let sel = if *m == mode_str { " selected" } else { "" };
+            format!("<option value=\"{m}\"{sel}>{m}</option>")
+        })
+        .collect();
+
+    let inbox_id = inbox.id;
+    Html(format!(
+        "<tr id=\"inbox-mode-{inbox_id}\">\
+         <td>{}</td>\
+         <td><select name=\"send_mode\" \
+         hx-post=\"/dashboard/settings/inbox/{inbox_id}/mode\" \
+         hx-target=\"#inbox-mode-{inbox_id}\" \
+         hx-swap=\"outerHTML\">{options}</select></td>\
+         <td>{rules_html}</td></tr>",
+        escape_html(&inbox.email),
+    ))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct CreateNotifForm {
+    provider: String,
+    config: String,
+}
+
+async fn settings_create_notification(
+    State(state): State<AppState>,
+    DashboardOrg(org_id): DashboardOrg,
+    HtmxRequest: HtmxRequest,
+    Form(form): Form<CreateNotifForm>,
+) -> Response {
+    let provider: crate::models::NotificationProvider = match form.provider.parse() {
+        Ok(p) => p,
+        Err(_) => return error_response("invalid provider"),
+    };
+
+    let config: serde_json::Value = match serde_json::from_str(&form.config) {
+        Ok(v) => v,
+        Err(_) => return error_response("invalid JSON config"),
+    };
+
+    let input = crate::models::CreateNotificationConfig {
+        org_id,
+        provider,
+        config,
+    };
+
+    match crate::db::notifications::create(&state.pool, &input).await {
+        Ok(n) => Html(format!(
+            "<tr id=\"notif-{}\">\
+             <td><span class=\"badge badge-blue\">{}</span></td>\
+             <td style=\"font-size:.8rem;font-family:monospace\">{}</td>\
+             <td>{}</td>\
+             <td><button class=\"btn btn-reject\" \
+             hx-post=\"/dashboard/settings/notifications/{}/delete\" \
+             hx-target=\"#notif-{}\" hx-swap=\"outerHTML\">Delete</button></td></tr>",
+            n.id,
+            escape_html(&n.provider),
+            escape_html(&n.config.to_string()),
+            n.created_at.format("%Y-%m-%d %H:%M"),
+            n.id,
+            n.id,
+        ))
+        .into_response(),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn settings_delete_notification(
+    State(state): State<AppState>,
+    DashboardOrg(org_id): DashboardOrg,
+    HtmxRequest: HtmxRequest,
+    Path(id): Path<Uuid>,
+) -> Response {
+    match crate::db::notifications::delete(&state.pool, id, org_id).await {
+        Ok(true) => Html(String::new()).into_response(),
+        Ok(false) => error_response("notification not found"),
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
+async fn analytics_page(
+    State(state): State<AppState>,
+    Extension(tpl): Extension<Templates>,
+    DashboardOrg(org_id): DashboardOrg,
+) -> Response {
+    let (triage_counts, slop_senders) = match tokio::try_join!(
+        crate::db::briefing::count_by_triage_status(&state.pool, org_id),
+        crate::db::briefing::top_slop_senders(&state.pool, org_id, 20),
+    ) {
+        Ok(r) => r,
+        Err(e) => return error_response(&e.to_string()),
+    };
+
+    let triage_data: Vec<_> = triage_counts
+        .iter()
+        .map(|row| {
+            minijinja::context! {
+                status => row.status,
+                count => row.count,
+            }
+        })
+        .collect();
+
+    let slop_data: Vec<_> = slop_senders
+        .iter()
+        .map(|s| {
+            let ratio = if s.total_messages > 0 {
+                s.slop_count as f64 / s.total_messages as f64
+            } else {
+                0.0
+            };
+            minijinja::context! {
+                sender_email => s.sender_email,
+                total_messages => s.total_messages,
+                slop_count => s.slop_count,
+                slop_ratio => ratio,
+                slop_ratio_pct => format!("{:.0}", ratio * 100.0),
+            }
+        })
+        .collect();
+
+    render(
+        &tpl,
+        "analytics.html",
+        minijinja::context! {
+            triage_counts => triage_data,
+            slop_senders => slop_data,
+        },
+    )
+}
+
 // --- Static assets (embedded for Docker scratch) ---
 
 async fn static_css() -> (
@@ -670,6 +1033,21 @@ async fn static_htmx() -> (
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
         include_str!("../../static/htmx.min.js"),
+    )
+}
+
+async fn static_ws_js() -> (
+    StatusCode,
+    [(header::HeaderName, &'static str); 2],
+    &'static str,
+) {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        include_str!("../../static/ws.js"),
     )
 }
 
@@ -811,5 +1189,69 @@ mod tests {
     fn test_build_templates_loads() {
         let env = build_templates();
         assert!(env.get_template("base.html").is_ok());
+    }
+
+    #[test]
+    fn test_build_templates_loads_settings() {
+        let env = build_templates();
+        assert!(env.get_template("settings.html").is_ok());
+    }
+
+    #[test]
+    fn test_build_templates_loads_analytics() {
+        let env = build_templates();
+        assert!(env.get_template("analytics.html").is_ok());
+    }
+
+    #[test]
+    fn test_format_rule_domain_allowlist() {
+        use crate::core::rules::Rule;
+        let rule = Rule::DomainAllowlist {
+            domains: vec!["example.com".into(), "foo.com".into()],
+        };
+        assert_eq!(format_rule(&rule), "DomainAllowlist: example.com, foo.com");
+    }
+
+    #[test]
+    fn test_format_rule_slop_threshold() {
+        use crate::core::rules::Rule;
+        let rule = Rule::SlopThreshold { threshold: 0.8 };
+        assert_eq!(format_rule(&rule), "SlopThreshold: 0.8");
+    }
+
+    #[test]
+    fn test_format_rule_time_window() {
+        use crate::core::rules::Rule;
+        let rule = Rule::TimeWindow {
+            start_hour: 9,
+            end_hour: 17,
+            timezone: "UTC".into(),
+        };
+        assert_eq!(format_rule(&rule), "TimeWindow: 9:00–17:00 UTC");
+    }
+
+    #[test]
+    fn test_format_rule_dollar_amount() {
+        use crate::core::rules::Rule;
+        let rule = Rule::DollarAmount { max_amount: 500.0 };
+        assert_eq!(format_rule(&rule), "DollarAmount: max $500");
+    }
+
+    #[test]
+    fn test_format_rule_keyword_blocklist() {
+        use crate::core::rules::Rule;
+        let rule = Rule::KeywordBlocklist {
+            keywords: vec!["spam".into(), "scam".into()],
+        };
+        assert_eq!(format_rule(&rule), "KeywordBlocklist: spam, scam");
+    }
+
+    #[test]
+    fn test_format_rule_domain_blocklist() {
+        use crate::core::rules::Rule;
+        let rule = Rule::DomainBlocklist {
+            domains: vec!["evil.com".into()],
+        };
+        assert_eq!(format_rule(&rule), "DomainBlocklist: evil.com");
     }
 }

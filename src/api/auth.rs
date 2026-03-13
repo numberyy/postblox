@@ -50,10 +50,7 @@ fn extract_bearer_token(parts: &Parts) -> Result<String, ApiError> {
     Ok(token.to_string())
 }
 
-pub async fn validate_api_key(
-    pool: &sqlx::PgPool,
-    key: &str,
-) -> Result<crate::models::ApiKey, ()> {
+pub async fn validate_api_key(pool: &sqlx::PgPool, key: &str) -> Result<crate::models::ApiKey, ()> {
     if key.len() < 8 || !key.starts_with("pb_") {
         return Err(());
     }

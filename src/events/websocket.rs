@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::RwLock;
+use std::time::Duration;
 
+use axum::extract::ws::{Message, WebSocket};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -22,28 +24,14 @@ impl WebSocketHub {
     }
 
     pub fn subscribe(&self, org_id: Uuid) -> Option<broadcast::Receiver<String>> {
-        // CAS loop to atomically check-and-increment connection limit
-        loop {
-            let current = self.total_connections.load(Ordering::Relaxed);
-            if current >= MAX_CONNECTIONS {
-                return None;
-            }
-            if self
-                .total_connections
-                .compare_exchange_weak(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
-            }
-        }
-
-        let channels = self.channels.read().unwrap();
-        if let Some(tx) = channels.get(&org_id) {
-            return Some(tx.subscribe());
-        }
-        drop(channels);
-
+        // Acquire write lock first, then increment counter — prevents counter
+        // leak if the lock panics (poisoned) between CAS and subscribe.
         let mut channels = self.channels.write().unwrap();
+        let current = self.total_connections.load(Ordering::Relaxed);
+        if current >= MAX_CONNECTIONS {
+            return None;
+        }
+        self.total_connections.fetch_add(1, Ordering::Relaxed);
         let tx = channels
             .entry(org_id)
             .or_insert_with(|| broadcast::channel(CHANNEL_CAPACITY).0);
@@ -52,18 +40,11 @@ impl WebSocketHub {
 
     pub fn unsubscribe(&self, org_id: Uuid) {
         self.total_connections.fetch_sub(1, Ordering::Relaxed);
-        // Prune channel if no receivers remain
-        let channels = self.channels.read().unwrap();
-        let should_remove = channels
-            .get(&org_id)
-            .is_some_and(|tx| tx.receiver_count() == 0);
-        drop(channels);
-        if should_remove {
-            let mut channels = self.channels.write().unwrap();
-            if let std::collections::hash_map::Entry::Occupied(e) = channels.entry(org_id) {
-                if e.get().receiver_count() == 0 {
-                    e.remove();
-                }
+        // Prune channel if no receivers remain — single write lock avoids TOCTOU
+        let mut channels = self.channels.write().unwrap();
+        if let std::collections::hash_map::Entry::Occupied(e) = channels.entry(org_id) {
+            if e.get().receiver_count() == 0 {
+                e.remove();
             }
         }
     }
@@ -81,6 +62,57 @@ impl WebSocketHub {
         }
     }
 
+    pub async fn handle_ws(&self, mut socket: WebSocket, org_id: Uuid) {
+        let mut rx = match self.subscribe(org_id) {
+            Some(rx) => rx,
+            None => {
+                let _ = socket.send(Message::Close(None)).await;
+                return;
+            }
+        };
+
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut awaiting_pong = false;
+
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        Ok(text) => {
+                            if socket.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::debug!(org_id = %org_id, skipped = n, "ws client lagged");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = ping_interval.tick() => {
+                    if awaiting_pong {
+                        tracing::debug!(org_id = %org_id, "ws pong timeout");
+                        break;
+                    }
+                    if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                        break;
+                    }
+                    awaiting_pong = true;
+                }
+                msg = socket.recv() => {
+                    match msg {
+                        Some(Ok(Message::Pong(_))) => { awaiting_pong = false; }
+                        Some(Ok(Message::Close(_))) | None => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        self.unsubscribe(org_id);
+    }
+
+    #[cfg(test)]
     pub fn connection_count(&self, org_id: Uuid) -> usize {
         let channels = self.channels.read().unwrap();
         channels

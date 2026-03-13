@@ -119,10 +119,11 @@ pub async fn search(
     offset: i64,
 ) -> Result<Vec<Message>, sqlx::Error> {
     let sql = format!(
-        "SELECT {SELECT_COLS} FROM messages \
+        "WITH q AS (SELECT plainto_tsquery('english', $2) AS tsq) \
+         SELECT {SELECT_COLS} FROM messages, q \
          WHERE inbox_id IN (SELECT id FROM inboxes WHERE org_id = $1) \
-         AND search_vector @@ plainto_tsquery('english', $2) \
-         ORDER BY ts_rank(search_vector, plainto_tsquery('english', $2)) DESC, created_at DESC \
+         AND search_vector @@ q.tsq \
+         ORDER BY ts_rank(search_vector, q.tsq) DESC, created_at DESC \
          LIMIT $3 OFFSET $4"
     );
     sqlx::query_as(&sql)
@@ -142,12 +143,13 @@ pub async fn search_with_inbox(
     limit: i64,
 ) -> Result<Vec<SearchResultWithInbox>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT m.id, m.subject, m.from_addr, m.created_at, i.email AS inbox_email \
+        "WITH q AS (SELECT plainto_tsquery('english', $2) AS tsq) \
+         SELECT m.id, m.subject, m.from_addr, m.created_at, i.email AS inbox_email \
          FROM messages m \
-         JOIN inboxes i ON i.id = m.inbox_id \
+         JOIN inboxes i ON i.id = m.inbox_id, q \
          WHERE i.org_id = $1 \
-         AND m.search_vector @@ plainto_tsquery('english', $2) \
-         ORDER BY ts_rank(m.search_vector, plainto_tsquery('english', $2)) DESC, m.created_at DESC \
+         AND m.search_vector @@ q.tsq \
+         ORDER BY ts_rank(m.search_vector, q.tsq) DESC, m.created_at DESC \
          LIMIT $3",
     )
     .bind(org_id)

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Slop Analytics — postblox{% endblock %}
+{% block content %}
+<h1 class="page-title">Slop Analytics</h1>
+
+<div class="card">
+  <h3>Triage Breakdown</h3>
+  {% if triage_counts %}
+  <table>
+    <thead>
+      <tr><th>Status</th><th>Count</th></tr>
+    </thead>
+    <tbody>
+      {% for row in triage_counts %}
+      <tr>
+        <td><span class="badge {% if row.status == 'inbox' %}badge-blue{% elif row.status == 'slopified' %}badge-red{% else %}badge-gray{% endif %}">{{ row.status }}</span></td>
+        <td>{{ row.count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="color:var(--muted)">No messages yet.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Top Slop Senders</h3>
+  {% if slop_senders %}
+  <table>
+    <thead>
+      <tr><th>Sender</th><th>Total Messages</th><th>Slop Count</th><th>Slop Ratio</th></tr>
+    </thead>
+    <tbody>
+      {% for s in slop_senders %}
+      <tr>
+        <td>{{ s.sender_email }}</td>
+        <td>{{ s.total_messages }}</td>
+        <td>{{ s.slop_count }}</td>
+        <td><span class="badge {% if s.slop_ratio > 0.5 %}badge-red{% elif s.slop_ratio > 0.25 %}badge-yellow{% else %}badge-gray{% endif %}">{{ s.slop_ratio_pct }}%</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="color:var(--muted)">No slop senders detected.</p>
+  {% endif %}
+</div>
+{% endblock %}

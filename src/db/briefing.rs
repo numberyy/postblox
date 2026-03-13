@@ -64,6 +64,53 @@ pub async fn top_senders(
     .await
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+pub struct TriageCount {
+    pub status: String,
+    pub count: i64,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct SlopSender {
+    pub sender_email: String,
+    pub total_messages: i32,
+    pub slop_count: i32,
+}
+
+pub async fn count_by_triage_status(
+    pool: &PgPool,
+    org_id: Uuid,
+) -> Result<Vec<TriageCount>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT COALESCE(triage_status, 'unclassified') AS status, COUNT(*) AS count \
+         FROM messages m JOIN inboxes i ON m.inbox_id = i.id \
+         WHERE i.org_id = $1 \
+         GROUP BY triage_status \
+         ORDER BY count DESC",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn top_slop_senders(
+    pool: &PgPool,
+    org_id: Uuid,
+    limit: i64,
+) -> Result<Vec<SlopSender>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT sender_email, total_messages, slop_count \
+         FROM sender_reputation \
+         WHERE org_id = $1 AND slop_count > 0 \
+         ORDER BY slop_count DESC \
+         LIMIT $2",
+    )
+    .bind(org_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn top_subjects(
     pool: &PgPool,
     org_id: Uuid,
