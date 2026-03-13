@@ -21,9 +21,49 @@ pub enum BriefingLine {
 impl BriefingPanel {
     pub fn new() -> Self {
         Self {
-            lines: mock_briefing(),
+            lines: Vec::new(),
             scroll: 0,
         }
+    }
+
+    pub fn set_data(&mut self, briefing: &crate::client::Briefing) {
+        let mut lines = vec![
+            BriefingLine::Header(format!("Summary ({})", briefing.period)),
+            BriefingLine::Stat("Total received".into(), briefing.total_received.to_string()),
+            BriefingLine::Stat("Total sent".into(), briefing.total_sent.to_string()),
+            BriefingLine::Blank,
+        ];
+        if !briefing.by_inbox.is_empty() {
+            lines.push(BriefingLine::Header("By Inbox".into()));
+            for inbox in &briefing.by_inbox {
+                lines.push(BriefingLine::Stat(
+                    inbox.inbox_email.clone(),
+                    format!("{} in / {} out", inbox.received, inbox.sent),
+                ));
+            }
+            lines.push(BriefingLine::Blank);
+        }
+        if !briefing.top_senders.is_empty() {
+            lines.push(BriefingLine::Header("Top Senders".into()));
+            for sender in &briefing.top_senders {
+                lines.push(BriefingLine::Stat(
+                    sender.address.clone(),
+                    format!("{} messages", sender.count),
+                ));
+            }
+            lines.push(BriefingLine::Blank);
+        }
+        if !briefing.top_subjects.is_empty() {
+            lines.push(BriefingLine::Header("Top Subjects".into()));
+            for subj in &briefing.top_subjects {
+                lines.push(BriefingLine::Stat(
+                    subj.subject.clone(),
+                    format!("{} messages", subj.count),
+                ));
+            }
+        }
+        self.lines = lines;
+        self.scroll = 0;
     }
 
     pub fn scroll_down(&mut self) {
@@ -64,34 +104,57 @@ impl BriefingPanel {
     }
 }
 
-fn mock_briefing() -> Vec<BriefingLine> {
-    vec![
-        BriefingLine::Header("Summary (last 24h)".into()),
-        BriefingLine::Stat("Total received".into(), "47".into()),
-        BriefingLine::Stat("Total sent".into(), "12".into()),
-        BriefingLine::Blank,
-        BriefingLine::Header("By Inbox".into()),
-        BriefingLine::Stat("hello@pb.dev".into(), "32 in / 8 out".into()),
-        BriefingLine::Stat("support@pb.dev".into(), "15 in / 4 out".into()),
-        BriefingLine::Blank,
-        BriefingLine::Header("Top Senders".into()),
-        BriefingLine::Stat("alice@company.com".into(), "8 messages".into()),
-        BriefingLine::Stat("bob@example.com".into(), "5 messages".into()),
-        BriefingLine::Stat("newsletter@io".into(), "4 messages".into()),
-        BriefingLine::Blank,
-        BriefingLine::Header("Pending Approvals".into()),
-        BriefingLine::Stat("Count".into(), "3".into()),
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::{Briefing, InboxStats, SenderCount, SubjectCount};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn sample_briefing() -> Briefing {
+        Briefing {
+            period: "24h".into(),
+            since: Utc::now(),
+            total_received: 47,
+            total_sent: 12,
+            by_inbox: vec![InboxStats {
+                inbox_id: Uuid::new_v4(),
+                inbox_email: "hello@pb.dev".into(),
+                received: 32,
+                sent: 8,
+            }],
+            top_senders: vec![SenderCount {
+                address: "alice@co.com".into(),
+                count: 8,
+            }],
+            top_subjects: vec![SubjectCount {
+                subject: "Meeting".into(),
+                count: 3,
+            }],
+        }
+    }
 
     #[test]
-    fn test_new_has_content() {
+    fn test_new_starts_empty() {
         let b = BriefingPanel::new();
+        assert!(b.lines.is_empty());
+        assert_eq!(b.scroll, 0);
+    }
+
+    #[test]
+    fn test_set_data_populates_lines() {
+        let mut b = BriefingPanel::new();
+        b.set_data(&sample_briefing());
         assert!(!b.lines.is_empty());
+        assert_eq!(b.scroll, 0);
+    }
+
+    #[test]
+    fn test_set_data_resets_scroll() {
+        let mut b = BriefingPanel::new();
+        b.scroll_down();
+        b.scroll_down();
+        b.set_data(&sample_briefing());
         assert_eq!(b.scroll, 0);
     }
 

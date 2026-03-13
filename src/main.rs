@@ -1,20 +1,7 @@
 use std::net::SocketAddr;
 
+use postblox::{api, config, dashboard, db, embeddings, events, hooks, mail, stalwart};
 use tracing_subscriber::EnvFilter;
-
-mod api;
-mod config;
-mod core;
-mod dashboard;
-mod db;
-mod embeddings;
-mod events;
-mod hooks;
-mod mail;
-mod models;
-mod notifications;
-mod stalwart;
-mod sync;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

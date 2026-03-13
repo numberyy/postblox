@@ -1,15 +1,11 @@
 mod app;
-#[allow(dead_code)] // Wired in Round 3 when data layer integrates
 mod client;
 mod components;
-#[allow(dead_code)] // Wired in Round 3 when data layer integrates
 mod config;
 mod keys;
 mod layout;
-#[allow(dead_code)] // Wired in Round 3 when data layer integrates
 mod state;
 mod theme;
-#[allow(dead_code)] // Wired in Round 3 when WS connects
 mod ws;
 
 #[tokio::main]
@@ -22,7 +18,15 @@ async fn main() {
         }
     };
 
-    let mut app = app::App::new(&cfg);
+    let client = match client::PostbloxClient::new(cfg.server_url.clone(), cfg.api_key.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut app = app::App::new(&cfg, client);
     if let Err(e) = app.run().await {
         eprintln!("error: {e}");
         std::process::exit(1);

@@ -14,15 +14,9 @@ pub struct InboxList {
 
 pub enum SidebarItem {
     AllInboxes,
-    Inbox {
-        email: String,
-        unread: usize,
-        active: bool,
-    },
+    Inbox { email: String, active: bool },
     Divider,
-    Approvals {
-        pending: usize,
-    },
+    Approvals { pending: usize },
     Briefing,
     Search,
 }
@@ -30,12 +24,37 @@ pub enum SidebarItem {
 impl InboxList {
     pub fn new() -> Self {
         Self {
-            items: mock_items(),
+            items: default_items(),
             state: ListState::default().with_selected(Some(0)),
         }
     }
 
-    #[allow(dead_code)] // Used when data layer wires in Round 3
+    pub fn set_inboxes(&mut self, inboxes: &[crate::client::Inbox], pending_approvals: usize) {
+        let prev = self.logical_selected();
+        let mut items = Vec::with_capacity(inboxes.len() + 5);
+        items.push(SidebarItem::AllInboxes);
+        for inbox in inboxes {
+            items.push(SidebarItem::Inbox {
+                email: inbox.email.clone(),
+                active: inbox.active,
+            });
+        }
+        items.push(SidebarItem::Divider);
+        items.push(SidebarItem::Approvals {
+            pending: pending_approvals,
+        });
+        items.push(SidebarItem::Briefing);
+        items.push(SidebarItem::Search);
+        self.items = items;
+        let max = selectable_count(&self.items);
+        if prev < max {
+            self.select(prev);
+        } else if max > 0 {
+            self.select(0);
+        }
+    }
+
+    #[cfg(test)]
     pub fn selected(&self) -> usize {
         self.state.selected().unwrap_or(0)
     }
@@ -110,24 +129,13 @@ fn render_item<'a>(item: &SidebarItem, theme: &Theme) -> ListItem<'a> {
             "  All Inboxes",
             Style::default().fg(theme.fg),
         )])),
-        SidebarItem::Inbox {
-            email,
-            unread,
-            active,
-        } => {
+        SidebarItem::Inbox { email, active } => {
             let marker = if *active { " ▶ " } else { "   " };
             let label = truncate(email, 14);
-            let mut spans = vec![Span::styled(
+            ListItem::new(Line::from(Span::styled(
                 format!("{marker}{label}"),
                 Style::default().fg(theme.fg),
-            )];
-            if *unread > 0 {
-                spans.push(Span::styled(
-                    format!(" ({unread})"),
-                    Style::default().fg(theme.muted),
-                ));
-            }
-            ListItem::new(Line::from(spans))
+            )))
         }
         SidebarItem::Divider => ListItem::new(Line::from(Span::styled(
             " ─────────────────",
@@ -189,26 +197,11 @@ fn from_visual_index(items: &[SidebarItem], visual: usize) -> usize {
     count
 }
 
-fn mock_items() -> Vec<SidebarItem> {
+fn default_items() -> Vec<SidebarItem> {
     vec![
         SidebarItem::AllInboxes,
-        SidebarItem::Inbox {
-            email: "hello@pb.dev".into(),
-            unread: 12,
-            active: true,
-        },
-        SidebarItem::Inbox {
-            email: "support@pb.dev".into(),
-            unread: 3,
-            active: false,
-        },
-        SidebarItem::Inbox {
-            email: "alerts@pb.dev".into(),
-            unread: 0,
-            active: false,
-        },
         SidebarItem::Divider,
-        SidebarItem::Approvals { pending: 3 },
+        SidebarItem::Approvals { pending: 0 },
         SidebarItem::Briefing,
         SidebarItem::Search,
     ]
@@ -217,6 +210,31 @@ fn mock_items() -> Vec<SidebarItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::Inbox;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn make_inbox(email: &str) -> Inbox {
+        Inbox {
+            id: Uuid::new_v4(),
+            email: email.into(),
+            display_name: None,
+            inbox_type: "standard".into(),
+            active: true,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn populated_list() -> InboxList {
+        let mut list = InboxList::new();
+        let inboxes = vec![
+            make_inbox("hello@pb.dev"),
+            make_inbox("support@pb.dev"),
+            make_inbox("alerts@pb.dev"),
+        ];
+        list.set_inboxes(&inboxes, 3);
+        list
+    }
 
     #[test]
     fn test_new_selects_first() {
@@ -225,13 +243,20 @@ mod tests {
     }
 
     #[test]
+    fn test_set_inboxes_populates_items() {
+        let list = populated_list();
+        // AllInboxes + 3 inboxes
+        assert_eq!(list.inbox_count(), 4);
+    }
+
+    #[test]
     fn test_select_next_skips_divider() {
-        let mut list = InboxList::new();
-        // Move to item 3 (alerts@pb.dev), next should skip divider to Approvals
+        let mut list = populated_list();
+        // Item 3 = alerts@pb.dev (logical), next skips Divider to Approvals
         list.select(3);
         list.select_next();
         let vis = list.state.selected().unwrap();
-        // Visual index 5 = Approvals (index 4 is Divider)
+        // Visual: 0=AllInboxes, 1=hello, 2=support, 3=alerts, 4=Divider, 5=Approvals
         assert_eq!(vis, 5);
     }
 
@@ -244,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_select_last() {
-        let mut list = InboxList::new();
+        let mut list = populated_list();
         list.select_last();
         let count = selectable_count(&list.items);
         assert_eq!(list.logical_selected(), count - 1);
@@ -252,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_select_first() {
-        let mut list = InboxList::new();
+        let mut list = populated_list();
         list.select(3);
         list.select_first();
         assert_eq!(list.logical_selected(), 0);
@@ -260,32 +285,53 @@ mod tests {
 
     #[test]
     fn test_selectable_count_excludes_divider() {
-        let items = mock_items();
-        let total = items.len();
-        let dividers = items
+        let list = populated_list();
+        let total = list.items.len();
+        let dividers = list
+            .items
             .iter()
             .filter(|i| matches!(i, SidebarItem::Divider))
             .count();
-        assert_eq!(selectable_count(&items), total - dividers);
+        assert_eq!(selectable_count(&list.items), total - dividers);
     }
 
     #[test]
     fn test_visual_logical_roundtrip() {
-        let items = mock_items();
-        let count = selectable_count(&items);
+        let list = populated_list();
+        let count = selectable_count(&list.items);
         for i in 0..count {
-            let vis = to_visual_index(&items, i);
-            let back = from_visual_index(&items, vis);
+            let vis = to_visual_index(&list.items, i);
+            let back = from_visual_index(&list.items, vis);
             assert_eq!(back, i, "roundtrip failed for logical index {i}");
         }
     }
 
     #[test]
     fn test_select_out_of_bounds() {
-        let mut list = InboxList::new();
-        let max = selectable_count(&list.items);
-        list.select(max + 10);
-        // Should not change from default
+        let mut list = populated_list();
+        list.select(selectable_count(&list.items) + 10);
         assert_eq!(list.logical_selected(), 0);
+    }
+
+    #[test]
+    fn test_set_inboxes_preserves_selection() {
+        let mut list = populated_list();
+        list.select(2); // support@pb.dev
+        let inboxes = vec![
+            make_inbox("hello@pb.dev"),
+            make_inbox("support@pb.dev"),
+            make_inbox("alerts@pb.dev"),
+            make_inbox("new@pb.dev"),
+        ];
+        list.set_inboxes(&inboxes, 0);
+        assert_eq!(list.logical_selected(), 2);
+    }
+
+    #[test]
+    fn test_default_items_structure() {
+        let list = InboxList::new();
+        // AllInboxes, Divider, Approvals, Briefing, Search
+        assert_eq!(list.items.len(), 5);
+        assert_eq!(list.inbox_count(), 1); // only AllInboxes
     }
 }

@@ -17,9 +17,9 @@ pub struct StatusBar {
 impl StatusBar {
     pub fn new(vim_mode: bool) -> Self {
         Self {
-            connected: true,
-            inbox_name: "hello@pb.dev".into(),
-            inbox_count: 12,
+            connected: false,
+            inbox_name: String::new(),
+            inbox_count: 0,
             vim_mode,
         }
     }
@@ -66,8 +66,8 @@ mod tests {
     #[test]
     fn test_new_defaults() {
         let sb = StatusBar::new(true);
-        assert!(sb.connected);
-        assert!(!sb.inbox_name.is_empty());
+        assert!(!sb.connected);
+        assert!(sb.inbox_name.is_empty());
         assert!(sb.vim_mode);
     }
 

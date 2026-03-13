@@ -33,16 +33,6 @@ pub struct Message {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Thread {
-    pub id: Uuid,
-    pub inbox_id: Uuid,
-    pub subject: Option<String>,
-    pub message_count: i32,
-    pub last_message_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Approval {
     pub id: Uuid,
     pub inbox_id: Uuid,
@@ -95,6 +85,7 @@ pub enum ClientError {
     Api { status: u16, body: String },
 }
 
+#[derive(Clone)]
 pub struct PostbloxClient {
     http: reqwest::Client,
     base_url: String,
@@ -192,11 +183,6 @@ impl PostbloxClient {
         .await
     }
 
-    pub async fn get_message(&self, inbox_id: Uuid, msg_id: Uuid) -> Result<Message, ClientError> {
-        self.get_json(&format!("/inboxes/{inbox_id}/messages/{msg_id}"))
-            .await
-    }
-
     pub async fn get_thread_messages(
         &self,
         inbox_id: Uuid,
@@ -246,29 +232,6 @@ impl PostbloxClient {
             }),
         )
         .await
-    }
-
-    pub async fn create_draft(
-        &self,
-        inbox_id: Uuid,
-        to: &str,
-        subject: &str,
-        body: &str,
-    ) -> Result<serde_json::Value, ClientError> {
-        self.post_json(
-            &format!("/inboxes/{inbox_id}/drafts"),
-            &serde_json::json!({
-                "to_addrs": [to],
-                "subject": subject,
-                "text_body": body,
-            }),
-        )
-        .await
-    }
-
-    pub async fn send_draft(&self, inbox_id: Uuid, draft_id: Uuid) -> Result<(), ClientError> {
-        self.post_empty(&format!("/inboxes/{inbox_id}/drafts/{draft_id}/send"))
-            .await
     }
 
     pub fn ws_url(&self) -> String {

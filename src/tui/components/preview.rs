@@ -9,7 +9,6 @@ use crate::theme::Theme;
 pub struct Preview {
     pub from: String,
     pub subject: String,
-    #[allow(dead_code)] // Used when data layer wires in Round 3
     pub date: String,
     pub body: String,
     pub scroll: u16,
@@ -18,14 +17,10 @@ pub struct Preview {
 impl Preview {
     pub fn new() -> Self {
         Self {
-            from: "alice@company.com".into(),
-            subject: "Re: Meeting tomorrow".into(),
-            date: "2026-03-13 10:30 UTC".into(),
-            body: "Hey,\n\nJust wanted to confirm our 3pm meeting tomorrow. \
-                   I'll bring the project update slides.\n\n\
-                   Also, could you share the latest metrics report before then?\n\n\
-                   Thanks,\nAlice"
-                .into(),
+            from: String::new(),
+            subject: String::new(),
+            date: String::new(),
+            body: String::new(),
             scroll: 0,
         }
     }
@@ -38,7 +33,6 @@ impl Preview {
         self.scroll = self.scroll.saturating_sub(1);
     }
 
-    #[allow(dead_code)] // Used when data layer wires in Round 3
     pub fn set_content(&mut self, from: &str, subject: &str, date: &str, body: &str) {
         self.from = from.into();
         self.subject = subject.into();
@@ -105,10 +99,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new_has_mock_content() {
+    fn test_new_starts_empty() {
         let p = Preview::new();
-        assert!(!p.from.is_empty());
-        assert!(!p.body.is_empty());
+        assert!(p.from.is_empty());
+        assert!(p.body.is_empty());
         assert_eq!(p.scroll, 0);
     }
 

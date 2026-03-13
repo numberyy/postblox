@@ -58,7 +58,6 @@ impl Compose {
         self.field = ComposeField::To;
     }
 
-    #[allow(dead_code)] // Used when send is wired in Round 3
     pub fn body_text(&self) -> String {
         self.textarea.lines().join("\n")
     }

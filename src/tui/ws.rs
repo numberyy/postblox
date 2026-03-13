@@ -7,17 +7,24 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub enum WsEvent {
     MessageReceived {
+        #[allow(dead_code)]
         message_id: Uuid,
         inbox_id: Uuid,
     },
     ApprovalRequested {
+        #[allow(dead_code)]
         message_id: Uuid,
+        #[allow(dead_code)]
         inbox_id: Uuid,
+        #[allow(dead_code)]
         approval_id: Uuid,
     },
     TrustChanged {
+        #[allow(dead_code)]
         inbox_id: Uuid,
+        #[allow(dead_code)]
         new_mode: String,
+        #[allow(dead_code)]
         approved_count: i64,
     },
     Connected,

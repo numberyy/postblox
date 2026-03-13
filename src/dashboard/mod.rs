@@ -838,12 +838,12 @@ async fn settings_change_mode(
 ) -> Response {
     let inbox = match crate::db::inboxes::get_by_id(&state.pool, id).await {
         Ok(Some(i)) if i.org_id == org_id => i,
-        _ => return error_response("inbox not found"),
+        _ => return bad_request("inbox not found"),
     };
 
     let mode: crate::models::SendMode = match form.send_mode.parse() {
         Ok(m) => m,
-        Err(_) => return error_response("invalid send mode"),
+        Err(_) => return bad_request("invalid send mode"),
     };
 
     let existing_rules = crate::db::permissions::get_by_inbox(&state.pool, inbox.id)
@@ -908,12 +908,12 @@ async fn settings_create_notification(
 ) -> Response {
     let provider: crate::models::NotificationProvider = match form.provider.parse() {
         Ok(p) => p,
-        Err(_) => return error_response("invalid provider"),
+        Err(_) => return bad_request("invalid provider"),
     };
 
     let config: serde_json::Value = match serde_json::from_str(&form.config) {
         Ok(v) => v,
-        Err(_) => return error_response("invalid JSON config"),
+        Err(_) => return bad_request("invalid JSON config"),
     };
 
     let input = crate::models::CreateNotificationConfig {
@@ -1104,6 +1104,16 @@ fn escape_html(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn bad_request(msg: &str) -> Response {
+    tracing::warn!("dashboard bad request: {msg}");
+    let safe = escape_html(msg);
+    (
+        StatusCode::BAD_REQUEST,
+        Html(format!("<h1>Bad Request</h1><p>{safe}</p>")),
+    )
+        .into_response()
 }
 
 fn error_response(msg: &str) -> Response {

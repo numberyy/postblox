@@ -23,8 +23,25 @@ pub struct MessageEntry {
 impl MessageList {
     pub fn new() -> Self {
         Self {
-            entries: mock_messages(),
-            state: ListState::default().with_selected(Some(0)),
+            entries: Vec::new(),
+            state: ListState::default(),
+        }
+    }
+
+    pub fn set_entries(&mut self, messages: &[crate::client::Message]) {
+        self.entries = messages
+            .iter()
+            .map(|m| MessageEntry {
+                from: m.from_addr.clone(),
+                subject: m.subject.clone().unwrap_or_default(),
+                date: m.created_at,
+                is_slop: m.triage_status.as_deref() == Some("slopified"),
+            })
+            .collect();
+        if self.entries.is_empty() {
+            self.state.select(None);
+        } else {
+            self.state.select(Some(0));
         }
     }
 
@@ -32,7 +49,7 @@ impl MessageList {
         self.state.selected().unwrap_or(0)
     }
 
-    #[allow(dead_code)] // Used when data layer wires in Round 3
+    #[cfg(test)]
     pub fn select(&mut self, idx: usize) {
         if idx < self.entries.len() {
             self.state.select(Some(idx));
@@ -122,55 +139,67 @@ fn format_age_from(now: DateTime<Utc>, date: DateTime<Utc>) -> String {
     }
 }
 
-fn mock_messages() -> Vec<MessageEntry> {
-    let now = Utc::now();
-    vec![
-        MessageEntry {
-            from: "alice@company.com".into(),
-            subject: "Re: Meeting tomorrow".into(),
-            date: now - chrono::Duration::minutes(3),
-            is_slop: false,
-        },
-        MessageEntry {
-            from: "bob@example.com".into(),
-            subject: "Invoice #4821".into(),
-            date: now - chrono::Duration::hours(1),
-            is_slop: false,
-        },
-        MessageEntry {
-            from: "carol@newsletter.io".into(),
-            subject: "Weekly digest".into(),
-            date: now - chrono::Duration::hours(2),
-            is_slop: true,
-        },
-        MessageEntry {
-            from: "dave@startup.co".into(),
-            subject: "Partnership proposal".into(),
-            date: now - chrono::Duration::hours(5),
-            is_slop: false,
-        },
-        MessageEntry {
-            from: "eve@spam.biz".into(),
-            subject: "You've won $1,000,000!".into(),
-            date: now - chrono::Duration::days(1),
-            is_slop: true,
-        },
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::Message;
+    use uuid::Uuid;
+
+    fn make_message(from: &str, subject: &str, slop: bool) -> Message {
+        Message {
+            id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+            thread_id: None,
+            from_addr: from.into(),
+            to_addrs: serde_json::json!(["bob@example.com"]),
+            subject: Some(subject.into()),
+            text_body: Some("body".into()),
+            html_body: None,
+            direction: "inbound".into(),
+            created_at: Utc::now(),
+            slop_score: None,
+            category: None,
+            triage_status: if slop { Some("slopified".into()) } else { None },
+        }
+    }
+
+    fn populated_list() -> MessageList {
+        let mut list = MessageList::new();
+        let messages = vec![
+            make_message("alice@co.com", "Re: Meeting", false),
+            make_message("bob@ex.com", "Invoice #4821", false),
+            make_message("carol@news.io", "Weekly digest", true),
+            make_message("dave@startup.co", "Partnership", false),
+            make_message("eve@spam.biz", "You've won!", true),
+        ];
+        list.set_entries(&messages);
+        list
+    }
 
     #[test]
-    fn test_new_selects_first() {
+    fn test_new_starts_empty() {
         let list = MessageList::new();
+        assert!(list.entries.is_empty());
+        assert_eq!(list.state.selected(), None);
+    }
+
+    #[test]
+    fn test_set_entries_selects_first() {
+        let list = populated_list();
         assert_eq!(list.selected(), 0);
+        assert_eq!(list.entries.len(), 5);
+    }
+
+    #[test]
+    fn test_set_entries_marks_slop() {
+        let list = populated_list();
+        assert!(!list.entries[0].is_slop);
+        assert!(list.entries[2].is_slop);
     }
 
     #[test]
     fn test_select_next_prev() {
-        let mut list = MessageList::new();
+        let mut list = populated_list();
         list.select_next();
         assert_eq!(list.selected(), 1);
         list.select_next();
@@ -181,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_select_next_capped() {
-        let mut list = MessageList::new();
+        let mut list = populated_list();
         for _ in 0..100 {
             list.select_next();
         }
@@ -190,14 +219,14 @@ mod tests {
 
     #[test]
     fn test_select_prev_at_zero() {
-        let mut list = MessageList::new();
+        let mut list = populated_list();
         list.select_prev();
         assert_eq!(list.selected(), 0);
     }
 
     #[test]
     fn test_select_first_last() {
-        let mut list = MessageList::new();
+        let mut list = populated_list();
         list.select_last();
         assert_eq!(list.selected(), list.entries.len() - 1);
         list.select_first();
@@ -206,9 +235,17 @@ mod tests {
 
     #[test]
     fn test_select_out_of_bounds() {
-        let mut list = MessageList::new();
+        let mut list = populated_list();
         list.select(999);
         assert_eq!(list.selected(), 0); // unchanged
+    }
+
+    #[test]
+    fn test_set_entries_empty_clears_selection() {
+        let mut list = populated_list();
+        list.set_entries(&[]);
+        assert!(list.entries.is_empty());
+        assert_eq!(list.state.selected(), None);
     }
 
     #[test]
@@ -244,13 +281,5 @@ mod tests {
         let date = Utc::now() + chrono::Duration::hours(1);
         let age = format_age(date);
         assert_eq!(age, "0s ago");
-    }
-
-    #[test]
-    fn test_mock_messages_not_empty() {
-        let msgs = mock_messages();
-        assert!(!msgs.is_empty());
-        assert!(msgs.iter().any(|m| m.is_slop));
-        assert!(msgs.iter().any(|m| !m.is_slop));
     }
 }

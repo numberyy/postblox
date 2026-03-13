@@ -28,18 +28,19 @@ impl SearchPanel {
         }
     }
 
-    #[allow(dead_code)] // Used when data layer wires in Round 3
-    pub fn set_query(&mut self, query: String) {
-        self.query = query;
-        self.results = if self.query.is_empty() {
-            Vec::new()
-        } else {
-            mock_results()
-        };
-        if !self.results.is_empty() {
-            self.state.select(Some(0));
-        } else {
+    pub fn set_results(&mut self, messages: &[crate::client::Message]) {
+        self.results = messages
+            .iter()
+            .map(|m| SearchResult {
+                from: m.from_addr.clone(),
+                subject: m.subject.clone().unwrap_or_default(),
+                snippet: m.text_body.clone().unwrap_or_default(),
+            })
+            .collect();
+        if self.results.is_empty() {
             self.state.select(None);
+        } else {
+            self.state.select(Some(0));
         }
     }
 
@@ -57,7 +58,7 @@ impl SearchPanel {
         self.state.select(None);
     }
 
-    #[allow(dead_code)] // Used when data layer wires in Round 3
+    #[cfg(test)]
     pub fn selected(&self) -> Option<usize> {
         self.state.selected()
     }
@@ -158,25 +159,47 @@ impl SearchPanel {
     }
 }
 
-#[allow(dead_code)] // Used by set_query which is wired in Round 3
-fn mock_results() -> Vec<SearchResult> {
-    vec![
-        SearchResult {
-            from: "alice@company.com".into(),
-            subject: "Re: Meeting tomorrow".into(),
-            snippet: "confirm our 3pm meeting tomorrow".into(),
-        },
-        SearchResult {
-            from: "bob@example.com".into(),
-            subject: "Invoice #4821".into(),
-            snippet: "please find attached the invoice".into(),
-        },
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::Message;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn make_messages() -> Vec<Message> {
+        vec![
+            Message {
+                id: Uuid::new_v4(),
+                inbox_id: Uuid::new_v4(),
+                thread_id: None,
+                from_addr: "alice@company.com".into(),
+                to_addrs: serde_json::json!(["bob@ex.com"]),
+                subject: Some("Re: Meeting tomorrow".into()),
+                text_body: Some("confirm our 3pm meeting tomorrow".into()),
+                html_body: None,
+                direction: "inbound".into(),
+                created_at: Utc::now(),
+                slop_score: None,
+                category: None,
+                triage_status: None,
+            },
+            Message {
+                id: Uuid::new_v4(),
+                inbox_id: Uuid::new_v4(),
+                thread_id: None,
+                from_addr: "bob@example.com".into(),
+                to_addrs: serde_json::json!(["alice@co.com"]),
+                subject: Some("Invoice #4821".into()),
+                text_body: Some("please find attached the invoice".into()),
+                html_body: None,
+                direction: "inbound".into(),
+                created_at: Utc::now(),
+                slop_score: None,
+                category: None,
+                triage_status: None,
+            },
+        ]
+    }
 
     #[test]
     fn test_new_empty() {
@@ -187,18 +210,18 @@ mod tests {
     }
 
     #[test]
-    fn test_set_query_populates_results() {
+    fn test_set_results_populates() {
         let mut s = SearchPanel::new();
-        s.set_query("meeting".into());
-        assert!(!s.results.is_empty());
+        s.set_results(&make_messages());
+        assert_eq!(s.results.len(), 2);
         assert_eq!(s.selected(), Some(0));
     }
 
     #[test]
-    fn test_set_query_empty_clears() {
+    fn test_set_results_empty_clears() {
         let mut s = SearchPanel::new();
-        s.set_query("meeting".into());
-        s.set_query(String::new());
+        s.set_results(&make_messages());
+        s.set_results(&[]);
         assert!(s.results.is_empty());
         assert_eq!(s.selected(), None);
     }
@@ -216,7 +239,8 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut s = SearchPanel::new();
-        s.set_query("test".into());
+        s.push_char('x');
+        s.set_results(&make_messages());
         s.clear();
         assert!(s.query.is_empty());
         assert!(s.results.is_empty());
@@ -225,7 +249,7 @@ mod tests {
     #[test]
     fn test_select_next_prev() {
         let mut s = SearchPanel::new();
-        s.set_query("test".into());
+        s.set_results(&make_messages());
         assert_eq!(s.selected(), Some(0));
         s.select_next();
         assert_eq!(s.selected(), Some(1));
@@ -236,7 +260,7 @@ mod tests {
     #[test]
     fn test_select_prev_at_zero() {
         let mut s = SearchPanel::new();
-        s.set_query("test".into());
+        s.set_results(&make_messages());
         s.select_prev();
         assert_eq!(s.selected(), Some(0));
     }
@@ -244,7 +268,7 @@ mod tests {
     #[test]
     fn test_select_next_capped() {
         let mut s = SearchPanel::new();
-        s.set_query("test".into());
+        s.set_results(&make_messages());
         for _ in 0..100 {
             s.select_next();
         }

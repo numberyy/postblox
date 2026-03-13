@@ -15,6 +15,12 @@ pub struct WebSocketHub {
     total_connections: AtomicUsize,
 }
 
+impl Default for WebSocketHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WebSocketHub {
     pub fn new() -> Self {
         Self {
