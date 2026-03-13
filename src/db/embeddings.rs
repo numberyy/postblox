@@ -46,19 +46,6 @@ pub async fn search_similar(
         .await
 }
 
-#[allow(dead_code)]
-pub async fn count_unembedded(pool: &PgPool, org_id: Uuid) -> Result<i64, sqlx::Error> {
-    let (count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM messages m \
-         JOIN inboxes i ON m.inbox_id = i.id \
-         WHERE i.org_id = $1 AND m.embedding IS NULL",
-    )
-    .bind(org_id)
-    .fetch_one(pool)
-    .await?;
-    Ok(count)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,18 +134,6 @@ mod tests {
             .await
             .unwrap();
         assert!(results.is_empty());
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_count_unembedded_returns_correct_count() {
-        let pool = crate::db::test_pool().await;
-        let inbox = setup_inbox(&pool).await;
-        create_message(&pool, inbox.id, "unembedded 1").await;
-        create_message(&pool, inbox.id, "unembedded 2").await;
-
-        let count = count_unembedded(&pool, inbox.org_id).await.unwrap();
-        assert!(count >= 2);
     }
 
     #[tokio::test]

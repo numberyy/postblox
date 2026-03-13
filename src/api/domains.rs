@@ -4,7 +4,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::auth::AuthOrg;
+use super::auth::{AdminOrg, AuthOrg};
 use super::error::ApiError;
 use super::AppState;
 use crate::models::Domain;
@@ -46,7 +46,7 @@ fn is_valid_domain(name: &str) -> bool {
 
 pub async fn create(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AdminOrg(org_id): AdminOrg,
     Json(req): Json<CreateDomainRequest>,
 ) -> Result<(StatusCode, Json<Domain>), ApiError> {
     let name = req.name.trim().to_lowercase();
@@ -85,7 +85,7 @@ pub async fn create(
 
 pub async fn list(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
 ) -> Result<Json<Vec<Domain>>, ApiError> {
     let domains = crate::db::domains::list_by_org(&state.pool, org_id)
         .await
@@ -95,7 +95,7 @@ pub async fn list(
 
 pub async fn get(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(id): Path<Uuid>,
 ) -> Result<Json<DomainWithDns>, ApiError> {
     let domain = get_domain_for_org(&state.pool, id, org_id).await?;
@@ -118,7 +118,7 @@ pub async fn get(
 
 pub async fn verify(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AdminOrg(org_id): AdminOrg,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Domain>, ApiError> {
     let domain = get_domain_for_org(&state.pool, id, org_id).await?;
@@ -153,7 +153,7 @@ pub async fn verify(
 
 pub async fn delete(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AdminOrg(org_id): AdminOrg,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let domain = get_domain_for_org(&state.pool, id, org_id).await?;

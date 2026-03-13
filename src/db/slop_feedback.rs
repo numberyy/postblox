@@ -22,22 +22,6 @@ pub async fn create(
     .await
 }
 
-#[allow(dead_code)]
-pub async fn get_by_message(
-    pool: &PgPool,
-    org_id: Uuid,
-    message_id: Uuid,
-) -> Result<Option<SlopFeedback>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, org_id, message_id, is_slop, created_at \
-         FROM slop_feedback WHERE org_id = $1 AND message_id = $2",
-    )
-    .bind(org_id)
-    .bind(message_id)
-    .fetch_optional(pool)
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,28 +78,5 @@ mod tests {
         let fb2 = create(&pool, org_id, msg_id, false).await.unwrap();
         assert!(!fb2.is_slop);
         assert_eq!(fb1.id, fb2.id);
-    }
-
-    #[tokio::test]
-    #[ignore] // needs real DB
-    async fn test_get_by_message_exists() {
-        let pool = crate::db::test_pool().await;
-        let (org_id, msg_id) = setup_message(&pool).await;
-
-        create(&pool, org_id, msg_id, false).await.unwrap();
-        let fb = get_by_message(&pool, org_id, msg_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!fb.is_slop);
-    }
-
-    #[tokio::test]
-    #[ignore] // needs real DB
-    async fn test_get_by_message_not_found() {
-        let pool = crate::db::test_pool().await;
-        let (org_id, _msg_id) = setup_message(&pool).await;
-        let result = get_by_message(&pool, org_id, Uuid::new_v4()).await.unwrap();
-        assert!(result.is_none());
     }
 }

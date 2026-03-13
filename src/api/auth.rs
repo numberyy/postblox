@@ -3,10 +3,15 @@ use axum::http::request::Parts;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::models::Role;
+
 use super::error::ApiError;
 use super::AppState;
 
-pub struct AuthOrg(pub Uuid);
+pub struct AuthOrg {
+    pub org_id: Uuid,
+    pub role: Role,
+}
 
 impl FromRequestParts<AppState> for AuthOrg {
     type Rejection = ApiError;
@@ -16,18 +21,38 @@ impl FromRequestParts<AppState> for AuthOrg {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let token = extract_bearer_token(parts)?;
-        let stored = validate_api_key(&state.pool, &token)
+        let auth_info = validate_api_key(&state.pool, &token)
             .await
             .map_err(|()| ApiError::Unauthorized)?;
 
         // Best-effort update; auth must not fail if this write fails.
         let pool = state.pool.clone();
-        let key_id = stored.id;
+        let key_id = auth_info.id;
         tokio::spawn(async move {
             let _ = crate::db::api_keys::touch_last_used(&pool, key_id).await;
         });
 
-        Ok(AuthOrg(stored.org_id))
+        Ok(AuthOrg {
+            org_id: auth_info.org_id,
+            role: auth_info.role.unwrap_or(Role::Admin),
+        })
+    }
+}
+
+pub struct AdminOrg(pub Uuid);
+
+impl FromRequestParts<AppState> for AdminOrg {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let auth = AuthOrg::from_request_parts(parts, state).await?;
+        if auth.role != Role::Admin {
+            return Err(ApiError::Forbidden("admin role required".into()));
+        }
+        Ok(AdminOrg(auth.org_id))
     }
 }
 
@@ -50,12 +75,15 @@ fn extract_bearer_token(parts: &Parts) -> Result<String, ApiError> {
     Ok(token.to_string())
 }
 
-pub async fn validate_api_key(pool: &sqlx::PgPool, key: &str) -> Result<crate::models::ApiKey, ()> {
+pub async fn validate_api_key(
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<crate::db::api_keys::AuthKeyInfo, ()> {
     if key.len() < 8 || !key.starts_with("pb_") {
         return Err(());
     }
     let prefix = &key[..8];
-    let stored = crate::db::api_keys::find_by_prefix(pool, prefix)
+    let stored = crate::db::api_keys::find_by_prefix_with_role(pool, prefix)
         .await
         .ok()
         .flatten()

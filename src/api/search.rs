@@ -18,7 +18,7 @@ pub struct SearchParams {
 
 pub async fn search(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Vec<Message>>, ApiError> {
     if params.q.trim().is_empty() {

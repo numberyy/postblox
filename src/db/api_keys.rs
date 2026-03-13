@@ -1,7 +1,15 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::ApiKey;
+use crate::models::{ApiKey, Role};
+
+#[derive(sqlx::FromRow)]
+pub struct AuthKeyInfo {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub key_hash: String,
+    pub role: Option<Role>,
+}
 
 pub async fn create(
     pool: &PgPool,
@@ -20,6 +28,21 @@ pub async fn create(
     .bind(prefix)
     .bind(name)
     .fetch_one(pool)
+    .await
+}
+
+pub async fn find_by_prefix_with_role(
+    pool: &PgPool,
+    prefix: &str,
+) -> Result<Option<AuthKeyInfo>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT k.id, k.org_id, k.key_hash, m.role \
+         FROM api_keys k \
+         LEFT JOIN org_members m ON m.api_key_id = k.id AND m.org_id = k.org_id \
+         WHERE k.prefix = $1",
+    )
+    .bind(prefix)
+    .fetch_optional(pool)
     .await
 }
 

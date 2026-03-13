@@ -11,7 +11,7 @@ use crate::models::{BounceType, DeliveryStatus, DeliveryStatusType};
 
 pub async fn get_delivery_status(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path((inbox_id, message_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Vec<DeliveryStatus>>, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;

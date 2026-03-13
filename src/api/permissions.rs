@@ -3,7 +3,7 @@ use axum::Json;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::auth::AuthOrg;
+use super::auth::{AdminOrg, AuthOrg};
 use super::error::ApiError;
 use super::{get_inbox_for_org, AppState};
 use crate::models::{Permission, SendMode};
@@ -16,7 +16,7 @@ pub struct UpsertPermissionRequest {
 
 pub async fn get(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(inbox_id): Path<Uuid>,
 ) -> Result<Json<Permission>, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
@@ -31,7 +31,7 @@ pub async fn get(
 
 pub async fn upsert(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AdminOrg(org_id): AdminOrg,
     Path(inbox_id): Path<Uuid>,
     Json(req): Json<UpsertPermissionRequest>,
 ) -> Result<Json<Permission>, ApiError> {

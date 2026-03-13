@@ -32,7 +32,7 @@ pub async fn bootstrap(
         .map_err(ApiError::from_sqlx)?;
 
     let gk = generate_api_key();
-    crate::db::api_keys::create(
+    let key = crate::db::api_keys::create(
         &state.pool,
         org.id,
         &gk.key_hash,
@@ -41,6 +41,10 @@ pub async fn bootstrap(
     )
     .await
     .map_err(ApiError::from_sqlx)?;
+
+    crate::db::members::ensure_admin_exists(&state.pool, org.id, key.id)
+        .await
+        .map_err(ApiError::from_sqlx)?;
 
     Ok((
         StatusCode::CREATED,

@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::auth::AuthOrg;
+use super::auth::AdminOrg;
 use super::error::ApiError;
 use super::AppState;
 
@@ -65,20 +65,34 @@ pub(super) fn generate_api_key() -> GeneratedKey {
 
 pub async fn create(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AdminOrg(org_id): AdminOrg,
     Json(req): Json<CreateKeyRequest>,
 ) -> Result<(StatusCode, Json<CreateKeyResponse>), ApiError> {
     let gk = generate_api_key();
 
-    let key = crate::db::api_keys::create(
-        &state.pool,
-        org_id,
-        &gk.key_hash,
-        &gk.prefix,
-        req.name.as_deref(),
+    let mut tx = state.pool.begin().await.map_err(ApiError::from_sqlx)?;
+
+    let key: crate::models::ApiKey = sqlx::query_as(
+        "INSERT INTO api_keys (org_id, key_hash, prefix, name) \
+         VALUES ($1, $2, $3, $4) \
+         RETURNING id, org_id, key_hash, prefix, name, created_at, last_used_at",
     )
+    .bind(org_id)
+    .bind(&gk.key_hash)
+    .bind(&gk.prefix)
+    .bind(req.name.as_deref())
+    .fetch_one(&mut *tx)
     .await
     .map_err(ApiError::from_sqlx)?;
+
+    sqlx::query("INSERT INTO org_members (org_id, api_key_id, role) VALUES ($1, $2, 'member')")
+        .bind(org_id)
+        .bind(key.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiError::from_sqlx)?;
+
+    tx.commit().await.map_err(ApiError::from_sqlx)?;
 
     Ok((
         StatusCode::CREATED,
@@ -94,7 +108,7 @@ pub async fn create(
 
 pub async fn list(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AdminOrg(org_id): AdminOrg,
 ) -> Result<Json<Vec<KeyResponse>>, ApiError> {
     let keys = crate::db::api_keys::list_by_org(&state.pool, org_id)
         .await
@@ -105,9 +119,27 @@ pub async fn list(
 
 pub async fn delete(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AdminOrg(org_id): AdminOrg,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
+    // Check if this key is the last admin before deleting (FK CASCADE removes org_member)
+    let role = crate::db::members::get_role(&state.pool, org_id, id)
+        .await
+        .map_err(ApiError::from_sqlx)?;
+    if role == Some(crate::models::Role::Admin) {
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM org_members WHERE org_id = $1 AND role = 'admin'")
+                .bind(org_id)
+                .fetch_one(&state.pool)
+                .await
+                .map_err(ApiError::from_sqlx)?;
+        if count <= 1 {
+            return Err(ApiError::BadRequest(
+                "cannot delete the last admin key".into(),
+            ));
+        }
+    }
+
     let deleted = crate::db::api_keys::delete(&state.pool, id, org_id)
         .await
         .map_err(ApiError::from_sqlx)?;

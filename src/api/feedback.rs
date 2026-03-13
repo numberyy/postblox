@@ -17,7 +17,7 @@ pub struct FeedbackRequest {
 
 pub async fn submit(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Json(req): Json<FeedbackRequest>,
 ) -> Result<(StatusCode, Json<SlopFeedback>), ApiError> {
     let msg = crate::db::messages::get_by_id(&state.pool, req.message_id)

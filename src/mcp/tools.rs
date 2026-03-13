@@ -104,8 +104,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "subject": { "type": "string", "description": "Email subject" },
                     "text_body": { "type": "string", "description": "Plain text body" },
                     "html_body": { "type": "string", "description": "HTML body" },
-                    "cc": { "type": "array", "items": { "type": "string" }, "description": "CC recipients" },
-                    "in_reply_to": { "type": "string", "description": "Message-ID header of the message being replied to" }
+                    "cc": { "type": "array", "items": { "type": "string" }, "description": "CC recipients" }
                 },
                 "required": ["inbox_id", "to", "subject"]
             }
@@ -634,9 +633,6 @@ pub async fn dispatch(
             }
             if let Some(cc) = args.get("cc").cloned() {
                 body["cc"] = cc;
-            }
-            if let Some(irt) = optional_str(&args, "in_reply_to") {
-                body["in_reply_to"] = json!(irt);
             }
             client
                 .post(&format!("/inboxes/{inbox_id}/messages"), body)

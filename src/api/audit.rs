@@ -21,7 +21,7 @@ pub struct AuditQueryParams {
 
 pub async fn list(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Query(params): Query<AuditQueryParams>,
 ) -> Result<Json<Vec<AuditEntry>>, ApiError> {
     let limit = params.limit.unwrap_or(50).clamp(1, 100);

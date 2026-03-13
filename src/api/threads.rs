@@ -9,7 +9,7 @@ use crate::models::Thread;
 
 pub async fn list(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(inbox_id): Path<Uuid>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Vec<Thread>>, ApiError> {
@@ -26,7 +26,7 @@ pub async fn list(
 
 pub async fn get(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path((inbox_id, id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Thread>, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;

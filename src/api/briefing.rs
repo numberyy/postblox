@@ -39,7 +39,7 @@ fn parse_period(period: &str) -> Result<Duration, ApiError> {
 
 pub async fn get(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Query(params): Query<BriefingParams>,
 ) -> Result<Json<BriefingResponse>, ApiError> {
     let period_str = params.period.as_deref().unwrap_or("24h");

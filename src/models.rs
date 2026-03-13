@@ -85,12 +85,6 @@ pub struct Organization {
     pub created_at: DateTime<Utc>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CreateOrganization {
-    pub name: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ApiKey {
     pub id: Uuid,
@@ -102,15 +96,6 @@ pub struct ApiKey {
     pub last_used_at: Option<DateTime<Utc>>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CreateApiKey {
-    pub org_id: Uuid,
-    pub key_hash: String,
-    pub prefix: String,
-    pub name: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Inbox {
     pub id: Uuid,
@@ -120,15 +105,6 @@ pub struct Inbox {
     pub inbox_type: String,
     pub active: bool,
     pub created_at: DateTime<Utc>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CreateInbox {
-    pub org_id: Uuid,
-    pub email: String,
-    pub display_name: Option<String>,
-    pub inbox_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
@@ -200,15 +176,6 @@ pub struct Webhook {
     pub secret: String,
     pub active: bool,
     pub created_at: DateTime<Utc>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CreateWebhook {
-    pub org_id: Uuid,
-    pub url: String,
-    pub events: serde_json::Value,
-    pub secret: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
@@ -570,6 +537,74 @@ impl FromStr for BounceType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Admin,
+    Member,
+}
+
+impl fmt::Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Admin => "admin",
+            Self::Member => "member",
+        })
+    }
+}
+
+impl FromStr for Role {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "admin" => Ok(Self::Admin),
+            "member" => Ok(Self::Member),
+            other => Err(format!("invalid role: {other}")),
+        }
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for Role {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for Role {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        s.parse::<Role>()
+            .map_err(|e| -> sqlx::error::BoxDynError { e.into() })
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for Role {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        let s = match self {
+            Role::Admin => "admin",
+            Role::Member => "member",
+        };
+        <&str as sqlx::Encode<sqlx::Postgres>>::encode(s, buf)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct OrgMember {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub api_key_id: Uuid,
+    pub role: Role,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DeliveryStatus {
     pub id: Uuid,
@@ -855,22 +890,6 @@ mod tests {
     }
 
     #[test]
-    fn test_create_organization_deserialize() {
-        let json = r#"{"name": "Test Org"}"#;
-        let input: CreateOrganization = serde_json::from_str(json).unwrap();
-        assert_eq!(input.name, "Test Org");
-    }
-
-    #[test]
-    fn test_create_inbox_optional_type() {
-        let json = r#"{"org_id": "00000000-0000-0000-0000-000000000001", "email": "bot@x.com"}"#;
-        let input: CreateInbox = serde_json::from_str(json).unwrap();
-        assert_eq!(input.email, "bot@x.com");
-        assert!(input.inbox_type.is_none());
-        assert!(input.display_name.is_none());
-    }
-
-    #[test]
     fn test_create_message_serialize() {
         let cm = CreateMessage {
             inbox_id: Uuid::new_v4(),
@@ -891,19 +910,6 @@ mod tests {
         let json = serde_json::to_value(&cm).unwrap();
         assert_eq!(json["direction"], "outbound");
         assert_eq!(json["to_addrs"][0], "user@example.com");
-    }
-
-    #[test]
-    fn test_create_webhook_events_empty_array() {
-        let wh = CreateWebhook {
-            org_id: Uuid::new_v4(),
-            url: "https://example.com".into(),
-            events: serde_json::json!([]),
-            secret: "secret".into(),
-        };
-        let json = serde_json::to_string(&wh).unwrap();
-        let back: CreateWebhook = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.events.as_array().unwrap().len(), 0);
     }
 
     #[test]
@@ -1469,5 +1475,50 @@ mod tests {
         let back: DeliveryStatus = serde_json::from_str(&json).unwrap();
         assert!(back.bounce_type.is_none());
         assert!(back.details.is_none());
+    }
+
+    #[test]
+    fn test_role_display_all_variants() {
+        assert_eq!(Role::Admin.to_string(), "admin");
+        assert_eq!(Role::Member.to_string(), "member");
+    }
+
+    #[test]
+    fn test_role_from_str_roundtrip() {
+        for role in [Role::Admin, Role::Member] {
+            let s = role.to_string();
+            let parsed: Role = s.parse().unwrap();
+            assert_eq!(parsed, role);
+        }
+    }
+
+    #[test]
+    fn test_role_from_str_invalid_returns_err() {
+        let result: Result<Role, _> = "superadmin".parse();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid role"));
+    }
+
+    #[test]
+    fn test_role_serde_roundtrip() {
+        let role = Role::Admin;
+        let json = serde_json::to_string(&role).unwrap();
+        assert_eq!(json, "\"admin\"");
+        let back: Role = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, role);
+    }
+
+    #[test]
+    fn test_org_member_serialization_roundtrip() {
+        let member = OrgMember {
+            id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            api_key_id: Uuid::new_v4(),
+            role: Role::Admin,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&member).unwrap();
+        let back: OrgMember = serde_json::from_str(&json).unwrap();
+        assert_eq!(member, back);
     }
 }

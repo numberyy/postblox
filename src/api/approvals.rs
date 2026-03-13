@@ -82,7 +82,7 @@ pub struct BatchDecisionRequest {
 
 pub async fn list(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Query(params): Query<ApprovalListParams>,
 ) -> Result<Json<Vec<Approval>>, ApiError> {
     let limit = params.limit.unwrap_or(50).clamp(1, 100);
@@ -103,7 +103,7 @@ pub async fn list(
 
 pub async fn get(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Approval>, ApiError> {
     crate::db::approvals::get(&state.pool, org_id, id)
@@ -115,7 +115,7 @@ pub async fn get(
 
 pub async fn approve(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(id): Path<Uuid>,
     Json(req): Json<DecisionRequest>,
 ) -> Result<Json<Approval>, ApiError> {
@@ -179,7 +179,7 @@ pub async fn approve(
 
 pub async fn reject(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(id): Path<Uuid>,
     Json(req): Json<DecisionRequest>,
 ) -> Result<Json<Approval>, ApiError> {
@@ -213,7 +213,7 @@ pub async fn reject(
 
 pub async fn batch(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Json(req): Json<BatchDecisionRequest>,
 ) -> Result<(StatusCode, Json<Vec<Approval>>), ApiError> {
     if req.status == ApprovalStatus::Pending {

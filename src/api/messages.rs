@@ -28,7 +28,7 @@ pub struct ListMessagesParams {
 
 pub async fn send(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(inbox_id): Path<Uuid>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<Message>), ApiError> {
@@ -117,7 +117,7 @@ pub async fn send(
 
 pub async fn list(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(inbox_id): Path<Uuid>,
     Query(params): Query<ListMessagesParams>,
 ) -> Result<Json<Vec<Message>>, ApiError> {
@@ -149,7 +149,7 @@ pub async fn list(
 
 pub async fn get(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path((inbox_id, id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Message>, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;

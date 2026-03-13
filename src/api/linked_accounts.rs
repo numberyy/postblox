@@ -26,7 +26,7 @@ pub struct SyncResponse {
 
 pub async fn create(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Json(req): Json<CreateLinkedAccountRequest>,
 ) -> Result<(StatusCode, Json<crate::models::LinkedAccount>), ApiError> {
     if req.imap_host.is_empty() {
@@ -59,7 +59,7 @@ pub async fn create(
 
 pub async fn list(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
 ) -> Result<Json<Vec<crate::models::LinkedAccount>>, ApiError> {
     let accounts = crate::db::linked_accounts::list_by_org(&state.pool, org_id)
         .await
@@ -69,7 +69,7 @@ pub async fn list(
 
 pub async fn get(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(id): Path<Uuid>,
 ) -> Result<Json<crate::models::LinkedAccount>, ApiError> {
     let account = get_account_for_org(&state.pool, id, org_id).await?;
@@ -78,7 +78,7 @@ pub async fn get(
 
 pub async fn delete(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     get_account_for_org(&state.pool, id, org_id).await?;
@@ -90,7 +90,7 @@ pub async fn delete(
 
 pub async fn sync(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SyncResponse>, ApiError> {
     let account = get_account_for_org(&state.pool, id, org_id).await?;

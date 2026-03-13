@@ -11,6 +11,7 @@ pub mod embeddings;
 pub mod inboxes;
 pub mod labels;
 pub mod linked_accounts;
+pub mod members;
 pub mod messages;
 pub mod notifications;
 pub mod organizations;

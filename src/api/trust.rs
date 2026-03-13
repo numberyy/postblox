@@ -9,7 +9,7 @@ use crate::models::TrustScore;
 
 pub async fn get(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(inbox_id): Path<Uuid>,
 ) -> Result<Json<TrustScore>, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;

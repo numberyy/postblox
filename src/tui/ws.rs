@@ -4,27 +4,23 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
 
+// Fields on ApprovalRequested/TrustChanged are parsed from server JSON and verified
+// in tests; app.rs currently matches with `..` but will consume them for detail views.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum WsEvent {
     MessageReceived {
-        #[allow(dead_code)]
         message_id: Uuid,
         inbox_id: Uuid,
     },
     ApprovalRequested {
-        #[allow(dead_code)]
         message_id: Uuid,
-        #[allow(dead_code)]
         inbox_id: Uuid,
-        #[allow(dead_code)]
         approval_id: Uuid,
     },
     TrustChanged {
-        #[allow(dead_code)]
         inbox_id: Uuid,
-        #[allow(dead_code)]
         new_mode: String,
-        #[allow(dead_code)]
         approved_count: i64,
     },
     Connected,

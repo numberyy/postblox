@@ -18,7 +18,4 @@ pub trait EmbeddingProvider: Send + Sync {
         &self,
         text: &str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<f32>, EmbeddingError>> + Send + '_>>;
-
-    #[allow(dead_code)] // part of provider interface, used for validation
-    fn dimensions(&self) -> usize;
 }

@@ -4,7 +4,7 @@ use axum::Json;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::auth::AuthOrg;
+use super::auth::{AdminOrg, AuthOrg};
 use super::error::ApiError;
 use super::{get_inbox_for_org, AppState};
 use crate::models::Inbox;
@@ -18,7 +18,7 @@ pub struct CreateInboxRequest {
 
 pub async fn create(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Json(req): Json<CreateInboxRequest>,
 ) -> Result<(StatusCode, Json<Inbox>), ApiError> {
     if req.email.trim().is_empty() {
@@ -48,7 +48,7 @@ pub async fn create(
 
 pub async fn list(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
 ) -> Result<Json<Vec<Inbox>>, ApiError> {
     let inboxes = crate::db::inboxes::list_by_org(&state.pool, org_id)
         .await
@@ -59,7 +59,7 @@ pub async fn list(
 
 pub async fn get(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Inbox>, ApiError> {
     let inbox = get_inbox_for_org(&state.pool, id, org_id).await?;
@@ -68,7 +68,7 @@ pub async fn get(
 
 pub async fn delete(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AdminOrg(org_id): AdminOrg,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let inbox = get_inbox_for_org(&state.pool, id, org_id).await?;

@@ -33,7 +33,7 @@ pub struct UpdateDraftRequest {
 
 pub async fn create(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(inbox_id): Path<Uuid>,
     Json(req): Json<CreateDraftRequest>,
 ) -> Result<(StatusCode, Json<Draft>), ApiError> {
@@ -72,7 +72,7 @@ pub async fn create(
 
 pub async fn list(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(inbox_id): Path<Uuid>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Vec<Draft>>, ApiError> {
@@ -88,7 +88,7 @@ pub async fn list(
 
 pub async fn get(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path((inbox_id, id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Draft>, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
@@ -107,7 +107,7 @@ pub async fn get(
 
 pub async fn update(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path((inbox_id, id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdateDraftRequest>,
 ) -> Result<Json<Draft>, ApiError> {
@@ -152,7 +152,7 @@ pub async fn update(
 
 pub async fn delete(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path((inbox_id, id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
@@ -175,7 +175,7 @@ pub async fn delete(
 
 pub async fn send_draft(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path((inbox_id, id)): Path<(Uuid, Uuid)>,
 ) -> Result<(StatusCode, Json<Message>), ApiError> {
     let inbox = get_inbox_for_org(&state.pool, inbox_id, org_id).await?;

@@ -22,7 +22,7 @@ pub struct AddLabelRequest {
 
 pub async fn create(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(inbox_id): Path<Uuid>,
     Json(req): Json<CreateLabelRequest>,
 ) -> Result<(StatusCode, Json<Label>), ApiError> {
@@ -41,7 +41,7 @@ pub async fn create(
 
 pub async fn list(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(inbox_id): Path<Uuid>,
 ) -> Result<Json<Vec<Label>>, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
@@ -55,7 +55,7 @@ pub async fn list(
 
 pub async fn delete(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path((inbox_id, id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
@@ -78,7 +78,7 @@ pub async fn delete(
 
 pub async fn add_to_message(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path((inbox_id, message_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<AddLabelRequest>,
 ) -> Result<StatusCode, ApiError> {
@@ -109,7 +109,7 @@ pub async fn add_to_message(
 
 pub async fn remove_from_message(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path((inbox_id, message_id, label_id)): Path<(Uuid, Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
@@ -139,7 +139,7 @@ pub async fn remove_from_message(
 
 pub async fn list_for_message(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path((inbox_id, message_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Vec<Label>>, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;

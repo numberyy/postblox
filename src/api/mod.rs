@@ -24,6 +24,7 @@ pub mod inbound;
 pub mod inboxes;
 pub mod labels;
 pub mod linked_accounts;
+pub mod members;
 pub mod messages;
 pub mod notifications;
 pub mod organizations;
@@ -267,6 +268,11 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/approvals/{id}/approve", post(approvals::approve))
         .route("/approvals/{id}/reject", post(approvals::reject))
         .route("/approvals/batch", post(approvals::batch))
+        .route("/members", get(members::list).post(members::add))
+        .route(
+            "/members/{api_key_id}",
+            axum::routing::delete(members::remove),
+        )
         .route("/inboxes/{inbox_id}/trust", get(trust::get))
         .route(
             "/notifications",

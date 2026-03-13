@@ -87,10 +87,6 @@ impl EmbeddingProvider for OpenAiProvider {
             Ok(embedding)
         })
     }
-
-    fn dimensions(&self) -> usize {
-        self.dimensions
-    }
 }
 
 #[cfg(test)]
@@ -141,11 +137,5 @@ mod tests {
         };
         assert!(err.to_string().contains("768"));
         assert!(err.to_string().contains("384"));
-    }
-
-    #[test]
-    fn test_dimensions_returns_configured_value() {
-        let p = OpenAiProvider::new("http://localhost:11434", "nomic-embed-text", None, 768);
-        assert_eq!(p.dimensions(), 768);
     }
 }

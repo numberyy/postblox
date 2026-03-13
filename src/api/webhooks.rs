@@ -55,7 +55,7 @@ fn generate_secret() -> String {
 
 pub async fn create(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Json(req): Json<CreateWebhookRequest>,
 ) -> Result<(StatusCode, Json<CreateWebhookResponse>), ApiError> {
     if req.url.trim().is_empty() {
@@ -92,7 +92,7 @@ pub async fn create(
 
 pub async fn list(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
 ) -> Result<Json<Vec<WebhookResponse>>, ApiError> {
     let webhooks = crate::db::webhooks::list_by_org(&state.pool, org_id)
         .await
@@ -105,7 +105,7 @@ pub async fn list(
 
 pub async fn get(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     let wh = get_webhook_for_org(&state.pool, id, org_id).await?;
@@ -114,7 +114,7 @@ pub async fn get(
 
 pub async fn delete(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let wh = get_webhook_for_org(&state.pool, id, org_id).await?;

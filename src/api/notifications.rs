@@ -17,7 +17,7 @@ pub struct CreateNotificationRequest {
 
 pub async fn list(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
 ) -> Result<Json<Vec<NotificationConfig>>, ApiError> {
     let configs = crate::db::notifications::list_active(&state.pool, org_id)
         .await
@@ -28,7 +28,7 @@ pub async fn list(
 
 pub async fn create(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Json(req): Json<CreateNotificationRequest>,
 ) -> Result<(StatusCode, Json<NotificationConfig>), ApiError> {
     let input = crate::models::CreateNotificationConfig {
@@ -46,7 +46,7 @@ pub async fn create(
 
 pub async fn delete(
     State(state): State<AppState>,
-    AuthOrg(org_id): AuthOrg,
+    AuthOrg { org_id, .. }: AuthOrg,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let deleted = crate::db::notifications::delete(&state.pool, id, org_id)
