@@ -1,6 +1,6 @@
 [package]
 name = "postblox"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Self-hosted email infrastructure for AI agents"

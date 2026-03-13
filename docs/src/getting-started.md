@@ -5,7 +5,7 @@
 The fastest way to run postblox with all dependencies (PostgreSQL + pgvector, Stalwart Mail Server):
 
 ```bash
-git clone https://github.com/numberly/postblox.git
+git clone https://github.com/numbery/postblox.git
 cd postblox
 docker compose up -d
 ```
