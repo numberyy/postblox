@@ -43,13 +43,13 @@ pub async fn run(
             return;
         }
 
-        let was_connected = match connect_and_listen(&ws_url, &tx, &mut shutdown).await {
+        let kind = match connect_and_listen(&ws_url, &tx, &mut shutdown).await {
             Ok(()) => return, // clean shutdown
-            Err((connected, e)) => {
+            Err((kind, e)) => {
                 tracing::warn!("ws disconnected: {e}");
                 // Receiver closed means TUI is shutting down; ignore send error.
                 let _ = tx.send(WsEvent::Disconnected).await;
-                connected
+                kind
             }
         };
 
@@ -58,26 +58,31 @@ pub async fn run(
             _ = shutdown.changed() => return,
         }
 
-        if was_connected {
-            backoff_ms = 1_000;
-        } else {
-            backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+        match kind {
+            DisconnectKind::WasConnected => backoff_ms = 1_000,
+            DisconnectKind::NeverConnected => {
+                backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+            }
         }
     }
 }
 
 type WsError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Returns Ok(()) on clean shutdown, Err((was_connected, error)) on failure.
-/// The bool indicates whether a connection was established before the error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisconnectKind {
+    NeverConnected,
+    WasConnected,
+}
+
 async fn connect_and_listen(
     url: &str,
     tx: &mpsc::Sender<WsEvent>,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
-) -> Result<(), (bool, WsError)> {
+) -> Result<(), (DisconnectKind, WsError)> {
     let (mut ws, _) = tokio_tungstenite::connect_async(url)
         .await
-        .map_err(|e| (false, e.into()))?;
+        .map_err(|e| (DisconnectKind::NeverConnected, e.into()))?;
     // Receiver closed means TUI is shutting down; ignore send error.
     let _ = tx.send(WsEvent::Connected).await;
 
@@ -92,10 +97,10 @@ async fn connect_and_listen(
                         }
                     }
                     Some(Ok(tungstenite::Message::Ping(data))) => {
-                        ws.send(tungstenite::Message::Pong(data)).await.map_err(|e| (true, e.into()))?;
+                        ws.send(tungstenite::Message::Pong(data)).await.map_err(|e| (DisconnectKind::WasConnected, e.into()))?;
                     }
                     Some(Ok(tungstenite::Message::Close(_))) | None => break,
-                    Some(Err(e)) => return Err((true, e.into())),
+                    Some(Err(e)) => return Err((DisconnectKind::WasConnected, e.into())),
                     _ => {}
                 }
             }

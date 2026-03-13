@@ -1,3 +1,10 @@
+use std::borrow::Cow;
+
+use ratatui::style::Style;
+use ratatui::widgets::{Block, BorderType, Borders};
+
+use crate::theme::Theme;
+
 pub mod approvals;
 pub mod briefing;
 pub mod compose;
@@ -7,13 +14,26 @@ pub mod preview;
 pub mod search;
 pub mod status_bar;
 
-pub fn truncate(s: &str, max: usize) -> String {
+pub fn truncate<'a>(s: &'a str, max: usize) -> Cow<'a, str> {
     if s.chars().count() <= max {
-        s.to_string()
+        Cow::Borrowed(s)
     } else {
         let cut: String = s.chars().take(max - 1).collect();
-        format!("{cut}…")
+        Cow::Owned(format!("{cut}…"))
     }
+}
+
+pub fn themed_block(title: String, theme: &Theme, focused: bool) -> Block<'_> {
+    let border_color = if focused {
+        theme.border_focused
+    } else {
+        theme.border
+    };
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
 }
 
 #[cfg(test)]

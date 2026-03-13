@@ -1,10 +1,10 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
-use crate::components::truncate;
+use crate::components::{themed_block, truncate};
 use crate::theme::{Theme, ICON_SEARCH};
 
 pub struct SearchPanel {
@@ -93,17 +93,7 @@ impl SearchPanel {
     }
 
     pub fn render_results(&mut self, frame: &mut Frame, area: Rect, theme: &Theme, focused: bool) {
-        let border_color = if focused {
-            theme.border_focused
-        } else {
-            theme.border
-        };
-
-        let block = Block::default()
-            .title(format!(" {ICON_SEARCH} Search Results "))
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(border_color));
+        let block = themed_block(format!(" {ICON_SEARCH} Search Results "), theme, focused);
 
         if self.results.is_empty() {
             let inner = block.inner(area);

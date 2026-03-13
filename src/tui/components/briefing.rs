@@ -1,9 +1,10 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
+use crate::components::themed_block;
 use crate::theme::{Theme, ICON_BRIEFING};
 
 pub struct BriefingPanel {
@@ -34,17 +35,7 @@ impl BriefingPanel {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme, focused: bool) {
-        let border_color = if focused {
-            theme.border_focused
-        } else {
-            theme.border
-        };
-
-        let block = Block::default()
-            .title(format!(" {ICON_BRIEFING} Daily Briefing "))
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(border_color));
+        let block = themed_block(format!(" {ICON_BRIEFING} Daily Briefing "), theme, focused);
 
         let content: Vec<Line> = self
             .lines

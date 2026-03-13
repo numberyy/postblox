@@ -198,7 +198,7 @@ impl PostbloxClient {
             .await
     }
 
-    pub async fn get_thread(
+    pub async fn get_thread_messages(
         &self,
         inbox_id: Uuid,
         thread_id: Uuid,
@@ -345,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_thread_uses_messages_endpoint() {
+    fn test_get_thread_messages_uses_messages_endpoint() {
         let c = test_client();
         let inbox_id = "550e8400-e29b-41d4-a716-446655440000";
         let thread_id = "660e8400-e29b-41d4-a716-446655440000";
