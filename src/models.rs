@@ -427,6 +427,24 @@ pub struct CreateApproval {
     pub message_id: Uuid,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SearchResultWithInbox {
+    pub id: Uuid,
+    pub subject: Option<String>,
+    pub from_addr: String,
+    pub created_at: DateTime<Utc>,
+    pub inbox_email: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ApprovalWithDetails {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub subject: Option<String>,
+    pub from_addr: String,
+    pub inbox_email: String,
+}
+
 // === Trust ===
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]

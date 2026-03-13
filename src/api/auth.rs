@@ -16,21 +16,9 @@ impl FromRequestParts<AppState> for AuthOrg {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let token = extract_bearer_token(parts)?;
-
-        if token.len() < 8 || !token.starts_with("pb_") {
-            return Err(ApiError::Unauthorized);
-        }
-
-        let prefix = &token[..8];
-        let stored = crate::db::api_keys::find_by_prefix(&state.pool, prefix)
+        let stored = validate_api_key(&state.pool, &token)
             .await
-            .map_err(ApiError::from_sqlx)?
-            .ok_or(ApiError::Unauthorized)?;
-
-        let token_hash = hash_key(&token);
-        if !constant_time_eq(token_hash.as_bytes(), stored.key_hash.as_bytes()) {
-            return Err(ApiError::Unauthorized);
-        }
+            .map_err(|()| ApiError::Unauthorized)?;
 
         // Best-effort update; auth must not fail if this write fails.
         let pool = state.pool.clone();
@@ -60,6 +48,26 @@ fn extract_bearer_token(parts: &Parts) -> Result<String, ApiError> {
     }
 
     Ok(token.to_string())
+}
+
+pub async fn validate_api_key(
+    pool: &sqlx::PgPool,
+    key: &str,
+) -> Result<crate::models::ApiKey, ()> {
+    if key.len() < 8 || !key.starts_with("pb_") {
+        return Err(());
+    }
+    let prefix = &key[..8];
+    let stored = crate::db::api_keys::find_by_prefix(pool, prefix)
+        .await
+        .ok()
+        .flatten()
+        .ok_or(())?;
+    let token_hash = hash_key(key);
+    if !constant_time_eq(token_hash.as_bytes(), stored.key_hash.as_bytes()) {
+        return Err(());
+    }
+    Ok(stored)
 }
 
 pub fn hash_key(key: &str) -> String {

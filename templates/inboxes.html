@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Inboxes — postblox{% endblock %}
+{% block content %}
+<h1 class="page-title">Inboxes</h1>
+{% if inboxes %}
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Address</th>
+      <th>Type</th>
+      <th>Send Mode</th>
+      <th>Created</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for inbox in inboxes %}
+    <tr>
+      <td><a href="/dashboard/inboxes/{{ inbox.id }}">{{ inbox.display_name|default(inbox.email, true) }}</a></td>
+      <td>{{ inbox.email }}</td>
+      <td><span class="badge badge-gray">{{ inbox.inbox_type }}</span></td>
+      <td><span class="badge badge-blue">{{ inbox.send_mode }}</span></td>
+      <td>{{ inbox.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="card"><p>No inboxes yet.</p></div>
+{% endif %}
+{% endblock %}

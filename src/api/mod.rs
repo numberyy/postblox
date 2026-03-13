@@ -1,4 +1,10 @@
-use axum::extract::State;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::extract::ws::{Message, WebSocket};
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Json;
 use serde::Deserialize;
@@ -39,6 +45,7 @@ pub struct AppState {
     pub embedding_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
     pub trust_auto_upgrade_threshold: i32,
     pub hooks: std::sync::Arc<[crate::hooks::HookConfig]>,
+    pub ws_hub: Arc<crate::events::websocket::WebSocketHub>,
 }
 
 #[derive(Deserialize)]
@@ -155,10 +162,17 @@ pub async fn check_send_allowed(
     Ok(send_mode)
 }
 
-pub fn spawn_approval_event(state: &AppState, org_id: Uuid, inbox_id: Uuid, msg_id: Uuid, approval_id: Uuid) {
+pub fn spawn_approval_event(
+    state: &AppState,
+    org_id: Uuid,
+    inbox_id: Uuid,
+    msg_id: Uuid,
+    approval_id: Uuid,
+) {
     let pool = state.pool.clone();
     let webhook_client = state.webhook_client.clone();
     let hooks = state.hooks.clone();
+    let ws_hub = state.ws_hub.clone();
     tokio::spawn(async move {
         crate::events::dispatch(
             &pool,
@@ -170,6 +184,7 @@ pub fn spawn_approval_event(state: &AppState, org_id: Uuid, inbox_id: Uuid, msg_
             },
             &webhook_client,
             &hooks,
+            &ws_hub,
         )
         .await;
     });
@@ -260,6 +275,7 @@ pub fn router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/health", get(health))
         .route("/internal/stalwart/inbound", post(inbound::receive_inbound))
+        .route("/api/v1/ws", get(ws_upgrade))
         .nest("/api/v1", api_routes)
         .with_state(state)
 }
@@ -271,4 +287,79 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "status": if db_ok { "ok" } else { "degraded" },
         "database": db_ok,
     }))
+}
+
+#[derive(Deserialize)]
+struct WsParams {
+    key: String,
+}
+
+async fn ws_upgrade(
+    State(state): State<AppState>,
+    Query(params): Query<WsParams>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> impl IntoResponse {
+    let stored = match auth::validate_api_key(&state.pool, &params.key).await {
+        Ok(k) => k,
+        Err(()) => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    let hub = state.ws_hub.clone();
+    let org_id = stored.org_id;
+    ws.on_upgrade(move |socket| handle_ws(socket, hub, org_id))
+        .into_response()
+}
+
+async fn handle_ws(
+    mut socket: WebSocket,
+    hub: Arc<crate::events::websocket::WebSocketHub>,
+    org_id: Uuid,
+) {
+    let mut rx = match hub.subscribe(org_id) {
+        Some(rx) => rx,
+        None => {
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+    let mut awaiting_pong = false;
+
+    loop {
+        tokio::select! {
+            msg = rx.recv() => {
+                match msg {
+                    Ok(text) => {
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::debug!(org_id = %org_id, skipped = n, "ws client lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = ping_interval.tick() => {
+                if awaiting_pong {
+                    tracing::debug!(org_id = %org_id, "ws client pong timeout, disconnecting");
+                    break;
+                }
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    break;
+                }
+                awaiting_pong = true;
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Pong(_))) => { awaiting_pong = false; }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    hub.unsubscribe(org_id);
 }

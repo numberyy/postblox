@@ -243,10 +243,7 @@ mod tests {
         let hook = HookConfig {
             event: "test".into(),
             command: "bash".into(),
-            args: vec![
-                "-c".into(),
-                "cat > /dev/null; echo 'not valid json'".into(),
-            ],
+            args: vec!["-c".into(), "cat > /dev/null; echo 'not valid json'".into()],
             timeout_secs: 5,
         };
         let data = serde_json::json!({});
@@ -259,10 +256,7 @@ mod tests {
         let hooks = vec![HookConfig {
             event: "before_send".into(),
             command: "bash".into(),
-            args: vec![
-                "-c".into(),
-                "cat > /dev/null; echo 'garbage output'".into(),
-            ],
+            args: vec!["-c".into(), "cat > /dev/null; echo 'garbage output'".into()],
             timeout_secs: 5,
         }];
         let data = serde_json::json!({"to": ["a@b.com"]});
@@ -298,7 +292,10 @@ mod tests {
         let hooks = vec![HookConfig {
             event: "before_send".into(),
             command: "bash".into(),
-            args: vec!["-c".into(), r#"cat > /dev/null; echo '{"action":"allow"}'"#.into()],
+            args: vec![
+                "-c".into(),
+                r#"cat > /dev/null; echo '{"action":"allow"}'"#.into(),
+            ],
             timeout_secs: 5,
         }];
         let data = serde_json::json!({"to": ["a@b.com"]});
@@ -334,7 +331,10 @@ mod tests {
             HookConfig {
                 event: "before_send".into(),
                 command: "bash".into(),
-                args: vec!["-c".into(), r#"cat > /dev/null; echo '{"action":"allow"}'"#.into()],
+                args: vec![
+                    "-c".into(),
+                    r#"cat > /dev/null; echo '{"action":"allow"}'"#.into(),
+                ],
                 timeout_secs: 5,
             },
         ];

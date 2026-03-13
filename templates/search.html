@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Search — postblox{% endblock %}
+{% block content %}
+<h1 class="page-title">Search</h1>
+
+<form class="search-form" hx-get="/dashboard/search/results" hx-target="#search-results" hx-swap="innerHTML">
+  <input type="search" name="q" placeholder="Search messages..." value="{{ q|default('', true) }}">
+  <button type="submit" class="btn btn-primary">Search</button>
+</form>
+
+<div id="search-results">
+  {% include "search_results.html" %}
+</div>
+{% endblock %}

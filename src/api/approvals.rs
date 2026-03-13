@@ -9,25 +9,28 @@ use super::error::ApiError;
 use super::AppState;
 use crate::models::{Approval, ApprovalStatus};
 
-async fn record_trust_and_maybe_upgrade(
-    pool: &sqlx::PgPool,
+pub async fn record_trust_and_maybe_upgrade(
+    state: &AppState,
     org_id: Uuid,
     inbox_id: Uuid,
     approved: bool,
-    threshold: i32,
-    webhook_client: &reqwest::Client,
-    hooks: &[crate::hooks::HookConfig],
 ) {
-    if let Err(e) = crate::db::trust::record_send_outcome(pool, inbox_id, approved).await {
+    if let Err(e) = crate::db::trust::record_send_outcome(&state.pool, inbox_id, approved).await {
         tracing::error!("failed to record trust outcome: {e}");
     }
     if !approved {
         return;
     }
-    match crate::db::trust::check_and_upgrade(pool, inbox_id, threshold).await {
+    match crate::db::trust::check_and_upgrade(
+        &state.pool,
+        inbox_id,
+        state.trust_auto_upgrade_threshold,
+    )
+    .await
+    {
         Ok(Some(score)) => {
             crate::events::audit(
-                pool,
+                &state.pool,
                 org_id,
                 Some(inbox_id),
                 crate::models::AuditAction::PermissionChanged,
@@ -35,20 +38,21 @@ async fn record_trust_and_maybe_upgrade(
                 serde_json::json!({
                     "new_mode": "auto_approve",
                     "approved_count": score.approved_count,
-                    "threshold": threshold,
+                    "threshold": state.trust_auto_upgrade_threshold,
                 }),
             )
             .await;
             crate::events::dispatch(
-                pool,
+                &state.pool,
                 org_id,
                 crate::events::PostbloxEvent::TrustChanged {
                     inbox_id,
                     new_mode: crate::models::SendMode::AutoApprove,
                     approved_count: score.approved_count,
                 },
-                webhook_client,
-                hooks,
+                &state.webhook_client,
+                &state.hooks,
+                &state.ws_hub,
             )
             .await;
         }
@@ -152,16 +156,13 @@ pub async fn approve(
     )
     .await?;
 
-    let pool = state.pool.clone();
-    let webhook_client = state.webhook_client.clone();
-    let hooks = state.hooks.clone();
+    let state_clone = state.clone();
     let msg_id = approval.message_id;
     let inbox_id = approval.inbox_id;
     let decided_by = req.decided_by.clone();
-    let threshold = state.trust_auto_upgrade_threshold;
     tokio::spawn(async move {
         crate::events::audit(
-            &pool,
+            &state_clone.pool,
             org_id,
             Some(inbox_id),
             crate::models::AuditAction::MessageApproved,
@@ -170,10 +171,7 @@ pub async fn approve(
         )
         .await;
 
-        record_trust_and_maybe_upgrade(
-            &pool, org_id, inbox_id, true, threshold, &webhook_client, &hooks,
-        )
-        .await;
+        record_trust_and_maybe_upgrade(&state_clone, org_id, inbox_id, true).await;
     });
 
     Ok(Json(approval))
@@ -241,7 +239,6 @@ pub async fn batch(
     let status = req.status;
     let decided_by = req.decided_by.clone();
     let decided_clone = decided.clone();
-    let threshold = state.trust_auto_upgrade_threshold;
     tokio::spawn(async move {
         let action = if status == ApprovalStatus::Approved {
             crate::models::AuditAction::MessageApproved
@@ -308,16 +305,7 @@ pub async fn batch(
             }
 
             let approved = status == ApprovalStatus::Approved;
-            record_trust_and_maybe_upgrade(
-                &state_clone.pool,
-                org_id,
-                d.inbox_id,
-                approved,
-                threshold,
-                &state_clone.webhook_client,
-                &state_clone.hooks,
-            )
-            .await;
+            record_trust_and_maybe_upgrade(&state_clone, org_id, d.inbox_id, approved).await;
         }
     });
 

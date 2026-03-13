@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::{CreateMessage, Message};
+use crate::models::{CreateMessage, Message, SearchResultWithInbox};
 
 pub const SELECT_COLS: &str = "\
     id, inbox_id, thread_id, message_id_header, in_reply_to, \
@@ -132,6 +132,29 @@ pub async fn search(
         .bind(offset)
         .fetch_all(pool)
         .await
+}
+
+/// Search with joined inbox email — avoids N+1 in dashboard.
+pub async fn search_with_inbox(
+    pool: &PgPool,
+    org_id: Uuid,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<SearchResultWithInbox>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT m.id, m.subject, m.from_addr, m.created_at, i.email AS inbox_email \
+         FROM messages m \
+         JOIN inboxes i ON i.id = m.inbox_id \
+         WHERE i.org_id = $1 \
+         AND m.search_vector @@ plainto_tsquery('english', $2) \
+         ORDER BY ts_rank(m.search_vector, plainto_tsquery('english', $2)) DESC, m.created_at DESC \
+         LIMIT $3",
+    )
+    .bind(org_id)
+    .bind(query)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn find_existing_message_ids(
@@ -634,7 +657,9 @@ mod tests {
             .await
             .unwrap();
         // Should include the NULL and 'inbox' messages, exclude 'slopified'
-        assert!(results.iter().all(|m| m.triage_status.as_deref() != Some("slopified")));
+        assert!(results
+            .iter()
+            .all(|m| m.triage_status.as_deref() != Some("slopified")));
         assert!(results.len() >= 2);
     }
 }

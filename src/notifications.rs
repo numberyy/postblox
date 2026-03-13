@@ -77,7 +77,9 @@ pub async fn notify_org(
                             tracing::warn!("notify-send exited with {}", out.status);
                         }
                         Err(e) => {
-                            tracing::warn!("desktop notification failed (notify-send not available?): {e}");
+                            tracing::warn!(
+                                "desktop notification failed (notify-send not available?): {e}"
+                            );
                         }
                         _ => {}
                     }

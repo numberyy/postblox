@@ -22,6 +22,19 @@ pub async fn upsert(
     .await
 }
 
+pub async fn get_by_inbox_ids(
+    pool: &PgPool,
+    inbox_ids: &[Uuid],
+) -> Result<Vec<Permission>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, inbox_id, send_mode, rules, created_at, updated_at \
+         FROM permissions WHERE inbox_id = ANY($1)",
+    )
+    .bind(inbox_ids)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn get_by_inbox(
     pool: &PgPool,
     inbox_id: Uuid,

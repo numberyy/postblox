@@ -35,18 +35,16 @@ impl StalwartClient {
             .build()
             .expect("failed to build http client");
 
-        let parsed_host = smtp_host
-            .map(String::from)
-            .unwrap_or_else(|| {
-                // Extract host from HTTP base_url (e.g., "http://stalwart:8080" → "stalwart")
-                base_url
-                    .trim_start_matches("http://")
-                    .trim_start_matches("https://")
-                    .split(':')
-                    .next()
-                    .unwrap_or("localhost")
-                    .to_string()
-            });
+        let parsed_host = smtp_host.map(String::from).unwrap_or_else(|| {
+            // Extract host from HTTP base_url (e.g., "http://stalwart:8080" → "stalwart")
+            base_url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .split(':')
+                .next()
+                .unwrap_or("localhost")
+                .to_string()
+        });
 
         Self {
             http,
@@ -239,23 +237,34 @@ mod tests {
 
     #[test]
     fn test_smtp_host_from_base_url() {
-        let client = StalwartClient::new("http://mail.example.com:8080", "admin", "tok", None, None);
+        let client =
+            StalwartClient::new("http://mail.example.com:8080", "admin", "tok", None, None);
         assert_eq!(client.smtp_host, "mail.example.com");
         assert_eq!(client.smtp_port, 25);
     }
 
     #[test]
     fn test_smtp_host_explicit_override() {
-        let client =
-            StalwartClient::new("http://localhost:8080", "admin", "tok", Some("smtp.local"), Some(587));
+        let client = StalwartClient::new(
+            "http://localhost:8080",
+            "admin",
+            "tok",
+            Some("smtp.local"),
+            Some(587),
+        );
         assert_eq!(client.smtp_host, "smtp.local");
         assert_eq!(client.smtp_port, 587);
     }
 
     #[test]
     fn test_smtp_host_https_stripped() {
-        let client =
-            StalwartClient::new("https://stalwart.prod.internal:443", "admin", "tok", None, None);
+        let client = StalwartClient::new(
+            "https://stalwart.prod.internal:443",
+            "admin",
+            "tok",
+            None,
+            None,
+        );
         assert_eq!(client.smtp_host, "stalwart.prod.internal");
     }
 

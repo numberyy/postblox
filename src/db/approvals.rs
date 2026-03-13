@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::{Approval, ApprovalStatus, CreateApproval};
+use crate::models::{Approval, ApprovalStatus, ApprovalWithDetails, CreateApproval};
 
 const SELECT_COLS: &str =
     "id, org_id, inbox_id, message_id, status, decided_by, decided_at, created_at";
@@ -56,6 +56,41 @@ pub async fn list_by_status(
                 .await
         }
     }
+}
+
+pub async fn count_by_status(
+    pool: &PgPool,
+    org_id: Uuid,
+    status: ApprovalStatus,
+) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM approvals WHERE org_id = $1 AND status = $2",
+    )
+    .bind(org_id)
+    .bind(status.to_string())
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
+/// Returns pending approvals with joined message subject/from and inbox email.
+pub async fn list_pending_with_details(
+    pool: &PgPool,
+    org_id: Uuid,
+    limit: i64,
+) -> Result<Vec<ApprovalWithDetails>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT a.id, a.created_at, m.subject, m.from_addr, i.email AS inbox_email \
+         FROM approvals a \
+         JOIN messages m ON m.id = a.message_id \
+         JOIN inboxes i ON i.id = a.inbox_id \
+         WHERE a.org_id = $1 AND a.status = 'pending' \
+         ORDER BY a.created_at ASC LIMIT $2",
+    )
+    .bind(org_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
 }
 
 pub async fn get(
@@ -226,7 +261,9 @@ mod tests {
         // Approve the first one
         approve(&pool, org_id, a1.id, "admin").await.unwrap();
 
-        let pending = list_by_status(&pool, org_id, Some("pending"), 0, 100).await.unwrap();
+        let pending = list_by_status(&pool, org_id, Some("pending"), 0, 100)
+            .await
+            .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].message_id, msg2.id);
     }
@@ -610,10 +647,14 @@ mod tests {
             .unwrap();
         }
 
-        let page1 = list_by_status(&pool, org_id, Some("pending"), 0, 3).await.unwrap();
+        let page1 = list_by_status(&pool, org_id, Some("pending"), 0, 3)
+            .await
+            .unwrap();
         assert_eq!(page1.len(), 3);
 
-        let page2 = list_by_status(&pool, org_id, Some("pending"), 3, 3).await.unwrap();
+        let page2 = list_by_status(&pool, org_id, Some("pending"), 3, 3)
+            .await
+            .unwrap();
         assert_eq!(page2.len(), 2);
     }
 }

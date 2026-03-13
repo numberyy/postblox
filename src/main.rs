@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 mod api;
 mod config;
 mod core;
+mod dashboard;
 mod db;
 mod embeddings;
 mod events;
@@ -104,8 +105,11 @@ async fn main() -> anyhow::Result<()> {
         embedding_semaphore: std::sync::Arc::new(tokio::sync::Semaphore::new(20)),
         trust_auto_upgrade_threshold: config.trust_auto_upgrade_threshold,
         hooks,
+        ws_hub: std::sync::Arc::new(events::websocket::WebSocketHub::new()),
     };
-    let app = api::router(state);
+    let templates = dashboard::build_templates();
+    let dashboard_routes = dashboard::router(templates, state.clone());
+    let app = api::router(state).nest("/dashboard", dashboard_routes);
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
     tracing::info!("postblox listening on {addr}");

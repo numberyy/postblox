@@ -1,0 +1,50 @@
+{% if messages %}
+<table>
+  <thead>
+    <tr>
+      <th>Dir</th>
+      <th>From</th>
+      <th>Subject</th>
+      <th>Slop</th>
+      <th>Date</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for msg in messages %}
+    <tr>
+      <td><span class="badge {% if msg.direction == 'inbound' %}badge-green{% else %}badge-blue{% endif %}">{{ msg.direction }}</span></td>
+      <td>{{ msg.from_addr }}</td>
+      <td><a href="/dashboard/messages/{{ msg.id }}">{{ msg.subject|default("(no subject)", true) }}</a></td>
+      <td>
+        {% if msg.slop_score is defined and msg.slop_score %}
+          {% if msg.slop_score < 0.3 %}
+          <span class="badge badge-green">{{ msg.slop_score }}</span>
+          {% elif msg.slop_score < 0.7 %}
+          <span class="badge badge-yellow">{{ msg.slop_score }}</span>
+          {% else %}
+          <span class="badge badge-red">{{ msg.slop_score }}</span>
+          {% endif %}
+        {% else %}
+        —
+        {% endif %}
+      </td>
+      <td>{{ msg.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<div class="pagination">
+  {% if offset > 0 %}
+  <button class="btn btn-primary"
+    hx-get="/dashboard/inboxes/{{ inbox_id }}/messages?offset={{ offset - limit }}&limit={{ limit }}"
+    hx-target="#messages-table" hx-swap="innerHTML">Prev</button>
+  {% endif %}
+  {% if has_more %}
+  <button class="btn btn-primary"
+    hx-get="/dashboard/inboxes/{{ inbox_id }}/messages?offset={{ offset + limit }}&limit={{ limit }}"
+    hx-target="#messages-table" hx-swap="innerHTML">Next</button>
+  {% endif %}
+</div>
+{% else %}
+<p>No messages.</p>
+{% endif %}

@@ -1,0 +1,24 @@
+{% if results is defined and results %}
+<table>
+  <thead>
+    <tr>
+      <th>Subject</th>
+      <th>From</th>
+      <th>Inbox</th>
+      <th>Date</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in results %}
+    <tr>
+      <td><a href="/dashboard/messages/{{ r.id }}">{{ r.subject|default("(no subject)", true) }}</a></td>
+      <td>{{ r.from_addr }}</td>
+      <td>{{ r.inbox_email|default("—", true) }}</td>
+      <td>{{ r.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% elif q is defined and q %}
+<div class="card"><p>No results for "{{ q }}".</p></div>
+{% endif %}

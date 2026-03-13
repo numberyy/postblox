@@ -1,4 +1,5 @@
 pub mod webhooks;
+pub mod websocket;
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -108,6 +109,7 @@ pub async fn dispatch(
     event: PostbloxEvent,
     client: &reqwest::Client,
     hooks: &[crate::hooks::HookConfig],
+    ws_hub: &websocket::WebSocketHub,
 ) {
     // Fire notifications for relevant events
     match &event {
@@ -153,12 +155,16 @@ pub async fn dispatch(
         Ok(h) => h,
         Err(e) => {
             tracing::error!("failed to query webhooks for {event_name}: {e}");
+            ws_hub.broadcast(org_id, event_name, &data);
             crate::hooks::run_event_hooks(hooks, event_name, data);
             return;
         }
     };
 
-    if wh_list.is_empty() && hooks.iter().all(|h| h.event != event_name) {
+    if wh_list.is_empty()
+        && hooks.iter().all(|h| h.event != event_name)
+        && ws_hub.connection_count(org_id) == 0
+    {
         return;
     }
 
@@ -176,6 +182,8 @@ pub async fn dispatch(
             }
         });
     }
+
+    ws_hub.broadcast(org_id, event_name, &data);
 
     crate::hooks::run_event_hooks(hooks, event_name, data);
 }

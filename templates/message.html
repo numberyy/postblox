@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ message.subject|default("Message", true) }} — postblox{% endblock %}
+{% block content %}
+<h1 class="page-title">{{ message.subject|default("(no subject)", true) }}</h1>
+
+<div class="card">
+  <dl class="msg-headers">
+    <dt>From</dt><dd>{{ message.from_addr }}</dd>
+    <dt>To</dt><dd>{{ to_addrs }}</dd>
+    <dt>Date</dt><dd>{{ message.created_at }}</dd>
+    <dt>Direction</dt><dd><span class="badge {% if message.direction == 'inbound' %}badge-green{% else %}badge-blue{% endif %}">{{ message.direction }}</span></dd>
+    <dt>Slop</dt>
+    <dd>
+      {% if message.slop_score is defined and message.slop_score %}
+        {% if message.slop_score < 0.3 %}
+        <span class="badge badge-green">{{ message.slop_score }}</span>
+        {% elif message.slop_score < 0.7 %}
+        <span class="badge badge-yellow">{{ message.slop_score }}</span>
+        {% else %}
+        <span class="badge badge-red">{{ message.slop_score }}</span>
+        {% endif %}
+      {% else %}
+      —
+      {% endif %}
+    </dd>
+  </dl>
+
+  {% if labels %}
+  <div style="margin-bottom:.75rem">
+    {% for label in labels %}
+    <span class="label-tag" {% if label.color %}style="background:{{ label.color }};color:#fff"{% endif %}>{{ label.name }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if message.thread_id %}
+  <p style="margin-bottom:.75rem"><a href="/dashboard/threads/{{ message.thread_id }}">View thread</a></p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h3>Body</h3>
+  <pre class="msg-body">{{ message.text_body|default("(empty)", true) }}</pre>
+</div>
+{% endblock %}

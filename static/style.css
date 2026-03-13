@@ -1,0 +1,86 @@
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#fafafa;--fg:#1a1a1a;--muted:#666;--border:#ddd;--accent:#2563eb;--accent-hover:#1d4ed8;--green:#16a34a;--yellow:#ca8a04;--red:#dc2626;--card-bg:#fff;--nav-bg:#111;--nav-fg:#eee;--radius:6px;--shadow:0 1px 3px rgba(0,0,0,.08)}
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg);line-height:1.5;min-height:100vh}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* Nav */
+nav{background:var(--nav-bg);color:var(--nav-fg);padding:.75rem 1.5rem;display:flex;align-items:center;gap:2rem}
+nav .brand{font-weight:700;font-size:1.1rem;color:#fff;letter-spacing:-.5px}
+nav a{color:var(--nav-fg);font-size:.9rem}
+nav a:hover{color:#fff;text-decoration:none}
+nav .nav-links{display:flex;gap:1.5rem}
+
+/* Layout */
+.container{max-width:1100px;margin:0 auto;padding:1.5rem}
+.page-title{font-size:1.4rem;font-weight:600;margin-bottom:1rem}
+
+/* Cards */
+.card{background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;box-shadow:var(--shadow);margin-bottom:1rem}
+.card h3{font-size:1rem;margin-bottom:.5rem}
+
+/* Tables */
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+th,td{padding:.6rem .75rem;text-align:left;border-bottom:1px solid var(--border)}
+th{font-weight:600;color:var(--muted);font-size:.8rem;text-transform:uppercase;letter-spacing:.5px}
+tr:hover{background:#f5f5f5}
+
+/* Badges */
+.badge{display:inline-block;padding:.15rem .5rem;border-radius:3px;font-size:.75rem;font-weight:600}
+.badge-green{background:#dcfce7;color:var(--green)}
+.badge-yellow{background:#fef9c3;color:var(--yellow)}
+.badge-red{background:#fef2f2;color:var(--red)}
+.badge-blue{background:#dbeafe;color:var(--accent)}
+.badge-gray{background:#f3f4f6;color:var(--muted)}
+
+/* Buttons */
+.btn{display:inline-block;padding:.4rem .8rem;border:none;border-radius:var(--radius);font-size:.85rem;font-weight:500;cursor:pointer;transition:background .15s}
+.btn-approve{background:#dcfce7;color:var(--green)}
+.btn-approve:hover{background:#bbf7d0}
+.btn-reject{background:#fef2f2;color:var(--red)}
+.btn-reject:hover{background:#fecaca}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:var(--accent-hover)}
+
+/* Forms */
+input[type="text"],input[type="search"],select{padding:.5rem .75rem;border:1px solid var(--border);border-radius:var(--radius);font-size:.9rem;width:100%}
+input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px rgba(37,99,235,.15)}
+.search-form{display:flex;gap:.5rem;margin-bottom:1rem}
+.search-form input{flex:1}
+
+/* Message detail */
+.msg-headers{display:grid;grid-template-columns:5rem 1fr;gap:.25rem .75rem;font-size:.9rem;margin-bottom:1rem}
+.msg-headers dt{font-weight:600;color:var(--muted)}
+.msg-body{white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:.85rem;background:#f9fafb;padding:1rem;border-radius:var(--radius);border:1px solid var(--border);overflow-x:auto}
+
+/* Thread */
+.thread-msg{border-left:3px solid var(--border);padding-left:1rem;margin-bottom:1.25rem}
+.thread-msg-header{font-size:.85rem;color:var(--muted);margin-bottom:.25rem}
+
+/* Labels */
+.label-tag{display:inline-block;padding:.1rem .4rem;border-radius:3px;font-size:.75rem;margin-right:.25rem;background:#e5e7eb;color:var(--fg)}
+
+/* Stats grid */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin-bottom:1.5rem}
+.stat-card{text-align:center}
+.stat-card .stat-value{font-size:2rem;font-weight:700}
+.stat-card .stat-label{font-size:.8rem;color:var(--muted);text-transform:uppercase}
+
+/* Pagination */
+.pagination{display:flex;gap:.5rem;margin-top:1rem;align-items:center}
+.pagination .btn{font-size:.8rem}
+
+/* 401 page */
+.auth-page{display:flex;align-items:center;justify-content:center;min-height:80vh;text-align:center}
+.auth-page h1{font-size:1.5rem;margin-bottom:.5rem}
+.auth-page p{color:var(--muted)}
+
+/* Responsive */
+@media(max-width:768px){
+  nav{flex-direction:column;align-items:flex-start;gap:.5rem}
+  .container{padding:1rem}
+  .msg-headers{grid-template-columns:1fr}
+  .stats-grid{grid-template-columns:1fr 1fr}
+  table{font-size:.8rem}
+  th,td{padding:.4rem .5rem}
+}

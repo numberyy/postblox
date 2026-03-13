@@ -4,6 +4,8 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src/ src/
 COPY migrations/ migrations/
+COPY templates/ templates/
+COPY static/ static/
 RUN cargo build --release --target x86_64-unknown-linux-musl
 
 FROM scratch

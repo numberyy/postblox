@@ -589,7 +589,12 @@ mod tests {
     #[test]
     fn test_dollar_amount_blocks_above_limit() {
         let rs = RuleSet(vec![Rule::DollarAmount { max_amount: 1000.0 }]);
-        let v = rs.evaluate(&[addr("a@b.com")], "", "Please pay $5,000 for services", None);
+        let v = rs.evaluate(
+            &[addr("a@b.com")],
+            "",
+            "Please pay $5,000 for services",
+            None,
+        );
         assert!(matches!(v, RuleVerdict::Block { rule, .. } if rule == "dollar_amount"));
     }
 

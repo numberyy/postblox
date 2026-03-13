@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Thread: {{ subject|default("(no subject)", true) }} — postblox{% endblock %}
+{% block content %}
+<h1 class="page-title">Thread: {{ subject|default("(no subject)", true) }}</h1>
+
+{% for msg in messages %}
+<div class="thread-msg">
+  <div class="thread-msg-header">
+    <strong>{{ msg.from_addr }}</strong> — {{ msg.created_at }}
+    <span class="badge {% if msg.direction == 'inbound' %}badge-green{% else %}badge-blue{% endif %}">{{ msg.direction }}</span>
+    <a href="/dashboard/messages/{{ msg.id }}" style="margin-left:.5rem;font-size:.8rem">detail</a>
+  </div>
+  <pre class="msg-body">{{ msg.text_body|default("(empty)", true) }}</pre>
+</div>
+{% endfor %}
+
+{% if messages is defined and messages|length == 0 %}
+<div class="card"><p>No messages in this thread.</p></div>
+{% endif %}
+{% endblock %}
