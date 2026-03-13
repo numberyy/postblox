@@ -3,6 +3,8 @@ use uuid::Uuid;
 
 use crate::models::Inbox;
 
+const SELECT_COLS: &str = "id, org_id, email, display_name, inbox_type, active, created_at";
+
 pub async fn create(
     pool: &PgPool,
     org_id: Uuid,
@@ -10,11 +12,10 @@ pub async fn create(
     display_name: Option<&str>,
     inbox_type: &str,
 ) -> Result<Inbox, sqlx::Error> {
-    sqlx::query_as(
+    sqlx::query_as(&format!(
         "INSERT INTO inboxes (org_id, email, display_name, inbox_type) \
-         VALUES ($1, $2, $3, $4) \
-         RETURNING id, org_id, email, display_name, inbox_type, created_at",
-    )
+         VALUES ($1, $2, $3, $4) RETURNING {SELECT_COLS}"
+    ))
     .bind(org_id)
     .bind(email)
     .bind(display_name)
@@ -24,33 +25,37 @@ pub async fn create(
 }
 
 pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Inbox>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, org_id, email, display_name, inbox_type, created_at \
-         FROM inboxes WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+    sqlx::query_as(&format!("SELECT {SELECT_COLS} FROM inboxes WHERE id = $1"))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
 }
 
 pub async fn get_by_email(pool: &PgPool, email: &str) -> Result<Option<Inbox>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, org_id, email, display_name, inbox_type, created_at \
-         FROM inboxes WHERE email = $1",
-    )
+    sqlx::query_as(&format!(
+        "SELECT {SELECT_COLS} FROM inboxes WHERE email = $1"
+    ))
     .bind(email)
     .fetch_optional(pool)
     .await
 }
 
 pub async fn list_by_org(pool: &PgPool, org_id: Uuid) -> Result<Vec<Inbox>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT id, org_id, email, display_name, inbox_type, created_at \
-         FROM inboxes WHERE org_id = $1 ORDER BY created_at",
-    )
+    sqlx::query_as(&format!(
+        "SELECT {SELECT_COLS} FROM inboxes WHERE org_id = $1 ORDER BY created_at"
+    ))
     .bind(org_id)
     .fetch_all(pool)
     .await
+}
+
+pub async fn set_active(pool: &PgPool, id: Uuid, active: bool) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("UPDATE inboxes SET active = $2 WHERE id = $1")
+        .bind(id)
+        .bind(active)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn delete(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {

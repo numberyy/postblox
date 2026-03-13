@@ -507,10 +507,10 @@ async fn approval_approve(
                 );
                 if let (Ok(Some(msg)), Ok(Some(inbox))) = (msg_result, inbox_result) {
                     let (to, cc) = crate::api::deliver::extract_addrs(&msg);
-                    let _ = crate::api::deliver::deliver_message(
+                    if let Err(e) = crate::api::deliver::deliver_message(
                         &state_clone,
                         org_id,
-                        inbox_id,
+                        &inbox,
                         msg_id,
                         &crate::api::deliver::DeliveryParams {
                             from: &inbox.email,
@@ -525,7 +525,10 @@ async fn approval_approve(
                                 .unwrap_or("unknown@postblox"),
                         },
                     )
-                    .await;
+                    .await
+                    {
+                        tracing::error!(approval_id = %id, "dashboard deliver failed: {e:?}");
+                    }
                 }
                 crate::events::audit(
                     &state_clone.pool, org_id, Some(inbox_id),

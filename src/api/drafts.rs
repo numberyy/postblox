@@ -282,7 +282,7 @@ pub async fn send_draft(
     super::deliver::deliver_message(
         &state,
         org_id,
-        inbox_id,
+        &inbox,
         msg.id,
         &super::deliver::DeliveryParams {
             from: &inbox.email,

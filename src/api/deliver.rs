@@ -17,10 +17,17 @@ pub struct DeliveryParams<'a> {
 pub async fn deliver_message(
     state: &AppState,
     org_id: Uuid,
-    inbox_id: Uuid,
+    inbox: &crate::models::Inbox,
     msg_id: Uuid,
     params: &DeliveryParams<'_>,
 ) -> Result<(), ApiError> {
+    if !inbox.active {
+        return Err(ApiError::Forbidden(
+            "inbox is disabled due to excessive bounces".into(),
+        ));
+    }
+
+    let inbox_id = inbox.id;
     let mime_message_id = if params.message_id_header.starts_with('<') {
         params.message_id_header.to_string()
     } else {

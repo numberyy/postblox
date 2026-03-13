@@ -118,6 +118,7 @@ pub struct Inbox {
     pub email: String,
     pub display_name: Option<String>,
     pub inbox_type: String,
+    pub active: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -510,6 +511,75 @@ pub struct CreateNotificationConfig {
     pub config: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryStatusType {
+    Delivered,
+    Bounced,
+    Complained,
+}
+
+impl fmt::Display for DeliveryStatusType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Delivered => "delivered",
+            Self::Bounced => "bounced",
+            Self::Complained => "complained",
+        })
+    }
+}
+
+impl FromStr for DeliveryStatusType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "delivered" => Ok(Self::Delivered),
+            "bounced" => Ok(Self::Bounced),
+            "complained" => Ok(Self::Complained),
+            other => Err(format!("unknown delivery status: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BounceType {
+    Hard,
+    Soft,
+}
+
+impl fmt::Display for BounceType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Hard => "hard",
+            Self::Soft => "soft",
+        })
+    }
+}
+
+impl FromStr for BounceType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "hard" => Ok(Self::Hard),
+            "soft" => Ok(Self::Soft),
+            other => Err(format!("unknown bounce type: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct DeliveryStatus {
+    pub id: Uuid,
+    pub message_id: Uuid,
+    pub status: String,
+    pub bounce_type: Option<String>,
+    pub details: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,6 +735,7 @@ mod tests {
             email: "bot@example.com".into(),
             display_name: Some("Bot".into()),
             inbox_type: "native".into(),
+            active: true,
             created_at: Utc::now(),
         };
         let json = serde_json::to_string(&inbox).unwrap();
@@ -1302,5 +1373,101 @@ mod tests {
         let cnc: CreateNotificationConfig = serde_json::from_value(json).unwrap();
         assert_eq!(cnc.provider, NotificationProvider::Email);
         assert_eq!(cnc.config, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_delivery_status_type_display_all_variants() {
+        assert_eq!(DeliveryStatusType::Delivered.to_string(), "delivered");
+        assert_eq!(DeliveryStatusType::Bounced.to_string(), "bounced");
+        assert_eq!(DeliveryStatusType::Complained.to_string(), "complained");
+    }
+
+    #[test]
+    fn test_delivery_status_type_from_str_roundtrip() {
+        for t in [
+            DeliveryStatusType::Delivered,
+            DeliveryStatusType::Bounced,
+            DeliveryStatusType::Complained,
+        ] {
+            let s = t.to_string();
+            let parsed: DeliveryStatusType = s.parse().unwrap();
+            assert_eq!(parsed, t);
+        }
+    }
+
+    #[test]
+    fn test_delivery_status_type_from_str_unknown_returns_err() {
+        let result: Result<DeliveryStatusType, _> = "unknown".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_delivery_status_type_serde_roundtrip() {
+        let t = DeliveryStatusType::Bounced;
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(json, "\"bounced\"");
+        let back: DeliveryStatusType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn test_bounce_type_display_all_variants() {
+        assert_eq!(BounceType::Hard.to_string(), "hard");
+        assert_eq!(BounceType::Soft.to_string(), "soft");
+    }
+
+    #[test]
+    fn test_bounce_type_from_str_roundtrip() {
+        for bt in [BounceType::Hard, BounceType::Soft] {
+            let s = bt.to_string();
+            let parsed: BounceType = s.parse().unwrap();
+            assert_eq!(parsed, bt);
+        }
+    }
+
+    #[test]
+    fn test_bounce_type_from_str_unknown_returns_err() {
+        let result: Result<BounceType, _> = "unknown".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bounce_type_serde_roundtrip() {
+        let bt = BounceType::Hard;
+        let json = serde_json::to_string(&bt).unwrap();
+        assert_eq!(json, "\"hard\"");
+        let back: BounceType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, bt);
+    }
+
+    #[test]
+    fn test_delivery_status_serialization_roundtrip() {
+        let ds = DeliveryStatus {
+            id: Uuid::new_v4(),
+            message_id: Uuid::new_v4(),
+            status: "bounced".into(),
+            bounce_type: Some("hard".into()),
+            details: Some(serde_json::json!({"smtp_code": 550})),
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&ds).unwrap();
+        let back: DeliveryStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(ds, back);
+    }
+
+    #[test]
+    fn test_delivery_status_nullable_fields() {
+        let ds = DeliveryStatus {
+            id: Uuid::new_v4(),
+            message_id: Uuid::new_v4(),
+            status: "delivered".into(),
+            bounce_type: None,
+            details: None,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&ds).unwrap();
+        let back: DeliveryStatus = serde_json::from_str(&json).unwrap();
+        assert!(back.bounce_type.is_none());
+        assert!(back.details.is_none());
     }
 }

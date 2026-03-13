@@ -139,7 +139,7 @@ pub async fn approve(
     super::deliver::deliver_message(
         &state,
         org_id,
-        approval.inbox_id,
+        &inbox,
         approval.message_id,
         &super::deliver::DeliveryParams {
             from: &inbox.email,
@@ -280,7 +280,7 @@ pub async fn batch(
                 if let Err(e) = super::deliver::deliver_message(
                     &state_clone,
                     org_id,
-                    d.inbox_id,
+                    &inbox,
                     d.message_id,
                     &super::deliver::DeliveryParams {
                         from: &inbox.email,

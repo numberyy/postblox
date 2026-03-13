@@ -22,6 +22,33 @@ pub struct Config {
     #[serde(default = "default_trust_threshold")]
     pub trust_auto_upgrade_threshold: i32,
     pub hooks: Option<Vec<crate::hooks::HookConfig>>,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RateLimitConfig {
+    #[serde(default = "default_rate_per_minute")]
+    pub requests_per_minute: u32,
+    #[serde(default = "default_rate_per_hour")]
+    pub requests_per_hour: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            requests_per_minute: default_rate_per_minute(),
+            requests_per_hour: default_rate_per_hour(),
+        }
+    }
+}
+
+fn default_rate_per_minute() -> u32 {
+    60
+}
+
+fn default_rate_per_hour() -> u32 {
+    1000
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +100,16 @@ impl Config {
                 embedding_model: std::env::var("EMBEDDING_MODEL").ok(),
                 embedding_api_key: std::env::var("EMBEDDING_API_KEY").ok(),
                 hooks: None,
+                rate_limit: RateLimitConfig {
+                    requests_per_minute: std::env::var("RATE_LIMIT_PER_MINUTE")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(default_rate_per_minute),
+                    requests_per_hour: std::env::var("RATE_LIMIT_PER_HOUR")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or_else(default_rate_per_hour),
+                },
                 trust_auto_upgrade_threshold: std::env::var("TRUST_AUTO_UPGRADE_THRESHOLD")
                     .ok()
                     .and_then(|v| v.parse().ok())
@@ -155,5 +192,40 @@ mod tests {
         let toml_str = r#"database_url = "postgres://localhost/postblox""#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.hooks.is_none());
+    }
+
+    #[test]
+    fn test_config_rate_limit_defaults() {
+        let toml_str = r#"database_url = "postgres://localhost/postblox""#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.rate_limit.requests_per_minute, 60);
+        assert_eq!(config.rate_limit.requests_per_hour, 1000);
+    }
+
+    #[test]
+    fn test_config_rate_limit_custom() {
+        let toml_str = r#"
+            database_url = "postgres://localhost/postblox"
+
+            [rate_limit]
+            requests_per_minute = 120
+            requests_per_hour = 5000
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.rate_limit.requests_per_minute, 120);
+        assert_eq!(config.rate_limit.requests_per_hour, 5000);
+    }
+
+    #[test]
+    fn test_config_rate_limit_partial_override() {
+        let toml_str = r#"
+            database_url = "postgres://localhost/postblox"
+
+            [rate_limit]
+            requests_per_minute = 200
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.rate_limit.requests_per_minute, 200);
+        assert_eq!(config.rate_limit.requests_per_hour, 1000);
     }
 }

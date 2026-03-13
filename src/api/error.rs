@@ -10,6 +10,7 @@ pub enum ApiError {
     Forbidden(String),
     Conflict(String),
     Internal(String),
+    RateLimited,
 }
 
 impl IntoResponse for ApiError {
@@ -20,6 +21,10 @@ impl IntoResponse for ApiError {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
             Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             Self::Conflict(msg) => (StatusCode::CONFLICT, msg),
+            Self::RateLimited => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate limit exceeded".to_string(),
+            ),
             Self::Internal(msg) => {
                 tracing::error!("internal error: {msg}");
                 (
@@ -75,6 +80,12 @@ mod tests {
     fn test_conflict_returns_409() {
         let resp = ApiError::Conflict("dup".into()).into_response();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn test_rate_limited_returns_429() {
+        let resp = ApiError::RateLimited.into_response();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[test]

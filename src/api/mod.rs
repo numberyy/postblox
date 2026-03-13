@@ -13,6 +13,7 @@ pub mod api_keys;
 pub mod approvals;
 pub mod audit;
 pub mod auth;
+pub mod bounces;
 pub mod briefing;
 pub mod deliver;
 pub mod domains;
@@ -27,6 +28,7 @@ pub mod messages;
 pub mod notifications;
 pub mod organizations;
 pub mod permissions;
+pub mod rate_limit;
 pub mod search;
 pub mod threads;
 pub mod trust;
@@ -44,6 +46,7 @@ pub struct AppState {
     pub trust_auto_upgrade_threshold: i32,
     pub hooks: std::sync::Arc<[crate::hooks::HookConfig]>,
     pub ws_hub: Arc<crate::events::websocket::WebSocketHub>,
+    pub rate_limiter: Arc<rate_limit::RateLimiter>,
 }
 
 #[derive(Deserialize)]
@@ -205,6 +208,10 @@ pub fn router(state: AppState) -> axum::Router {
         )
         .route("/inboxes/{inbox_id}/messages/{id}", get(messages::get))
         .route(
+            "/inboxes/{inbox_id}/messages/{id}/delivery-status",
+            get(bounces::get_delivery_status),
+        )
+        .route(
             "/inboxes/{inbox_id}/labels",
             get(labels::list).post(labels::create),
         )
@@ -268,11 +275,16 @@ pub fn router(state: AppState) -> axum::Router {
         .route(
             "/notifications/{id}",
             axum::routing::delete(notifications::delete),
-        );
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::middleware,
+        ));
 
     axum::Router::new()
         .route("/health", get(health))
         .route("/internal/stalwart/inbound", post(inbound::receive_inbound))
+        .route("/internal/stalwart/bounce", post(bounces::receive_bounce))
         .route("/api/v1/ws", get(ws_upgrade))
         .nest("/api/v1", api_routes)
         .with_state(state)

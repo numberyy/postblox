@@ -106,6 +106,10 @@ async fn main() -> anyhow::Result<()> {
         trust_auto_upgrade_threshold: config.trust_auto_upgrade_threshold,
         hooks,
         ws_hub: std::sync::Arc::new(events::websocket::WebSocketHub::new()),
+        rate_limiter: std::sync::Arc::new(api::rate_limit::RateLimiter::new(
+            config.rate_limit.requests_per_minute,
+            config.rate_limit.requests_per_hour,
+        )),
     };
     let templates = dashboard::build_templates();
     let dashboard_routes = dashboard::router(templates, state.clone());

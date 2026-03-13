@@ -8,6 +8,8 @@ pub const KNOWN_EVENTS: &[&str] = &[
     "message.received",
     "message.sent",
     "message.classified",
+    "message.bounced",
+    "message.delivered",
     "approval.requested",
     "trust.changed",
 ];
@@ -30,6 +32,14 @@ pub enum PostbloxEvent {
         inbox_id: Uuid,
         approval_id: Uuid,
     },
+    MessageBounced {
+        message_id: Uuid,
+        inbox_id: Uuid,
+    },
+    MessageDelivered {
+        message_id: Uuid,
+        inbox_id: Uuid,
+    },
     TrustChanged {
         inbox_id: Uuid,
         new_mode: crate::models::SendMode,
@@ -43,6 +53,8 @@ impl PostbloxEvent {
             Self::MessageReceived { .. } => "message.received",
             Self::MessageSent { .. } => "message.sent",
             Self::MessageClassified { .. } => "message.classified",
+            Self::MessageBounced { .. } => "message.bounced",
+            Self::MessageDelivered { .. } => "message.delivered",
             Self::ApprovalRequested { .. } => "approval.requested",
             Self::TrustChanged { .. } => "trust.changed",
         }
@@ -59,6 +71,14 @@ impl PostbloxEvent {
                 inbox_id,
             }
             | Self::MessageClassified {
+                message_id,
+                inbox_id,
+            }
+            | Self::MessageBounced {
+                message_id,
+                inbox_id,
+            }
+            | Self::MessageDelivered {
                 message_id,
                 inbox_id,
             } => serde_json::json!({
@@ -294,5 +314,46 @@ mod tests {
     #[test]
     fn test_known_events_includes_trust_changed() {
         assert!(KNOWN_EVENTS.contains(&"trust.changed"));
+    }
+
+    #[test]
+    fn test_event_name_message_bounced() {
+        let event = PostbloxEvent::MessageBounced {
+            message_id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+        };
+        assert_eq!(event.event_name(), "message.bounced");
+    }
+
+    #[test]
+    fn test_event_name_message_delivered() {
+        let event = PostbloxEvent::MessageDelivered {
+            message_id: Uuid::new_v4(),
+            inbox_id: Uuid::new_v4(),
+        };
+        assert_eq!(event.event_name(), "message.delivered");
+    }
+
+    #[test]
+    fn test_event_data_bounced_contains_ids() {
+        let msg_id = Uuid::new_v4();
+        let inbox_id = Uuid::new_v4();
+        let event = PostbloxEvent::MessageBounced {
+            message_id: msg_id,
+            inbox_id,
+        };
+        let data = event.data();
+        assert_eq!(data["message_id"], msg_id.to_string());
+        assert_eq!(data["inbox_id"], inbox_id.to_string());
+    }
+
+    #[test]
+    fn test_known_events_includes_message_bounced() {
+        assert!(KNOWN_EVENTS.contains(&"message.bounced"));
+    }
+
+    #[test]
+    fn test_known_events_includes_message_delivered() {
+        assert!(KNOWN_EVENTS.contains(&"message.delivered"));
     }
 }
