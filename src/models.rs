@@ -64,7 +64,17 @@ impl Permission {
     }
 
     pub fn mode(&self) -> SendMode {
-        self.send_mode.parse().unwrap_or_default()
+        match self.send_mode.parse() {
+            Ok(m) => m,
+            Err(_) => {
+                tracing::warn!(
+                    permission_id = %self.id,
+                    send_mode = %self.send_mode,
+                    "invalid send_mode in DB, defaulting to shadow"
+                );
+                SendMode::default()
+            }
+        }
     }
 
     pub fn rules(&self) -> crate::core::rules::RuleSet {
@@ -232,6 +242,7 @@ pub struct LinkedAccount {
     pub imap_host: String,
     pub imap_port: i32,
     pub username: String,
+    #[serde(skip_serializing)]
     pub password: String,
     pub last_sync_at: Option<DateTime<Utc>>,
     pub sync_status: String,
@@ -404,9 +415,12 @@ pub struct SearchResultWithInbox {
     pub inbox_email: String,
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ApprovalWithDetails {
     pub id: Uuid,
+    pub inbox_id: Uuid,
+    pub message_id: Uuid,
+    pub status: String,
     pub created_at: DateTime<Utc>,
     pub subject: Option<String>,
     pub from_addr: String,
@@ -995,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn test_linked_account_serialization_roundtrip() {
+    fn test_linked_account_password_excluded_from_serialization() {
         let acct = LinkedAccount {
             id: Uuid::new_v4(),
             inbox_id: Uuid::new_v4(),
@@ -1010,9 +1024,12 @@ mod tests {
             message_count: 42,
             created_at: Utc::now(),
         };
-        let json = serde_json::to_string(&acct).unwrap();
-        let back: LinkedAccount = serde_json::from_str(&json).unwrap();
-        assert_eq!(acct, back);
+        let json = serde_json::to_value(&acct).unwrap();
+        assert!(
+            json.get("password").is_none(),
+            "password must not appear in serialized output"
+        );
+        assert_eq!(json["username"].as_str().unwrap(), "user@gmail.com");
     }
 
     #[test]

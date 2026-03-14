@@ -26,7 +26,10 @@ impl Preview {
     }
 
     pub fn scroll_down(&mut self) {
-        self.scroll = self.scroll.saturating_add(1);
+        let max = self.body.lines().count().saturating_sub(1) as u16;
+        if self.scroll < max {
+            self.scroll = self.scroll.saturating_add(1);
+        }
     }
 
     pub fn scroll_up(&mut self) {
@@ -109,6 +112,12 @@ mod tests {
     #[test]
     fn test_scroll_down_up() {
         let mut p = Preview::new();
+        p.set_content(
+            "from",
+            "subject",
+            "date",
+            "line1\nline2\nline3\nline4\nline5",
+        );
         p.scroll_down();
         assert_eq!(p.scroll, 1);
         p.scroll_down();

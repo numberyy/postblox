@@ -66,13 +66,27 @@ impl Compose {
         self.field = match self.field {
             ComposeField::To => ComposeField::Subject,
             ComposeField::Subject => ComposeField::Body,
-            ComposeField::Body => ComposeField::Body,
+            ComposeField::Body => ComposeField::To,
         };
     }
 
-    pub fn handle_key_for_header(&mut self, key: KeyEvent) {
-        use crossterm::event::KeyCode;
+    pub fn prev_field(&mut self) {
+        self.field = match self.field {
+            ComposeField::To => ComposeField::Body,
+            ComposeField::Subject => ComposeField::To,
+            ComposeField::Body => ComposeField::Subject,
+        };
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
         match key.code {
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => self.prev_field(),
+            KeyCode::Tab => self.next_field(),
+            KeyCode::BackTab => self.prev_field(),
+            _ if self.field == ComposeField::Body => {
+                self.textarea.input(key);
+            }
             KeyCode::Char(c) => match self.field {
                 ComposeField::To => self.to.push(c),
                 ComposeField::Subject => self.subject.push(c),
@@ -87,16 +101,11 @@ impl Compose {
                 }
                 ComposeField::Body => {}
             },
-            KeyCode::Tab => self.next_field(),
             _ => {}
         }
     }
 
-    pub fn handle_key_for_body(&mut self, key: KeyEvent) {
-        self.textarea.input(key);
-    }
-
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme, _focused: bool) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let block = Block::default()
             .title(" Compose ")
             .borders(Borders::ALL)
@@ -196,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn test_next_field_cycles() {
+    fn test_next_field_wraps() {
         let mut c = Compose::new();
         assert_eq!(c.field, ComposeField::To);
         c.next_field();
@@ -204,7 +213,19 @@ mod tests {
         c.next_field();
         assert_eq!(c.field, ComposeField::Body);
         c.next_field();
-        assert_eq!(c.field, ComposeField::Body); // stays at body
+        assert_eq!(c.field, ComposeField::To);
+    }
+
+    #[test]
+    fn test_prev_field_wraps() {
+        let mut c = Compose::new();
+        assert_eq!(c.field, ComposeField::To);
+        c.prev_field();
+        assert_eq!(c.field, ComposeField::Body);
+        c.prev_field();
+        assert_eq!(c.field, ComposeField::Subject);
+        c.prev_field();
+        assert_eq!(c.field, ComposeField::To);
     }
 
     #[test]

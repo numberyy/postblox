@@ -66,15 +66,19 @@ impl RateLimiter {
             }
         }
 
-        let mut entry = self
-            .entries
-            .entry(key.to_string())
-            .or_insert_with(|| Entry {
-                minute_count: 0,
-                minute_start: now,
-                hour_count: 0,
-                hour_start: now,
-            });
+        // Avoid allocating a String on every request — only allocate on cache miss
+        let mut entry = if let Some(existing) = self.entries.get_mut(key) {
+            existing
+        } else {
+            self.entries
+                .entry(key.to_string())
+                .or_insert_with(|| Entry {
+                    minute_count: 0,
+                    minute_start: now,
+                    hour_count: 0,
+                    hour_start: now,
+                })
+        };
 
         if now.duration_since(entry.minute_start) >= MINUTE {
             entry.minute_count = 0;

@@ -115,6 +115,7 @@ pub async fn search(
     pool: &PgPool,
     org_id: Uuid,
     query: &str,
+    inbox_id: Option<Uuid>,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Message>, sqlx::Error> {
@@ -122,6 +123,7 @@ pub async fn search(
         "WITH q AS (SELECT plainto_tsquery('english', $2) AS tsq) \
          SELECT {SELECT_COLS} FROM messages, q \
          WHERE inbox_id IN (SELECT id FROM inboxes WHERE org_id = $1) \
+         AND ($5::uuid IS NULL OR inbox_id = $5) \
          AND search_vector @@ q.tsq \
          ORDER BY ts_rank(search_vector, q.tsq) DESC, created_at DESC \
          LIMIT $3 OFFSET $4"
@@ -131,6 +133,7 @@ pub async fn search(
         .bind(query)
         .bind(limit)
         .bind(offset)
+        .bind(inbox_id)
         .fetch_all(pool)
         .await
 }
@@ -191,6 +194,21 @@ pub async fn find_by_message_id_header(
         .bind(message_id_header)
         .fetch_optional(pool)
         .await
+}
+
+pub async fn exists_by_message_id_header(
+    pool: &PgPool,
+    inbox_id: Uuid,
+    message_id_header: &str,
+) -> Result<bool, sqlx::Error> {
+    let row: (bool,) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE inbox_id = $1 AND message_id_header = $2)",
+    )
+    .bind(inbox_id)
+    .bind(message_id_header)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
 }
 
 #[cfg(test)]
@@ -367,7 +385,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .org_id;
-        let results = search(&pool, org_id, "revenue", 10, 0).await.unwrap();
+        let results = search(&pool, org_id, "revenue", None, 10, 0).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].subject.as_deref(),
@@ -388,7 +406,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .org_id;
-        let results = search(&pool, org_id, "xyznonexistent", 10, 0)
+        let results = search(&pool, org_id, "xyznonexistent", None, 10, 0)
             .await
             .unwrap();
         assert!(results.is_empty());
@@ -406,7 +424,7 @@ mod tests {
         let other_org = crate::db::organizations::create(&pool, "Other Org")
             .await
             .unwrap();
-        let results = search(&pool, other_org.id, "confidential", 10, 0)
+        let results = search(&pool, other_org.id, "confidential", None, 10, 0)
             .await
             .unwrap();
         assert!(results.is_empty());
@@ -429,10 +447,10 @@ mod tests {
             .unwrap()
             .unwrap()
             .org_id;
-        let page1 = search(&pool, org_id, "invoice", 2, 0).await.unwrap();
+        let page1 = search(&pool, org_id, "invoice", None, 2, 0).await.unwrap();
         assert_eq!(page1.len(), 2);
 
-        let page2 = search(&pool, org_id, "invoice", 2, 2).await.unwrap();
+        let page2 = search(&pool, org_id, "invoice", None, 2, 2).await.unwrap();
         assert_eq!(page2.len(), 1);
     }
 

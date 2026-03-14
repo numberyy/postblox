@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use lettre::transport::smtp::authentication::Credentials;
+use lettre::{AsyncSmtpTransport, Tokio1Executor};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -18,8 +20,7 @@ pub struct StalwartClient {
     base_url: String,
     admin_user: String,
     admin_token: String,
-    smtp_host: String,
-    smtp_port: u16,
+    smtp_transport: AsyncSmtpTransport<Tokio1Executor>,
 }
 
 impl StalwartClient {
@@ -29,11 +30,10 @@ impl StalwartClient {
         admin_token: &str,
         smtp_host: Option<&str>,
         smtp_port: Option<u16>,
-    ) -> Self {
+    ) -> Result<Self, StalwartError> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
-            .build()
-            .expect("failed to build http client");
+            .build()?;
 
         let parsed_host = smtp_host.map(String::from).unwrap_or_else(|| {
             // Extract host from HTTP base_url (e.g., "http://stalwart:8080" → "stalwart")
@@ -46,14 +46,23 @@ impl StalwartClient {
                 .to_string()
         });
 
-        Self {
+        let smtp_transport =
+            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&parsed_host)
+                .port(smtp_port.unwrap_or(25))
+                .credentials(Credentials::new(
+                    admin_user.to_string(),
+                    admin_token.to_string(),
+                ))
+                .timeout(Some(Duration::from_secs(30)))
+                .build();
+
+        Ok(Self {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
             admin_user: admin_user.to_string(),
             admin_token: admin_token.to_string(),
-            smtp_host: parsed_host,
-            smtp_port: smtp_port.unwrap_or(25),
-        }
+            smtp_transport,
+        })
     }
 
     async fn check_response(resp: reqwest::Response) -> Result<reqwest::Response, StalwartError> {
@@ -144,8 +153,7 @@ impl StalwartClient {
         to: &[&str],
         raw_mime: Vec<u8>,
     ) -> Result<(), StalwartError> {
-        use lettre::transport::smtp::authentication::Credentials;
-        use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
+        use lettre::AsyncTransport;
 
         let from_addr: lettre::Address = from
             .parse()
@@ -161,16 +169,7 @@ impl StalwartClient {
         let envelope = lettre::address::Envelope::new(Some(from_addr), to_addrs)
             .map_err(|e| StalwartError::Smtp(format!("invalid envelope: {e}")))?;
 
-        let transport = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&self.smtp_host)
-            .port(self.smtp_port)
-            .credentials(Credentials::new(
-                self.admin_user.clone(),
-                self.admin_token.clone(),
-            ))
-            .timeout(Some(Duration::from_secs(30)))
-            .build();
-
-        transport
+        self.smtp_transport
             .send_raw(&envelope, &raw_mime)
             .await
             .map_err(|e| StalwartError::Smtp(e.to_string()))?;
@@ -182,15 +181,17 @@ impl StalwartClient {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_stalwart_client_trims_trailing_slash() {
-        let client = StalwartClient::new("http://localhost:8080/", "admin", "token", None, None);
+    #[tokio::test]
+    async fn test_stalwart_client_trims_trailing_slash() {
+        let client =
+            StalwartClient::new("http://localhost:8080/", "admin", "token", None, None).unwrap();
         assert_eq!(client.base_url, "http://localhost:8080");
     }
 
-    #[test]
-    fn test_stalwart_client_no_trailing_slash() {
-        let client = StalwartClient::new("http://localhost:8080", "admin", "token", None, None);
+    #[tokio::test]
+    async fn test_stalwart_client_no_trailing_slash() {
+        let client =
+            StalwartClient::new("http://localhost:8080", "admin", "token", None, None).unwrap();
         assert_eq!(client.base_url, "http://localhost:8080");
     }
 
@@ -214,58 +215,57 @@ mod tests {
         assert!(err.to_string().contains("internal error"));
     }
 
-    #[test]
-    fn test_stalwart_create_domain_url() {
-        let client = StalwartClient::new("http://localhost:8080", "admin", "token", None, None);
+    #[tokio::test]
+    async fn test_stalwart_create_domain_url() {
+        let client =
+            StalwartClient::new("http://localhost:8080", "admin", "token", None, None).unwrap();
         let url = format!("{}/api/principal", client.base_url);
         assert_eq!(url, "http://localhost:8080/api/principal");
     }
 
-    #[test]
-    fn test_stalwart_delete_domain_url() {
-        let client = StalwartClient::new("http://localhost:8080/", "admin", "token", None, None);
+    #[tokio::test]
+    async fn test_stalwart_delete_domain_url() {
+        let client =
+            StalwartClient::new("http://localhost:8080/", "admin", "token", None, None).unwrap();
         let url = format!("{}/api/principal/{}", client.base_url, "domain-123");
         assert_eq!(url, "http://localhost:8080/api/principal/domain-123");
     }
 
-    #[test]
-    fn test_stalwart_dns_records_url() {
-        let client = StalwartClient::new("http://localhost:8080", "admin", "token", None, None);
+    #[tokio::test]
+    async fn test_stalwart_dns_records_url() {
+        let client =
+            StalwartClient::new("http://localhost:8080", "admin", "token", None, None).unwrap();
         let url = format!("{}/api/dns/records/{}", client.base_url, "example.com");
         assert_eq!(url, "http://localhost:8080/api/dns/records/example.com");
     }
 
-    #[test]
-    fn test_smtp_host_from_base_url() {
-        let client =
-            StalwartClient::new("http://mail.example.com:8080", "admin", "tok", None, None);
-        assert_eq!(client.smtp_host, "mail.example.com");
-        assert_eq!(client.smtp_port, 25);
+    #[tokio::test]
+    async fn test_smtp_host_from_base_url_constructs() {
+        StalwartClient::new("http://mail.example.com:8080", "admin", "tok", None, None).unwrap();
     }
 
-    #[test]
-    fn test_smtp_host_explicit_override() {
-        let client = StalwartClient::new(
+    #[tokio::test]
+    async fn test_smtp_host_explicit_override_constructs() {
+        StalwartClient::new(
             "http://localhost:8080",
             "admin",
             "tok",
             Some("smtp.local"),
             Some(587),
-        );
-        assert_eq!(client.smtp_host, "smtp.local");
-        assert_eq!(client.smtp_port, 587);
+        )
+        .unwrap();
     }
 
-    #[test]
-    fn test_smtp_host_https_stripped() {
-        let client = StalwartClient::new(
+    #[tokio::test]
+    async fn test_smtp_host_https_stripped_constructs() {
+        StalwartClient::new(
             "https://stalwart.prod.internal:443",
             "admin",
             "tok",
             None,
             None,
-        );
-        assert_eq!(client.smtp_host, "stalwart.prod.internal");
+        )
+        .unwrap();
     }
 
     #[tokio::test]
@@ -273,7 +273,8 @@ mod tests {
     async fn test_stalwart_create_and_delete_account() {
         let token = std::env::var("STALWART_ADMIN_TOKEN")
             .expect("STALWART_ADMIN_TOKEN must be set for stalwart integration tests");
-        let client = StalwartClient::new("http://localhost:8080", "admin", &token, None, None);
+        let client =
+            StalwartClient::new("http://localhost:8080", "admin", &token, None, None).unwrap();
         let email = format!("test-{}@postblox.local", uuid::Uuid::new_v4());
         client.create_account(&email, "password123").await.unwrap();
         client.delete_account(&email).await.unwrap();

@@ -8,6 +8,7 @@ use crate::theme::Theme;
 pub mod approvals;
 pub mod briefing;
 pub mod compose;
+pub mod drafts;
 pub mod inbox_list;
 pub mod message_list;
 pub mod preview;

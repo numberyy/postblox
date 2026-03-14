@@ -72,24 +72,49 @@ pub async fn count_by_status(
     Ok(row.0)
 }
 
-/// Returns pending approvals with joined message subject/from and inbox email.
-pub async fn list_pending_with_details(
+/// Returns approvals with joined details, optionally filtered by status.
+pub async fn list_with_details(
     pool: &PgPool,
     org_id: Uuid,
+    status: Option<&str>,
+    offset: i64,
     limit: i64,
 ) -> Result<Vec<ApprovalWithDetails>, sqlx::Error> {
-    sqlx::query_as(
-        "SELECT a.id, a.created_at, m.subject, m.from_addr, i.email AS inbox_email \
-         FROM approvals a \
-         JOIN messages m ON m.id = a.message_id \
-         JOIN inboxes i ON i.id = a.inbox_id \
-         WHERE a.org_id = $1 AND a.status = 'pending' \
-         ORDER BY a.created_at ASC LIMIT $2",
-    )
-    .bind(org_id)
-    .bind(limit)
-    .fetch_all(pool)
-    .await
+    match status {
+        Some(s) => {
+            sqlx::query_as(
+                "SELECT a.id, a.inbox_id, a.message_id, a.status, a.created_at, \
+                        m.subject, m.from_addr, i.email AS inbox_email \
+                 FROM approvals a \
+                 JOIN messages m ON m.id = a.message_id \
+                 JOIN inboxes i ON i.id = a.inbox_id \
+                 WHERE a.org_id = $1 AND a.status = $2 \
+                 ORDER BY a.created_at ASC LIMIT $3 OFFSET $4",
+            )
+            .bind(org_id)
+            .bind(s)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await
+        }
+        None => {
+            sqlx::query_as(
+                "SELECT a.id, a.inbox_id, a.message_id, a.status, a.created_at, \
+                        m.subject, m.from_addr, i.email AS inbox_email \
+                 FROM approvals a \
+                 JOIN messages m ON m.id = a.message_id \
+                 JOIN inboxes i ON i.id = a.inbox_id \
+                 WHERE a.org_id = $1 \
+                 ORDER BY a.created_at ASC LIMIT $2 OFFSET $3",
+            )
+            .bind(org_id)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await
+        }
+    }
 }
 
 pub async fn get(

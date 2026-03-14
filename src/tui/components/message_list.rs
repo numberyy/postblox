@@ -18,6 +18,8 @@ pub struct MessageEntry {
     pub subject: String,
     pub date: DateTime<Utc>,
     pub is_slop: bool,
+    pub direction: String,
+    pub category: Option<String>,
 }
 
 impl MessageList {
@@ -36,6 +38,8 @@ impl MessageList {
                 subject: m.subject.clone().unwrap_or_default(),
                 date: m.created_at,
                 is_slop: m.triage_status.as_deref() == Some("slopified"),
+                direction: m.direction.clone(),
+                category: m.category.clone(),
             })
             .collect();
         if self.entries.is_empty() {
@@ -105,21 +109,41 @@ impl MessageList {
 }
 
 fn render_entry<'a>(entry: &MessageEntry, theme: &Theme) -> ListItem<'a> {
-    let from = truncate(&entry.from, 16);
-    let subject = truncate(&entry.subject, 28);
-    let age = format_age(entry.date);
-    let slop = if entry.is_slop {
-        format!(" {ICON_SLOP}")
+    let dir = if entry.direction == "outbound" {
+        "→"
     } else {
-        String::new()
+        "←"
     };
+    let from = truncate(&entry.from, 15);
+    let subject = truncate(&entry.subject, 26);
+    let age = format_age(entry.date);
 
-    ListItem::new(Line::from(vec![
-        Span::styled(format!(" {from:<16}"), Style::default().fg(theme.fg)),
-        Span::styled(format!(" {subject:<28}"), Style::default().fg(theme.muted)),
+    let mut spans = vec![
+        Span::styled(
+            format!(" {dir}"),
+            Style::default().fg(if entry.direction == "outbound" {
+                theme.accent
+            } else {
+                theme.muted
+            }),
+        ),
+        Span::styled(format!(" {from:<15}"), Style::default().fg(theme.fg)),
+        Span::styled(format!(" {subject:<26}"), Style::default().fg(theme.muted)),
         Span::styled(format!(" {age:>6}"), Style::default().fg(theme.muted)),
-        Span::styled(slop, Style::default().fg(theme.warning)),
-    ]))
+    ];
+    if entry.is_slop {
+        spans.push(Span::styled(
+            format!(" {ICON_SLOP}"),
+            Style::default().fg(theme.warning),
+        ));
+    }
+    if let Some(ref cat) = entry.category {
+        spans.push(Span::styled(
+            format!(" [{cat}]"),
+            Style::default().fg(theme.accent),
+        ));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 pub fn format_age(date: DateTime<Utc>) -> String {
@@ -161,6 +185,17 @@ mod tests {
             category: None,
             triage_status: if slop { Some("slopified".into()) } else { None },
         }
+    }
+
+    #[test]
+    fn test_direction_and_category_set() {
+        let mut list = MessageList::new();
+        let mut msg = make_message("alice@co.com", "Test", false);
+        msg.direction = "outbound".into();
+        msg.category = Some("sales".into());
+        list.set_entries(&[msg]);
+        assert_eq!(list.entries[0].direction, "outbound");
+        assert_eq!(list.entries[0].category.as_deref(), Some("sales"));
     }
 
     fn populated_list() -> MessageList {

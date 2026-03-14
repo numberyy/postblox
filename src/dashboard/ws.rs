@@ -17,7 +17,10 @@ pub async fn ws_upgrade(
 
     let stored = match crate::api::auth::validate_api_key(&state.pool, &key).await {
         Ok(k) => k,
-        Err(()) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(crate::api::auth::AuthError::DatabaseError) => {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
 
     let hub = state.ws_hub.clone();

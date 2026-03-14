@@ -19,6 +19,7 @@ pub struct Config {
     pub embedding_url: Option<String>,
     pub embedding_model: Option<String>,
     pub embedding_api_key: Option<String>,
+    pub embedding_dimension: Option<usize>,
     #[serde(default = "default_trust_threshold")]
     pub trust_auto_upgrade_threshold: i32,
     pub hooks: Option<Vec<crate::hooks::HookConfig>>,
@@ -69,6 +70,21 @@ fn default_port() -> u16 {
     3000
 }
 
+fn parse_env_or_default<T: std::str::FromStr>(name: &str, default_fn: fn() -> T) -> T {
+    parse_env_opt(name).unwrap_or_else(default_fn)
+}
+
+fn parse_env_opt<T: std::str::FromStr>(name: &str) -> Option<T> {
+    let v = std::env::var(name).ok()?;
+    match v.parse() {
+        Ok(parsed) => Some(parsed),
+        Err(_) => {
+            tracing::warn!("{name}={v:?} is not valid, ignoring");
+            None
+        }
+    }
+}
+
 impl Config {
     pub fn load() -> anyhow::Result<Self> {
         let path = std::env::var("POSTBLOX_CONFIG")
@@ -81,10 +97,7 @@ impl Config {
         } else {
             Ok(Self {
                 host: std::env::var("POSTBLOX_HOST").unwrap_or_else(|_| default_host()),
-                port: std::env::var("POSTBLOX_PORT")
-                    .ok()
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or_else(default_port),
+                port: parse_env_or_default("POSTBLOX_PORT", default_port),
                 database_url: std::env::var("DATABASE_URL")
                     .map_err(|_| anyhow::anyhow!("DATABASE_URL or postblox.toml required"))?,
                 stalwart_url: std::env::var("STALWART_URL").ok(),
@@ -92,28 +105,27 @@ impl Config {
                 stalwart_admin_token: std::env::var("STALWART_ADMIN_TOKEN").ok(),
                 stalwart_inbound_token: std::env::var("STALWART_INBOUND_TOKEN").ok(),
                 stalwart_smtp_host: std::env::var("STALWART_SMTP_HOST").ok(),
-                stalwart_smtp_port: std::env::var("STALWART_SMTP_PORT")
-                    .ok()
-                    .and_then(|p| p.parse().ok()),
+                stalwart_smtp_port: parse_env_opt("STALWART_SMTP_PORT"),
                 guard_patterns: None,
                 embedding_url: std::env::var("EMBEDDING_URL").ok(),
                 embedding_model: std::env::var("EMBEDDING_MODEL").ok(),
                 embedding_api_key: std::env::var("EMBEDDING_API_KEY").ok(),
+                embedding_dimension: parse_env_opt("EMBEDDING_DIMENSION"),
                 hooks: None,
                 rate_limit: RateLimitConfig {
-                    requests_per_minute: std::env::var("RATE_LIMIT_PER_MINUTE")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or_else(default_rate_per_minute),
-                    requests_per_hour: std::env::var("RATE_LIMIT_PER_HOUR")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or_else(default_rate_per_hour),
+                    requests_per_minute: parse_env_or_default(
+                        "RATE_LIMIT_PER_MINUTE",
+                        default_rate_per_minute,
+                    ),
+                    requests_per_hour: parse_env_or_default(
+                        "RATE_LIMIT_PER_HOUR",
+                        default_rate_per_hour,
+                    ),
                 },
-                trust_auto_upgrade_threshold: std::env::var("TRUST_AUTO_UPGRADE_THRESHOLD")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or_else(default_trust_threshold),
+                trust_auto_upgrade_threshold: parse_env_or_default(
+                    "TRUST_AUTO_UPGRADE_THRESHOLD",
+                    default_trust_threshold,
+                ),
             })
         }
     }

@@ -57,9 +57,14 @@ pub struct PaginationParams {
 }
 
 pub fn clamp_pagination(params: &PaginationParams) -> (i64, i64) {
-    let limit = params.limit.unwrap_or(50).clamp(1, 100);
-    let offset = params.offset.unwrap_or(0).max(0);
-    (limit, offset)
+    clamp_pagination_raw(params.limit, params.offset)
+}
+
+pub fn clamp_pagination_raw(limit: Option<i64>, offset: Option<i64>) -> (i64, i64) {
+    (
+        limit.unwrap_or(50).clamp(1, 100),
+        offset.unwrap_or(0).max(0),
+    )
 }
 
 pub async fn get_inbox_for_org(
@@ -296,18 +301,92 @@ pub fn router(state: AppState) -> axum::Router {
         .with_state(state)
 }
 
-async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let db_ok = sqlx::query("SELECT 1").execute(&state.pool).await.is_ok();
+    let status = if db_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
 
-    Json(serde_json::json!({
-        "status": if db_ok { "ok" } else { "degraded" },
-        "database": db_ok,
-    }))
+    (
+        status,
+        Json(serde_json::json!({
+            "status": if db_ok { "ok" } else { "degraded" },
+            "database": db_ok,
+        })),
+    )
 }
 
 #[derive(Deserialize)]
 struct WsParams {
     key: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clamp_pagination_defaults() {
+        let (limit, offset) = clamp_pagination_raw(None, None);
+        assert_eq!(limit, 50);
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_clamp_pagination_custom_values() {
+        let (limit, offset) = clamp_pagination_raw(Some(25), Some(10));
+        assert_eq!(limit, 25);
+        assert_eq!(offset, 10);
+    }
+
+    #[test]
+    fn test_clamp_pagination_limit_capped_at_100() {
+        let (limit, _) = clamp_pagination_raw(Some(500), None);
+        assert_eq!(limit, 100);
+    }
+
+    #[test]
+    fn test_clamp_pagination_limit_floored_at_1() {
+        let (limit, _) = clamp_pagination_raw(Some(0), None);
+        assert_eq!(limit, 1);
+    }
+
+    #[test]
+    fn test_clamp_pagination_negative_limit_clamped() {
+        let (limit, _) = clamp_pagination_raw(Some(-10), None);
+        assert_eq!(limit, 1);
+    }
+
+    #[test]
+    fn test_clamp_pagination_negative_offset_clamped() {
+        let (_, offset) = clamp_pagination_raw(None, Some(-5));
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_clamp_pagination_boundary_limit_1() {
+        let (limit, _) = clamp_pagination_raw(Some(1), None);
+        assert_eq!(limit, 1);
+    }
+
+    #[test]
+    fn test_clamp_pagination_boundary_limit_100() {
+        let (limit, _) = clamp_pagination_raw(Some(100), None);
+        assert_eq!(limit, 100);
+    }
+
+    #[test]
+    fn test_clamp_pagination_struct() {
+        let params = PaginationParams {
+            limit: Some(30),
+            offset: Some(5),
+        };
+        let (limit, offset) = clamp_pagination(&params);
+        assert_eq!(limit, 30);
+        assert_eq!(offset, 5);
+    }
 }
 
 async fn ws_upgrade(
@@ -317,7 +396,10 @@ async fn ws_upgrade(
 ) -> impl IntoResponse {
     let stored = match auth::validate_api_key(&state.pool, &params.key).await {
         Ok(k) => k,
-        Err(()) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(auth::AuthError::DatabaseError) => {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+        Err(auth::AuthError::Invalid) => return StatusCode::UNAUTHORIZED.into_response(),
     };
 
     let hub = state.ws_hub.clone();

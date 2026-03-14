@@ -18,6 +18,16 @@ fn optional_i64(args: &Value, key: &str) -> Option<i64> {
     args.get(key).and_then(|v| v.as_i64())
 }
 
+fn pagination_params(args: &Value) -> [(&'static str, Option<String>); 2] {
+    [
+        ("limit", optional_i64(args, "limit").map(|v| v.to_string())),
+        (
+            "offset",
+            optional_i64(args, "offset").map(|v| v.to_string()),
+        ),
+    ]
+}
+
 fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -395,12 +405,13 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "postblox_list_approvals",
-            "description": "List pending approval requests, paginated.",
+            "description": "List approval requests, optionally filtered by status, paginated.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "limit": { "type": "integer", "description": "Max results" },
-                    "offset": { "type": "integer", "description": "Offset for pagination" }
+                    "offset": { "type": "integer", "description": "Offset for pagination" },
+                    "status": { "type": "string", "description": "Filter by status: pending, approved, rejected" }
                 },
                 "required": []
             }
@@ -519,7 +530,7 @@ pub fn tool_definitions() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "provider": { "type": "string", "enum": ["ntfy", "email", "webhook"], "description": "Notification provider" },
+                    "provider": { "type": "string", "enum": ["ntfy", "email", "webhook", "desktop"], "description": "Notification provider" },
                     "config": { "type": "object", "description": "Provider-specific configuration" }
                 },
                 "required": ["provider", "config"]
@@ -641,14 +652,8 @@ pub async fn dispatch(
 
         "postblox_list_messages" => {
             let inbox_id = require_str(&args, "inbox_id")?;
-            let qs = build_query_string(&[
-                ("limit", optional_i64(&args, "limit").map(|v| v.to_string())),
-                (
-                    "offset",
-                    optional_i64(&args, "offset").map(|v| v.to_string()),
-                ),
-                ("thread_id", optional_str(&args, "thread_id")),
-            ]);
+            let [p1, p2] = pagination_params(&args);
+            let qs = build_query_string(&[p1, p2, ("thread_id", optional_str(&args, "thread_id"))]);
             client
                 .get(&format!("/inboxes/{inbox_id}/messages{qs}"))
                 .await
@@ -664,13 +669,7 @@ pub async fn dispatch(
 
         "postblox_list_threads" => {
             let inbox_id = require_str(&args, "inbox_id")?;
-            let qs = build_query_string(&[
-                ("limit", optional_i64(&args, "limit").map(|v| v.to_string())),
-                (
-                    "offset",
-                    optional_i64(&args, "offset").map(|v| v.to_string()),
-                ),
-            ]);
+            let qs = build_query_string(&pagination_params(&args));
             client
                 .get(&format!("/inboxes/{inbox_id}/threads{qs}"))
                 .await
@@ -694,14 +693,12 @@ pub async fn dispatch(
                 .get("threshold")
                 .and_then(|v| v.as_f64())
                 .map(|v| v.to_string());
+            let [p1, p2] = pagination_params(&args);
             let params: Vec<(&str, Option<String>)> = vec![
                 ("q", Some(q)),
                 ("inbox_id", optional_str(&args, "inbox_id")),
-                ("limit", optional_i64(&args, "limit").map(|v| v.to_string())),
-                (
-                    "offset",
-                    optional_i64(&args, "offset").map(|v| v.to_string()),
-                ),
+                p1,
+                p2,
                 ("semantic", semantic),
                 ("threshold", threshold),
             ];
@@ -770,13 +767,7 @@ pub async fn dispatch(
 
         "postblox_list_drafts" => {
             let inbox_id = require_str(&args, "inbox_id")?;
-            let qs = build_query_string(&[
-                ("limit", optional_i64(&args, "limit").map(|v| v.to_string())),
-                (
-                    "offset",
-                    optional_i64(&args, "offset").map(|v| v.to_string()),
-                ),
-            ]);
+            let qs = build_query_string(&pagination_params(&args));
             client.get(&format!("/inboxes/{inbox_id}/drafts{qs}")).await
         }
 
@@ -874,13 +865,10 @@ pub async fn dispatch(
         }
 
         "postblox_list_approvals" => {
-            let qs = build_query_string(&[
-                ("limit", optional_i64(&args, "limit").map(|v| v.to_string())),
-                (
-                    "offset",
-                    optional_i64(&args, "offset").map(|v| v.to_string()),
-                ),
-            ]);
+            let mut params: Vec<(&str, Option<String>)> =
+                pagination_params(&args).into_iter().collect();
+            params.push(("status", optional_str(&args, "status")));
+            let qs = build_query_string(&params);
             client.get(&format!("/approvals{qs}")).await
         }
 
@@ -937,12 +925,10 @@ pub async fn dispatch(
         }
 
         "postblox_list_audit" => {
+            let [p1, p2] = pagination_params(&args);
             let qs = build_query_string(&[
-                ("limit", optional_i64(&args, "limit").map(|v| v.to_string())),
-                (
-                    "offset",
-                    optional_i64(&args, "offset").map(|v| v.to_string()),
-                ),
+                p1,
+                p2,
                 ("inbox_id", optional_str(&args, "inbox_id")),
                 ("action", optional_str(&args, "action")),
                 ("after", optional_str(&args, "after")),

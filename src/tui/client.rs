@@ -33,6 +33,17 @@ pub struct Message {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Draft {
+    pub id: Uuid,
+    pub inbox_id: Uuid,
+    pub to_addrs: serde_json::Value,
+    pub subject: Option<String>,
+    pub text_body: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Approval {
     pub id: Uuid,
     pub inbox_id: Uuid,
@@ -133,25 +144,6 @@ impl PostbloxClient {
         Self::parse_response(resp).await
     }
 
-    async fn post_empty(&self, path: &str) -> Result<(), ClientError> {
-        let resp = self
-            .http
-            .post(self.url(path))
-            .bearer_auth(&self.api_key)
-            .send()
-            .await?;
-        let status = resp.status();
-        if status.is_success() {
-            Ok(())
-        } else {
-            let body = resp.text().await.unwrap_or_default();
-            Err(ClientError::Api {
-                status: status.as_u16(),
-                body,
-            })
-        }
-    }
-
     async fn parse_response<T: serde::de::DeserializeOwned>(
         resp: reqwest::Response,
     ) -> Result<T, ClientError> {
@@ -204,16 +196,37 @@ impl PostbloxClient {
         self.get_json(&format!("/briefing?period={encoded}")).await
     }
 
+    pub async fn get_message(
+        &self,
+        inbox_id: Uuid,
+        message_id: Uuid,
+    ) -> Result<Message, ClientError> {
+        self.get_json(&format!("/inboxes/{inbox_id}/messages/{message_id}"))
+            .await
+    }
+
+    pub async fn list_drafts(&self, inbox_id: Uuid) -> Result<Vec<Draft>, ClientError> {
+        self.get_json(&format!("/inboxes/{inbox_id}/drafts")).await
+    }
+
     pub async fn list_approvals(&self) -> Result<Vec<Approval>, ClientError> {
         self.get_json("/approvals").await
     }
 
-    pub async fn approve(&self, id: Uuid) -> Result<(), ClientError> {
-        self.post_empty(&format!("/approvals/{id}/approve")).await
+    pub async fn approve(&self, id: Uuid) -> Result<Approval, ClientError> {
+        self.post_json(
+            &format!("/approvals/{id}/approve"),
+            &serde_json::json!({"decided_by": "tui"}),
+        )
+        .await
     }
 
-    pub async fn reject(&self, id: Uuid) -> Result<(), ClientError> {
-        self.post_empty(&format!("/approvals/{id}/reject")).await
+    pub async fn reject(&self, id: Uuid) -> Result<Approval, ClientError> {
+        self.post_json(
+            &format!("/approvals/{id}/reject"),
+            &serde_json::json!({"decided_by": "tui"}),
+        )
+        .await
     }
 
     pub async fn send_message(

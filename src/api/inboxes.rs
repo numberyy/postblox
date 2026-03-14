@@ -39,7 +39,14 @@ pub async fn create(
 
     if let Some(ref stalwart) = state.stalwart {
         if let Err(e) = stalwart.create_account(&inbox.email, &inbox.email).await {
-            tracing::warn!("stalwart account creation failed for {}: {e}", inbox.email);
+            tracing::error!("stalwart account creation failed for {}: {e}", inbox.email);
+            // Roll back: delete the inbox since the mail account couldn't be created
+            if let Err(re) = crate::db::inboxes::delete(&state.pool, inbox.id).await {
+                tracing::error!("rollback delete of inbox {} also failed: {re}", inbox.id);
+            }
+            return Err(ApiError::Internal(format!(
+                "mail account creation failed: {e}"
+            )));
         }
     }
 
@@ -75,7 +82,7 @@ pub async fn delete(
 
     if let Some(ref stalwart) = state.stalwart {
         if let Err(e) = stalwart.delete_account(&inbox.email).await {
-            tracing::warn!("stalwart account deletion failed for {}: {e}", inbox.email);
+            tracing::error!("stalwart account deletion failed for {}: {e}", inbox.email);
         }
     }
 

@@ -10,6 +10,7 @@ use crate::models::Message;
 #[derive(Deserialize)]
 pub struct SearchParams {
     pub q: String,
+    pub inbox_id: Option<uuid::Uuid>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
     pub semantic: Option<bool>,
@@ -25,11 +26,7 @@ pub async fn search(
         return Err(ApiError::BadRequest("search query required".into()));
     }
 
-    let pagination = super::PaginationParams {
-        limit: params.limit,
-        offset: params.offset,
-    };
-    let (limit, offset) = super::clamp_pagination(&pagination);
+    let (limit, offset) = super::clamp_pagination_raw(params.limit, params.offset);
 
     if params.semantic.unwrap_or(false) {
         let provider = state
@@ -49,6 +46,7 @@ pub async fn search(
             &embedding,
             limit,
             threshold,
+            params.inbox_id,
         )
         .await
         .map_err(ApiError::from_sqlx)?;
@@ -56,9 +54,10 @@ pub async fn search(
         return Ok(Json(results));
     }
 
-    let results = crate::db::messages::search(&state.pool, org_id, &params.q, limit, offset)
-        .await
-        .map_err(ApiError::from_sqlx)?;
+    let results =
+        crate::db::messages::search(&state.pool, org_id, &params.q, params.inbox_id, limit, offset)
+            .await
+            .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(results))
 }

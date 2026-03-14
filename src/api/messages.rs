@@ -123,8 +123,7 @@ pub async fn list(
 ) -> Result<Json<Vec<Message>>, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
 
-    let limit = params.limit.unwrap_or(50).clamp(1, 100);
-    let offset = params.offset.unwrap_or(0).max(0);
+    let (limit, offset) = super::clamp_pagination_raw(params.limit, params.offset);
 
     let unslopify = params.unslopify.unwrap_or(false);
 

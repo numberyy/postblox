@@ -22,43 +22,45 @@ pub async fn receive_inbound(
         }
     }
 
-    let parsed = match crate::mail::parser::parse(&body) {
+    let mut parsed = match crate::mail::parser::parse(&body) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("failed to parse inbound email: {e}");
-            return Ok(StatusCode::OK);
+            return Ok(StatusCode::UNPROCESSABLE_ENTITY);
         }
     };
 
-    let mut inbox = None;
-    for to_addr in &parsed.to {
-        if let Some(found) = crate::db::inboxes::get_by_email(&state.pool, to_addr)
-            .await
-            .map_err(ApiError::from_sqlx)?
-        {
-            inbox = Some(found);
-            break;
-        }
-    }
+    let mut email_refs: Vec<&str> = parsed.to.iter().map(String::as_str).collect();
+    email_refs.extend(parsed.cc.iter().map(String::as_str));
+    let inbox = crate::db::inboxes::get_first_by_emails(&state.pool, &email_refs)
+        .await
+        .map_err(ApiError::from_sqlx)?;
 
     let inbox = match inbox {
         Some(i) => i,
         None => {
             tracing::warn!(to = ?parsed.to, "inbound email for unknown recipient");
-            return Ok(StatusCode::OK);
+            return Ok(StatusCode::NOT_FOUND);
         }
     };
 
-    // Dedup: skip if we already stored this message.
-    if let Some(ref mid) = parsed.message_id {
-        if crate::db::messages::find_by_message_id_header(&state.pool, inbox.id, mid)
-            .await
-            .map_err(ApiError::from_sqlx)?
-            .is_some()
-        {
-            tracing::debug!(message_id = %mid, "duplicate inbound email, skipping");
-            return Ok(StatusCode::OK);
-        }
+    if parsed.message_id.is_none() {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(parsed.from.as_bytes());
+        hasher.update(parsed.subject.as_deref().unwrap_or("").as_bytes());
+        hasher.update(parsed.text_body.as_deref().unwrap_or("").as_bytes());
+        hasher.update(chrono::Utc::now().timestamp_micros().to_le_bytes());
+        parsed.message_id = Some(format!("synth-{:x}@postblox", hasher.finalize()));
+    }
+
+    let mid = parsed.message_id.as_deref().unwrap();
+    if crate::db::messages::exists_by_message_id_header(&state.pool, inbox.id, mid)
+        .await
+        .map_err(ApiError::from_sqlx)?
+    {
+        tracing::debug!(message_id = %mid, "duplicate inbound email, skipping");
+        return Ok(StatusCode::OK);
     }
 
     let extracted_text = parsed
@@ -66,24 +68,28 @@ pub async fn receive_inbound(
         .as_ref()
         .map(|t| crate::mail::reply_extract::extract_reply(t));
 
-    let (threads_result, mid_map_result) = tokio::join!(
-        crate::db::threads::list_by_inbox(&state.pool, inbox.id, 10_000, 0),
-        crate::db::messages::message_id_headers_by_inbox(&state.pool, inbox.id, 10_000),
-    );
-    let threads = threads_result.map_err(ApiError::from_sqlx)?;
-    let mid_map = mid_map_result.map_err(ApiError::from_sqlx)?;
+    // Targeted threading: first try In-Reply-To/References via indexed lookup,
+    // then fall back to subject matching with only recent threads.
+    let mut ref_ids: Vec<&str> = Vec::new();
+    if let Some(ref reply_to) = parsed.in_reply_to {
+        ref_ids.push(reply_to);
+    }
+    ref_ids.extend(parsed.references.iter().map(String::as_str));
 
-    let thread_refs: Vec<_> = threads
-        .iter()
-        .map(|thread| crate::mail::ThreadRef {
-            thread_id: thread.id,
-            message_ids: mid_map.get(&thread.id).cloned().unwrap_or_default(),
-            subject: thread.subject.clone().unwrap_or_default(),
-            last_message_at: thread.last_message_at.unwrap_or(thread.created_at),
-        })
-        .collect();
-
-    let thread_match = crate::mail::threading::assign_thread(&parsed, &thread_refs);
+    let thread_match = if !ref_ids.is_empty() {
+        match crate::db::threads::find_by_message_ids(&state.pool, inbox.id, &ref_ids)
+            .await
+            .map_err(ApiError::from_sqlx)?
+        {
+            Some(t) => crate::mail::ThreadMatch::Existing(t.id),
+            None => {
+                // References didn't match — try subject-based with recent threads
+                subject_based_thread_match(&state, inbox.id, &parsed).await?
+            }
+        }
+    } else {
+        subject_based_thread_match(&state, inbox.id, &parsed).await?
+    };
 
     let thread_id = match thread_match {
         crate::mail::ThreadMatch::Existing(id) => {
@@ -134,7 +140,7 @@ pub async fn receive_inbound(
     let slop_fields = crate::db::slop::SlopFields {
         score: slop_result.score,
         signals: &signals_json,
-        category: slop_result.category.as_deref(),
+        category: &slop_result.category,
         priority: &slop_result.priority,
         triage_status: slop_result.triage_action.as_str(),
         requires_action: slop_result.requires_action,
@@ -163,30 +169,30 @@ pub async fn receive_inbound(
     let inbox_id = inbox.id;
     let msg_id = msg.id;
     tokio::spawn(async move {
-        crate::events::dispatch(
-            &pool,
-            org_id,
-            crate::events::PostbloxEvent::MessageReceived {
-                message_id: msg_id,
-                inbox_id,
-            },
-            &webhook_client,
-            &hooks,
-            &ws_hub,
-        )
-        .await;
-        crate::events::dispatch(
-            &pool,
-            org_id,
-            crate::events::PostbloxEvent::MessageClassified {
-                message_id: msg_id,
-                inbox_id,
-            },
-            &webhook_client,
-            &hooks,
-            &ws_hub,
-        )
-        .await;
+        tokio::join!(
+            crate::events::dispatch(
+                &pool,
+                org_id,
+                crate::events::PostbloxEvent::MessageReceived {
+                    message_id: msg_id,
+                    inbox_id,
+                },
+                &webhook_client,
+                &hooks,
+                &ws_hub,
+            ),
+            crate::events::dispatch(
+                &pool,
+                org_id,
+                crate::events::PostbloxEvent::MessageClassified {
+                    message_id: msg_id,
+                    inbox_id,
+                },
+                &webhook_client,
+                &hooks,
+                &ws_hub,
+            ),
+        );
     });
 
     if let Some(ref provider) = state.embedding_provider {
@@ -203,7 +209,10 @@ pub async fn receive_inbound(
             tokio::spawn(async move {
                 let _permit = match semaphore.acquire().await {
                     Ok(p) => p,
-                    Err(_) => return,
+                    Err(_) => {
+                        tracing::debug!("embedding semaphore closed, skipping");
+                        return;
+                    }
                 };
                 match provider.embed(&text).await {
                     Ok(embedding) => {
@@ -222,4 +231,27 @@ pub async fn receive_inbound(
     }
 
     Ok(StatusCode::OK)
+}
+
+async fn subject_based_thread_match(
+    state: &AppState,
+    inbox_id: uuid::Uuid,
+    parsed: &crate::mail::parser::ParsedEmail,
+) -> Result<crate::mail::ThreadMatch, ApiError> {
+    let cutoff = Utc::now() - chrono::Duration::days(7);
+    let recent_threads = crate::db::threads::list_recent_by_inbox(&state.pool, inbox_id, cutoff, 200)
+        .await
+        .map_err(ApiError::from_sqlx)?;
+
+    let thread_refs: Vec<_> = recent_threads
+        .iter()
+        .map(|t| crate::mail::ThreadRef {
+            thread_id: t.id,
+            message_ids: vec![],
+            subject: t.subject.clone().unwrap_or_default(),
+            last_message_at: t.last_message_at.unwrap_or(t.created_at),
+        })
+        .collect();
+
+    Ok(crate::mail::threading::assign_thread(parsed, &thread_refs))
 }

@@ -35,8 +35,20 @@ const AUTO_DISABLE_THRESHOLD: i64 = 5;
 
 pub async fn receive_bounce(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<BounceNotification>,
 ) -> Result<StatusCode, ApiError> {
+    if let Some(ref expected) = state.inbound_token {
+        let provided = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match provided {
+            Some(token)
+                if crate::api::auth::constant_time_eq(token.as_bytes(), expected.as_bytes()) => {}
+            _ => return Err(ApiError::Unauthorized),
+        }
+    }
     let msg = crate::db::messages::get_by_id(&state.pool, req.message_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?

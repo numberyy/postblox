@@ -23,6 +23,7 @@ pub async fn search_similar(
     embedding: &[f32],
     limit: i64,
     threshold: f64,
+    inbox_id: Option<Uuid>,
 ) -> Result<Vec<Message>, sqlx::Error> {
     let query = format!(
         "SELECT {} \
@@ -31,6 +32,7 @@ pub async fn search_similar(
              FROM messages m \
              JOIN inboxes i ON m.inbox_id = i.id \
              WHERE i.org_id = $2 AND m.embedding IS NOT NULL \
+             AND ($5::uuid IS NULL OR m.inbox_id = $5) \
          ) sub \
          WHERE 1 - distance >= $3 \
          ORDER BY distance \
@@ -42,6 +44,7 @@ pub async fn search_similar(
         .bind(org_id)
         .bind(threshold)
         .bind(limit)
+        .bind(inbox_id)
         .fetch_all(pool)
         .await
 }
@@ -91,7 +94,7 @@ mod tests {
         let embedding: Vec<f32> = (0..768).map(|i| (i as f32) / 768.0).collect();
         store_embedding(&pool, msg.id, &embedding).await.unwrap();
 
-        let results = search_similar(&pool, inbox.org_id, &embedding, 10, 0.5)
+        let results = search_similar(&pool, inbox.org_id, &embedding, 10, 0.5, None)
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -111,7 +114,7 @@ mod tests {
         let orthogonal: Vec<f32> = (0..768)
             .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
             .collect();
-        let results = search_similar(&pool, inbox.org_id, &orthogonal, 10, 0.99)
+        let results = search_similar(&pool, inbox.org_id, &orthogonal, 10, 0.99, None)
             .await
             .unwrap();
         assert!(results.is_empty());
@@ -130,7 +133,7 @@ mod tests {
         let other_org = crate::db::organizations::create(&pool, "Other Embed Org")
             .await
             .unwrap();
-        let results = search_similar(&pool, other_org.id, &embedding, 10, 0.0)
+        let results = search_similar(&pool, other_org.id, &embedding, 10, 0.0, None)
             .await
             .unwrap();
         assert!(results.is_empty());
@@ -149,7 +152,7 @@ mod tests {
         let emb2: Vec<f32> = vec![0.5; 768];
         store_embedding(&pool, msg.id, &emb2).await.unwrap();
 
-        let results = search_similar(&pool, inbox.org_id, &emb2, 10, 0.99)
+        let results = search_similar(&pool, inbox.org_id, &emb2, 10, 0.99, None)
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -173,7 +176,7 @@ mod tests {
             .unwrap();
         store_embedding(&pool, msg_far.id, &far_emb).await.unwrap();
 
-        let results = search_similar(&pool, inbox.org_id, &query, 10, 0.0)
+        let results = search_similar(&pool, inbox.org_id, &query, 10, 0.0, None)
             .await
             .unwrap();
         assert!(results.len() >= 2);

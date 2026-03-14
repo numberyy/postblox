@@ -11,7 +11,7 @@ pub struct ClassifierInput<'a> {
 pub struct SlopResult {
     pub score: f32,
     pub signals: Vec<String>,
-    pub category: Option<String>,
+    pub category: String,
     pub priority: String,
     pub requires_action: bool,
     pub triage_action: TriageAction,
@@ -42,9 +42,8 @@ pub enum TriageAction {
 
 fn header_value(headers: &Value, name: &str) -> Option<String> {
     let obj = headers.as_object()?;
-    let lower = name.to_lowercase();
     for (k, v) in obj {
-        if k.to_lowercase() == lower {
+        if k.eq_ignore_ascii_case(name) {
             return v.as_str().map(|s| s.to_string());
         }
     }
@@ -70,8 +69,7 @@ fn has_cold_email_pattern(text: &str) -> bool {
     COLD_EMAIL_PATTERNS.iter().any(|p| lower.contains(p))
 }
 
-fn has_otp_pattern(text: &str) -> bool {
-    let lower = text.to_lowercase();
+fn has_otp_pattern_lower(lower: &str, original: &str) -> bool {
     if lower.contains("verification code")
         || lower.contains("one-time")
         || lower.contains("otp")
@@ -79,8 +77,7 @@ fn has_otp_pattern(text: &str) -> bool {
     {
         return true;
     }
-    // Check for 4-8 digit sequences on word boundaries
-    let bytes = text.as_bytes();
+    let bytes = original.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i].is_ascii_digit() {
@@ -144,7 +141,6 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
         has_noreply_sig = true;
     }
 
-    // Cold email patterns in subject
     if let Some(subj) = input.subject {
         if has_cold_email_pattern(subj) {
             score += 0.2;
@@ -160,25 +156,27 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
         }
     }
 
-    // OTP detection (subject + body)
     let subject_text = input.subject.unwrap_or("");
     let body_text = input.text_body.unwrap_or("");
-    if has_otp_pattern(subject_text) || has_otp_pattern(body_text) {
+    let subject_lower = subject_text.to_lowercase();
+    if has_otp_pattern_lower(&subject_lower, subject_text)
+        || has_otp_pattern_lower(&body_text.to_lowercase(), body_text)
+    {
         is_otp = true;
     }
 
     score = score.clamp(0.0, 1.0);
 
     let category = if is_otp {
-        Some("otp".into())
+        "otp"
     } else if has_noreply_sig && has_list_unsub {
-        Some("commercial".into())
+        "commercial"
     } else if has_auto_sub {
-        Some("automated".into())
+        "automated"
     } else if score >= 0.3 {
-        Some("commercial".into())
+        "commercial"
     } else {
-        Some("personal".into())
+        "personal"
     };
 
     // OTP overrides
@@ -199,7 +197,7 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
     SlopResult {
         score,
         signals,
-        category,
+        category: category.into(),
         priority,
         requires_action,
         triage_action,
@@ -257,7 +255,7 @@ mod tests {
         let result = classify(&empty_input());
         assert_eq!(result.score, 0.0);
         assert!(result.signals.is_empty());
-        assert_eq!(result.category.as_deref(), Some("personal"));
+        assert_eq!(result.category, "personal");
         assert_eq!(result.priority, "normal");
         assert!(!result.requires_action);
         assert_eq!(result.triage_action, TriageAction::Inbox);
@@ -492,7 +490,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("otp"));
+        assert_eq!(result.category, "otp");
         assert_eq!(result.priority, "high");
         assert!(result.requires_action);
     }
@@ -504,7 +502,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("otp"));
+        assert_eq!(result.category, "otp");
         assert!(result.requires_action);
     }
 
@@ -515,7 +513,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("otp"));
+        assert_eq!(result.category, "otp");
     }
 
     #[test]
@@ -525,7 +523,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("otp"));
+        assert_eq!(result.category, "otp");
     }
 
     #[test]
@@ -535,7 +533,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("otp"));
+        assert_eq!(result.category, "otp");
     }
 
     #[test]
@@ -545,7 +543,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("otp"));
+        assert_eq!(result.category, "otp");
     }
 
     #[test]
@@ -555,7 +553,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_ne!(result.category.as_deref(), Some("otp"));
+        assert_ne!(result.category, "otp");
     }
 
     #[test]
@@ -565,7 +563,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_ne!(result.category.as_deref(), Some("otp"));
+        assert_ne!(result.category, "otp");
     }
 
     #[test]
@@ -576,7 +574,7 @@ mod tests {
         };
         let result = classify(&input);
         // Digits are embedded in alphanumeric context, should not trigger
-        assert_ne!(result.category.as_deref(), Some("otp"));
+        assert_ne!(result.category, "otp");
     }
 
     #[test]
@@ -586,7 +584,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("otp"));
+        assert_eq!(result.category, "otp");
     }
 
     // --- Category detection ---
@@ -600,7 +598,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("commercial"));
+        assert_eq!(result.category, "commercial");
     }
 
     #[test]
@@ -611,7 +609,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("automated"));
+        assert_eq!(result.category, "automated");
     }
 
     #[test]
@@ -625,13 +623,13 @@ mod tests {
         };
         let result = classify(&input);
         assert!(result.score >= 0.3);
-        assert_eq!(result.category.as_deref(), Some("commercial"));
+        assert_eq!(result.category, "commercial");
     }
 
     #[test]
     fn test_category_personal_low_score() {
         let result = classify(&empty_input());
-        assert_eq!(result.category.as_deref(), Some("personal"));
+        assert_eq!(result.category, "personal");
     }
 
     #[test]
@@ -647,7 +645,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("otp"));
+        assert_eq!(result.category, "otp");
         assert_eq!(result.priority, "high");
     }
 
@@ -770,7 +768,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("personal"));
+        assert_eq!(result.category, "personal");
     }
 
     #[test]
@@ -780,7 +778,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("otp"));
+        assert_eq!(result.category, "otp");
     }
 
     #[test]
@@ -790,7 +788,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("otp"));
+        assert_eq!(result.category, "otp");
     }
 
     // --- Edge cases ---
@@ -804,7 +802,7 @@ mod tests {
         };
         let result = classify(&input);
         assert_eq!(result.score, 0.0);
-        assert_eq!(result.category.as_deref(), Some("personal"));
+        assert_eq!(result.category, "personal");
     }
 
     #[test]
@@ -830,7 +828,7 @@ mod tests {
         };
         let result = classify(&input);
         assert_eq!(result.score, 0.0);
-        assert_eq!(result.category.as_deref(), Some("personal"));
+        assert_eq!(result.category, "personal");
         assert_eq!(result.triage_action, TriageAction::Inbox);
     }
 
@@ -841,7 +839,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("otp"));
+        assert_eq!(result.category, "otp");
     }
 
     #[test]
@@ -851,7 +849,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("otp"));
+        assert_eq!(result.category, "otp");
     }
 
     #[test]
@@ -861,6 +859,6 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert_eq!(result.category.as_deref(), Some("otp"));
+        assert_eq!(result.category, "otp");
     }
 }

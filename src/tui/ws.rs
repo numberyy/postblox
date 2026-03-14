@@ -4,25 +4,11 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite;
 use uuid::Uuid;
 
-// Fields on ApprovalRequested/TrustChanged are parsed from server JSON and verified
-// in tests; app.rs currently matches with `..` but will consume them for detail views.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum WsEvent {
-    MessageReceived {
-        message_id: Uuid,
-        inbox_id: Uuid,
-    },
-    ApprovalRequested {
-        message_id: Uuid,
-        inbox_id: Uuid,
-        approval_id: Uuid,
-    },
-    TrustChanged {
-        inbox_id: Uuid,
-        new_mode: String,
-        approved_count: i64,
-    },
+    MessageReceived { inbox_id: Uuid },
+    ApprovalRequested,
+    TrustChanged,
     Connected,
     Disconnected,
 }
@@ -122,32 +108,16 @@ fn parse_ws_event(text: &str) -> Option<WsEvent> {
     let msg: WsMessage = serde_json::from_str(text).ok()?;
     match msg.event.as_str() {
         "message.received" | "message.sent" | "message.classified" => {
-            let message_id = parse_uuid(&msg.data, "message_id")?;
             let inbox_id = parse_uuid(&msg.data, "inbox_id")?;
-            Some(WsEvent::MessageReceived {
-                message_id,
-                inbox_id,
-            })
+            Some(WsEvent::MessageReceived { inbox_id })
         }
         "approval.requested" => {
-            let message_id = parse_uuid(&msg.data, "message_id")?;
-            let inbox_id = parse_uuid(&msg.data, "inbox_id")?;
-            let approval_id = parse_uuid(&msg.data, "approval_id")?;
-            Some(WsEvent::ApprovalRequested {
-                message_id,
-                inbox_id,
-                approval_id,
-            })
+            parse_uuid(&msg.data, "approval_id")?;
+            Some(WsEvent::ApprovalRequested)
         }
         "trust.changed" => {
-            let inbox_id = parse_uuid(&msg.data, "inbox_id")?;
-            let new_mode = msg.data["new_mode"].as_str()?.to_string();
-            let approved_count = msg.data["approved_count"].as_i64()?;
-            Some(WsEvent::TrustChanged {
-                inbox_id,
-                new_mode,
-                approved_count,
-            })
+            parse_uuid(&msg.data, "inbox_id")?;
+            Some(WsEvent::TrustChanged)
         }
         _ => None,
     }
@@ -166,14 +136,7 @@ mod tests {
         let json = r#"{"event":"message.received","data":{"message_id":"550e8400-e29b-41d4-a716-446655440000","inbox_id":"660e8400-e29b-41d4-a716-446655440000"}}"#;
         let event = parse_ws_event(json).unwrap();
         match event {
-            WsEvent::MessageReceived {
-                message_id,
-                inbox_id,
-            } => {
-                assert_eq!(
-                    message_id.to_string(),
-                    "550e8400-e29b-41d4-a716-446655440000"
-                );
+            WsEvent::MessageReceived { inbox_id } => {
                 assert_eq!(inbox_id.to_string(), "660e8400-e29b-41d4-a716-446655440000");
             }
             _ => panic!("expected MessageReceived"),
@@ -191,32 +154,14 @@ mod tests {
     fn test_parse_approval_requested() {
         let json = r#"{"event":"approval.requested","data":{"message_id":"550e8400-e29b-41d4-a716-446655440000","inbox_id":"660e8400-e29b-41d4-a716-446655440000","approval_id":"770e8400-e29b-41d4-a716-446655440000"}}"#;
         let event = parse_ws_event(json).unwrap();
-        match event {
-            WsEvent::ApprovalRequested { approval_id, .. } => {
-                assert_eq!(
-                    approval_id.to_string(),
-                    "770e8400-e29b-41d4-a716-446655440000"
-                );
-            }
-            _ => panic!("expected ApprovalRequested"),
-        }
+        assert!(matches!(event, WsEvent::ApprovalRequested));
     }
 
     #[test]
     fn test_parse_trust_changed() {
         let json = r#"{"event":"trust.changed","data":{"inbox_id":"550e8400-e29b-41d4-a716-446655440000","new_mode":"auto_approve","approved_count":10}}"#;
         let event = parse_ws_event(json).unwrap();
-        match event {
-            WsEvent::TrustChanged {
-                new_mode,
-                approved_count,
-                ..
-            } => {
-                assert_eq!(new_mode, "auto_approve");
-                assert_eq!(approved_count, 10);
-            }
-            _ => panic!("expected TrustChanged"),
-        }
+        assert!(matches!(event, WsEvent::TrustChanged));
     }
 
     #[test]
@@ -238,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_parse_invalid_uuid() {
-        let json = r#"{"event":"message.received","data":{"message_id":"not-a-uuid","inbox_id":"660e8400-e29b-41d4-a716-446655440000"}}"#;
+        let json = r#"{"event":"message.received","data":{"message_id":"550e8400-e29b-41d4-a716-446655440000","inbox_id":"not-a-uuid"}}"#;
         assert!(parse_ws_event(json).is_none());
     }
 

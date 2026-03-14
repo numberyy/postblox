@@ -6,7 +6,7 @@ use crate::models::SenderReputation;
 pub struct SlopFields<'a> {
     pub score: f32,
     pub signals: &'a serde_json::Value,
-    pub category: Option<&'a str>,
+    pub category: &'a str,
     pub priority: &'a str,
     pub triage_status: &'a str,
     pub requires_action: bool,
@@ -117,7 +117,7 @@ mod tests {
         let fields = SlopFields {
             score: 0.45,
             signals: &signals,
-            category: Some("commercial"),
+            category: "commercial",
             priority: "normal",
             triage_status: "inbox",
             requires_action: false,

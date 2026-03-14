@@ -66,6 +66,49 @@ pub async fn list_by_inbox(
     .await
 }
 
+/// Find a thread by matching against In-Reply-To / References message IDs.
+/// O(reference_count) instead of O(inbox_size).
+pub async fn find_by_message_ids(
+    pool: &PgPool,
+    inbox_id: Uuid,
+    message_ids: &[&str],
+) -> Result<Option<Thread>, sqlx::Error> {
+    if message_ids.is_empty() {
+        return Ok(None);
+    }
+    sqlx::query_as(
+        "SELECT DISTINCT t.id, t.inbox_id, t.subject, t.message_count, t.last_message_at, t.created_at \
+         FROM threads t \
+         JOIN messages m ON m.thread_id = t.id \
+         WHERE t.inbox_id = $1 AND m.message_id_header = ANY($2) \
+         LIMIT 1",
+    )
+    .bind(inbox_id)
+    .bind(message_ids)
+    .fetch_optional(pool)
+    .await
+}
+
+/// List recent threads for subject-based matching (7-day window).
+pub async fn list_recent_by_inbox(
+    pool: &PgPool,
+    inbox_id: Uuid,
+    since: DateTime<Utc>,
+    limit: i64,
+) -> Result<Vec<Thread>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, inbox_id, subject, message_count, last_message_at, created_at \
+         FROM threads WHERE inbox_id = $1 AND last_message_at >= $2 \
+         ORDER BY last_message_at DESC NULLS LAST \
+         LIMIT $3",
+    )
+    .bind(inbox_id)
+    .bind(since)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn increment_message_count(
     pool: &PgPool,
     id: Uuid,

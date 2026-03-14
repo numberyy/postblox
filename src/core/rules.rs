@@ -160,12 +160,10 @@ fn extract_max_dollar_amount(subject: &str, body: &str) -> Option<f64> {
         while i < bytes.len() {
             if bytes[i] == b'$' {
                 i += 1;
-                // skip whitespace after $
                 while i < bytes.len() && bytes[i] == b' ' {
                     i += 1;
                 }
                 let start = i;
-                // consume digits, commas, dots
                 while i < bytes.len()
                     && (bytes[i].is_ascii_digit() || bytes[i] == b',' || bytes[i] == b'.')
                 {

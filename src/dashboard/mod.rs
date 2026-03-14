@@ -105,7 +105,6 @@ pub fn router(templates: Environment<'static>, state: AppState) -> axum::Router 
         .with_state(state)
 }
 
-/// Set if auth came from ?key= query param (not cookie). Handler should set cookie.
 #[derive(Clone)]
 struct SetCookieKey(Option<String>);
 
@@ -124,9 +123,13 @@ impl FromRequestParts<AppState> for DashboardOrg {
             .or_else(|| extract_key_from_query(parts))
             .ok_or_else(unauthorized)?;
 
-        let stored = crate::api::auth::validate_api_key(&state.pool, &key)
-            .await
-            .map_err(|()| unauthorized())?;
+        let stored = match crate::api::auth::validate_api_key(&state.pool, &key).await {
+            Ok(s) => s,
+            Err(crate::api::auth::AuthError::DatabaseError) => {
+                return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
+            Err(_) => return Err(unauthorized()),
+        };
 
         // If key came from query param, mark it so we set a cookie
         let needs_cookie = if from_cookie.is_none() {
@@ -169,7 +172,8 @@ fn maybe_set_cookie(
     mut response: Response,
 ) -> Response {
     if let Some(Extension(SetCookieKey(Some(key)))) = cookie_key {
-        let cookie = format!("postblox_key={key}; Path=/dashboard; HttpOnly; SameSite=Strict");
+        let cookie =
+            format!("postblox_key={key}; Path=/dashboard; HttpOnly; SameSite=Strict");
         if let Ok(val) = cookie.parse() {
             response.headers_mut().insert(header::SET_COOKIE, val);
         }
@@ -178,22 +182,21 @@ fn maybe_set_cookie(
 }
 
 fn render(tpl: &Templates, name: &str, ctx: minijinja::Value) -> Response {
-    match tpl.get_template(name) {
-        Ok(template) => match template.render(ctx) {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("template render error: {e}");
-                error_response("template render failed")
-            }
-        },
+    let template = match tpl.get_template(name) {
+        Ok(t) => t,
         Err(e) => {
             tracing::error!("template not found: {e}");
-            error_response("template not found")
+            return error_response("template not found");
+        }
+    };
+    match template.render(ctx) {
+        Ok(html) => Html(html).into_response(),
+        Err(e) => {
+            tracing::error!("template render error: {e}");
+            error_response("template render failed")
         }
     }
 }
-
-// --- Handlers ---
 
 async fn index() -> Redirect {
     Redirect::to("/dashboard/inboxes")
@@ -264,7 +267,7 @@ async fn inbox_detail(
         crate::db::messages::list_by_inbox(&state.pool, inbox.id, limit, 0),
     );
 
-    let perm = perm_result.ok().flatten();
+    let perm = log_err_default("permissions", perm_result);
     let send_mode = perm
         .as_ref()
         .map(|p| p.mode().to_string())
@@ -440,7 +443,9 @@ async fn approvals_list(
     DashboardOrg(org_id): DashboardOrg,
 ) -> Response {
     let pending =
-        match crate::db::approvals::list_pending_with_details(&state.pool, org_id, 100).await {
+        match crate::db::approvals::list_with_details(&state.pool, org_id, Some("pending"), 0, 100)
+            .await
+        {
             Ok(v) => v,
             Err(e) => return error_response(&e.to_string()),
         };
@@ -505,6 +510,12 @@ async fn approval_approve(
                     crate::db::messages::get_by_id(&state_clone.pool, msg_id),
                     crate::db::inboxes::get_by_id(&state_clone.pool, inbox_id),
                 );
+                if let Err(ref e) = msg_result {
+                    tracing::error!(approval_id = %id, message_id = %msg_id, "failed to fetch message for delivery: {e}");
+                }
+                if let Err(ref e) = inbox_result {
+                    tracing::error!(approval_id = %id, inbox_id = %inbox_id, "failed to fetch inbox for delivery: {e}");
+                }
                 if let (Ok(Some(msg)), Ok(Some(inbox))) = (msg_result, inbox_result) {
                     let (to, cc) = crate::api::deliver::extract_addrs(&msg);
                     if let Err(e) = crate::api::deliver::deliver_message(
@@ -519,10 +530,10 @@ async fn approval_approve(
                             subject: msg.subject.as_deref().unwrap_or(""),
                             text_body: msg.text_body.as_deref(),
                             html_body: msg.html_body.as_deref(),
-                            message_id_header: msg
+                            message_id_header: &msg
                                 .message_id_header
-                                .as_deref()
-                                .unwrap_or("unknown@postblox"),
+                                .clone()
+                                .unwrap_or_else(|| format!("{}@postblox", uuid::Uuid::new_v4())),
                         },
                     )
                     .await
@@ -717,8 +728,6 @@ async fn search_results(
     )
 }
 
-// --- Settings & Analytics handlers ---
-
 async fn settings_page(
     State(state): State<AppState>,
     Extension(tpl): Extension<Templates>,
@@ -846,12 +855,14 @@ async fn settings_change_mode(
         Err(_) => return bad_request("invalid send mode"),
     };
 
-    let existing_rules = crate::db::permissions::get_by_inbox(&state.pool, inbox.id)
-        .await
-        .ok()
-        .flatten()
-        .map(|p| p.rules)
-        .unwrap_or_else(|| serde_json::json!([]));
+    let existing_rules = match crate::db::permissions::get_by_inbox(&state.pool, inbox.id).await {
+        Ok(Some(p)) => p.rules,
+        Ok(None) => serde_json::json!([]),
+        Err(e) => {
+            tracing::error!(inbox_id = %inbox.id, "failed to fetch permissions: {e}");
+            return error_response("failed to load existing rules");
+        }
+    };
 
     let perm =
         match crate::db::permissions::upsert(&state.pool, inbox.id, mode, &existing_rules).await {
@@ -1007,9 +1018,10 @@ async fn analytics_page(
     )
 }
 
-// --- Static assets (embedded for Docker scratch) ---
-
-async fn static_css() -> (
+fn static_asset(
+    content_type: &'static str,
+    body: &'static str,
+) -> (
     StatusCode,
     [(header::HeaderName, &'static str); 2],
     &'static str,
@@ -1017,44 +1029,27 @@ async fn static_css() -> (
     (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "text/css"),
+            (header::CONTENT_TYPE, content_type),
             (header::CACHE_CONTROL, "public, max-age=86400"),
         ],
-        include_str!("../../static/style.css"),
+        body,
     )
 }
 
-async fn static_htmx() -> (
-    StatusCode,
-    [(header::HeaderName, &'static str); 2],
-    &'static str,
-) {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
+async fn static_css() -> impl IntoResponse {
+    static_asset("text/css", include_str!("../../static/style.css"))
+}
+
+async fn static_htmx() -> impl IntoResponse {
+    static_asset(
+        "application/javascript",
         include_str!("../../static/htmx.min.js"),
     )
 }
 
-async fn static_ws_js() -> (
-    StatusCode,
-    [(header::HeaderName, &'static str); 2],
-    &'static str,
-) {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
-        include_str!("../../static/ws.js"),
-    )
+async fn static_ws_js() -> impl IntoResponse {
+    static_asset("application/javascript", include_str!("../../static/ws.js"))
 }
-
-// --- Helpers ---
 
 fn messages_to_value(messages: &[crate::models::Message]) -> Vec<minijinja::Value> {
     messages
@@ -1082,11 +1077,7 @@ fn approval_row(id: Uuid, color: &str, bold: bool, msg: &str) -> Response {
 }
 
 fn not_found() -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        Html("<h1>404 Not Found</h1>".to_string()),
-    )
-        .into_response()
+    (StatusCode::NOT_FOUND, Html("<h1>404 Not Found</h1>")).into_response()
 }
 
 fn log_err_default<T: Default>(context: &str, result: Result<T, sqlx::Error>) -> T {

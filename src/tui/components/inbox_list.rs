@@ -5,7 +5,7 @@ use ratatui::widgets::{List, ListItem, ListState};
 use ratatui::Frame;
 
 use crate::components::{themed_block, truncate};
-use crate::theme::{Theme, ICON_APPROVAL, ICON_BRIEFING, ICON_INBOX, ICON_SEARCH};
+use crate::theme::{Theme, ICON_APPROVAL, ICON_BRIEFING, ICON_DRAFTS, ICON_INBOX, ICON_SEARCH};
 
 pub struct InboxList {
     pub items: Vec<SidebarItem>,
@@ -17,6 +17,7 @@ pub enum SidebarItem {
     Inbox { email: String, active: bool },
     Divider,
     Approvals { pending: usize },
+    Drafts,
     Briefing,
     Search,
 }
@@ -43,6 +44,7 @@ impl InboxList {
         items.push(SidebarItem::Approvals {
             pending: pending_approvals,
         });
+        items.push(SidebarItem::Drafts);
         items.push(SidebarItem::Briefing);
         items.push(SidebarItem::Search);
         self.items = items;
@@ -152,6 +154,10 @@ fn render_item<'a>(item: &SidebarItem, theme: &Theme) -> ListItem<'a> {
                 Style::default().fg(theme.fg),
             )]))
         }
+        SidebarItem::Drafts => ListItem::new(Line::from(vec![Span::styled(
+            format!("  {ICON_DRAFTS} Drafts"),
+            Style::default().fg(theme.fg),
+        )])),
         SidebarItem::Briefing => ListItem::new(Line::from(vec![Span::styled(
             format!("  {ICON_BRIEFING} Briefing"),
             Style::default().fg(theme.fg),
@@ -202,6 +208,7 @@ fn default_items() -> Vec<SidebarItem> {
         SidebarItem::AllInboxes,
         SidebarItem::Divider,
         SidebarItem::Approvals { pending: 0 },
+        SidebarItem::Drafts,
         SidebarItem::Briefing,
         SidebarItem::Search,
     ]
@@ -330,8 +337,8 @@ mod tests {
     #[test]
     fn test_default_items_structure() {
         let list = InboxList::new();
-        // AllInboxes, Divider, Approvals, Briefing, Search
-        assert_eq!(list.items.len(), 5);
+        // AllInboxes, Divider, Approvals, Drafts, Briefing, Search
+        assert_eq!(list.items.len(), 6);
         assert_eq!(list.inbox_count(), 1); // only AllInboxes
     }
 }

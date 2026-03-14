@@ -2,6 +2,13 @@ use sqlx::PgPool;
 
 use crate::models::Organization;
 
+pub async fn count(pool: &PgPool) -> Result<i64, sqlx::Error> {
+    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM organizations")
+        .fetch_one(pool)
+        .await?;
+    Ok(count)
+}
+
 pub async fn create(pool: &PgPool, name: &str) -> Result<Organization, sqlx::Error> {
     sqlx::query_as("INSERT INTO organizations (name) VALUES ($1) RETURNING id, name, created_at")
         .bind(name)

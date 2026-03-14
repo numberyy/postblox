@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
                 token,
                 config.stalwart_smtp_host.as_deref(),
                 config.stalwart_smtp_port,
-            ))
+            )?)
         }
         _ => {
             tracing::info!("stalwart not configured, email delivery disabled");
@@ -35,8 +35,7 @@ async fn main() -> anyhow::Result<()> {
 
     let webhook_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .expect("failed to build webhook client");
+        .build()?;
 
     let mut guard_patterns = mail::guard::default_patterns();
     if let Some(custom) = &config.guard_patterns {
@@ -59,13 +58,15 @@ async fn main() -> anyhow::Result<()> {
                     .as_deref()
                     .unwrap_or("text-embedding-3-small");
                 tracing::info!("embedding provider: {url}, model: {model}");
+                let dimension = config.embedding_dimension.unwrap_or(768);
+                tracing::info!("embedding dimension: {dimension}");
                 Some(std::sync::Arc::new(
                     embeddings::openai::OpenAiProvider::new(
                         url,
                         model,
                         config.embedding_api_key.clone(),
-                        768,
-                    ),
+                        dimension,
+                    )?,
                 ))
             }
             None => {

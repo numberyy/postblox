@@ -7,19 +7,19 @@ database_url = "postgres://postblox:postblox@localhost:5432/postblox"
 # stalwart_admin_user = "admin"
 # stalwart_admin_token = "your-admin-password"
 # stalwart_inbound_token = "your-inbound-webhook-token"
+# stalwart_smtp_host = "localhost"
+# stalwart_smtp_port = 25
 
 # embedding_url = "http://localhost:11434/v1/embeddings"
 # embedding_model = "nomic-embed-text"
 # embedding_api_key = "optional-api-key"
+# embedding_dimension = 768
 
 # trust_auto_upgrade_threshold = 10
 
-# [relay]
-# host = "smtp.example.com"
-# port = 587
-# username = "user@example.com"
-# password = "your-password"
-# starttls = true
+# [rate_limit]
+# requests_per_minute = 60
+# requests_per_hour = 1000
 
 # [[guard_patterns]]
 # name = "block-marketing"

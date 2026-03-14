@@ -67,7 +67,10 @@ impl BriefingPanel {
     }
 
     pub fn scroll_down(&mut self) {
-        self.scroll = self.scroll.saturating_add(1);
+        let max = self.lines.len().saturating_sub(1) as u16;
+        if self.scroll < max {
+            self.scroll = self.scroll.saturating_add(1);
+        }
     }
 
     pub fn scroll_up(&mut self) {
@@ -161,6 +164,7 @@ mod tests {
     #[test]
     fn test_scroll() {
         let mut b = BriefingPanel::new();
+        b.set_data(&sample_briefing());
         b.scroll_down();
         assert_eq!(b.scroll, 1);
         b.scroll_up();

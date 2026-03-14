@@ -16,10 +16,11 @@ use ratatui::Terminal;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
-use crate::client::{Approval, Briefing, Inbox, Message, PostbloxClient};
+use crate::client::{Approval, Briefing, Draft, Inbox, Message, PostbloxClient};
 use crate::components::approvals::ApprovalPanel;
 use crate::components::briefing::BriefingPanel;
-use crate::components::compose::{Compose, ComposeField};
+use crate::components::compose::Compose;
+use crate::components::drafts::DraftPanel;
 use crate::components::inbox_list::InboxList;
 use crate::components::message_list::MessageList;
 use crate::components::preview::Preview;
@@ -46,6 +47,7 @@ enum AppMsg {
     InboxesLoaded(Result<Vec<Inbox>, String>),
     MessagesLoaded(Result<Vec<Message>, String>),
     ApprovalsLoaded(Result<Vec<Approval>, String>),
+    DraftsLoaded(Result<Vec<Draft>, String>),
     BriefingLoaded(Result<Briefing, String>),
     SearchResults(Result<Vec<Message>, String>),
     MessageSent(Result<(), String>),
@@ -55,6 +57,7 @@ enum AppMsg {
         result: Result<(), String>,
     },
     ThreadLoaded(Result<Vec<Message>, String>),
+    ApprovalMessageLoaded(Result<Message, String>),
     Ws(WsEvent),
 }
 
@@ -62,6 +65,7 @@ enum Command {
     LoadInboxes,
     LoadMessages(Uuid),
     LoadApprovals,
+    LoadDrafts(Uuid),
     LoadBriefing,
     SendMessage {
         inbox_id: Uuid,
@@ -76,6 +80,10 @@ enum Command {
         inbox_id: Uuid,
         thread_id: Uuid,
     },
+    LoadApprovalMessage {
+        inbox_id: Uuid,
+        message_id: Uuid,
+    },
 }
 
 pub struct App {
@@ -85,6 +93,7 @@ pub struct App {
     preview: Preview,
     compose: Compose,
     approvals: ApprovalPanel,
+    drafts: DraftPanel,
     search: SearchPanel,
     briefing: BriefingPanel,
     status_bar: StatusBar,
@@ -120,6 +129,7 @@ pub struct App {
 enum SidebarView {
     Inboxes,
     Approvals,
+    Drafts,
     Briefing,
     Search,
 }
@@ -135,6 +145,7 @@ impl App {
             preview: Preview::new(),
             compose: Compose::new(),
             approvals: ApprovalPanel::new(),
+            drafts: DraftPanel::new(),
             search: SearchPanel::new(),
             briefing: BriefingPanel::new(),
             status_bar: StatusBar::new(config.vim_mode),
@@ -170,7 +181,6 @@ impl App {
         let mut event_stream = EventStream::new();
         let tick_rate = Duration::from_millis(250);
 
-        // Load initial data
         self.dispatch(Command::LoadInboxes);
         self.dispatch(Command::LoadApprovals);
         self.dispatch(Command::LoadBriefing);
@@ -183,7 +193,7 @@ impl App {
 
             enum Tick {
                 Key(crossterm::event::KeyEvent),
-                Msg(AppMsg),
+                Msg(Box<AppMsg>),
                 Timeout,
             }
 
@@ -195,10 +205,9 @@ impl App {
                         _ => Tick::Timeout,
                     }
                 }
-                Some(msg) = msg_rx.recv() => Tick::Msg(msg),
+                Some(msg) = msg_rx.recv() => Tick::Msg(Box::new(msg)),
             };
 
-            // Check search debounce on every iteration
             if let Some(deadline) = self.search_deadline {
                 if tokio::time::Instant::now() >= deadline {
                     self.search_deadline = None;
@@ -215,7 +224,7 @@ impl App {
                         self.dispatch(cmd);
                     }
                 }
-                Tick::Msg(msg) => self.handle_msg(msg),
+                Tick::Msg(msg) => self.handle_msg(*msg),
                 Tick::Timeout => {}
             }
         }
@@ -287,7 +296,11 @@ impl App {
                     let _ = tx.send(AppMsg::MessageSent(result)).await;
                 }
                 Command::Approve(id) => {
-                    let result = client.approve(id).await.map_err(|e| e.to_string());
+                    let result = client
+                        .approve(id)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string());
                     let _ = tx
                         .send(AppMsg::ApprovalActioned {
                             id,
@@ -297,7 +310,11 @@ impl App {
                         .await;
                 }
                 Command::Reject(id) => {
-                    let result = client.reject(id).await.map_err(|e| e.to_string());
+                    let result = client
+                        .reject(id)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string());
                     let _ = tx
                         .send(AppMsg::ApprovalActioned {
                             id,
@@ -309,6 +326,23 @@ impl App {
                 Command::Search(query) => {
                     let result = client.search(&query).await.map_err(|e| e.to_string());
                     let _ = tx.send(AppMsg::SearchResults(result)).await;
+                }
+                Command::LoadDrafts(inbox_id) => {
+                    let result = client
+                        .list_drafts(inbox_id)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(AppMsg::DraftsLoaded(result)).await;
+                }
+                Command::LoadApprovalMessage {
+                    inbox_id,
+                    message_id,
+                } => {
+                    let result = client
+                        .get_message(inbox_id, message_id)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(AppMsg::ApprovalMessageLoaded(result)).await;
                 }
                 Command::LoadThread {
                     inbox_id,
@@ -355,6 +389,15 @@ impl App {
             }
             AppMsg::ApprovalsLoaded(Err(e)) => {
                 self.status_text = Some(format!("Failed to load approvals: {e}"));
+                self.update_status_bar();
+            }
+            AppMsg::DraftsLoaded(Ok(drafts)) => {
+                self.drafts.set_entries(&drafts);
+                self.status_text = None;
+                self.update_status_bar();
+            }
+            AppMsg::DraftsLoaded(Err(e)) => {
+                self.status_text = Some(format!("Failed to load drafts: {e}"));
                 self.update_status_bar();
             }
             AppMsg::BriefingLoaded(Ok(briefing)) => {
@@ -404,25 +447,48 @@ impl App {
                 self.status_text = Some(format!("{action} failed: {e}"));
                 self.update_status_bar();
             }
+            AppMsg::ApprovalMessageLoaded(Ok(msg)) => {
+                if self.sidebar_view == SidebarView::Approvals {
+                    self.preview.set_content(
+                        &msg.from_addr,
+                        msg.subject.as_deref().unwrap_or("(no subject)"),
+                        &msg.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                        msg.text_body.as_deref().unwrap_or(""),
+                    );
+                }
+            }
+            AppMsg::ApprovalMessageLoaded(Err(e)) => {
+                self.status_text = Some(format!("Failed to load approval message: {e}"));
+                self.update_status_bar();
+            }
             AppMsg::ThreadLoaded(Ok(messages)) => {
+                let count = messages.len();
                 let mut body = String::new();
-                for msg in &messages {
+                for (i, msg) in messages.iter().enumerate() {
+                    body.push_str(&format!(
+                        "── Message {}/{} ──────────────────────────────\n",
+                        i + 1,
+                        count
+                    ));
                     body.push_str(&format!("From: {}\n", msg.from_addr));
                     body.push_str(&format!(
-                        "Date: {}\n",
+                        "Date: {}\n\n",
                         msg.created_at.format("%Y-%m-%d %H:%M")
                     ));
-                    body.push_str(&"─".repeat(40));
-                    body.push('\n');
                     if let Some(ref text) = msg.text_body {
                         body.push_str(text);
                     }
                     body.push_str("\n\n");
                 }
                 if let Some(first) = messages.first() {
+                    let title = format!(
+                        "{} (Thread: {} messages)",
+                        first.subject.as_deref().unwrap_or("(no subject)"),
+                        count
+                    );
                     self.preview.set_content(
                         &first.from_addr,
-                        first.subject.as_deref().unwrap_or("(no subject)"),
+                        &title,
                         &first.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
                         &body,
                     );
@@ -439,15 +505,15 @@ impl App {
             AppMsg::Ws(WsEvent::Disconnected) => {
                 self.status_bar.connected = false;
             }
-            AppMsg::Ws(WsEvent::MessageReceived { inbox_id, .. }) => {
+            AppMsg::Ws(WsEvent::MessageReceived { inbox_id }) => {
                 if self.selected_inbox_id == Some(inbox_id) {
                     self.dispatch(Command::LoadMessages(inbox_id));
                 }
             }
-            AppMsg::Ws(WsEvent::ApprovalRequested { .. }) => {
+            AppMsg::Ws(WsEvent::ApprovalRequested) => {
                 self.dispatch(Command::LoadApprovals);
             }
-            AppMsg::Ws(WsEvent::TrustChanged { .. }) => {
+            AppMsg::Ws(WsEvent::TrustChanged) => {
                 self.dispatch(Command::LoadApprovals);
             }
         }
@@ -468,19 +534,38 @@ impl App {
     }
 
     fn update_preview(&mut self) {
-        if self.sidebar_view != SidebarView::Inboxes {
-            return;
-        }
-        let idx = self.message_list.selected();
-        if let Some(msg) = self.displayed_messages.get(idx) {
-            self.preview.set_content(
-                &msg.from_addr,
-                msg.subject.as_deref().unwrap_or("(no subject)"),
-                &msg.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-                msg.text_body.as_deref().unwrap_or(""),
-            );
-        } else {
-            self.preview.set_content("", "", "", "");
+        match self.sidebar_view {
+            SidebarView::Inboxes => {
+                let idx = self.message_list.selected();
+                if let Some(msg) = self.displayed_messages.get(idx) {
+                    self.preview.set_content(
+                        &msg.from_addr,
+                        msg.subject.as_deref().unwrap_or("(no subject)"),
+                        &msg.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                        msg.text_body.as_deref().unwrap_or(""),
+                    );
+                } else {
+                    self.preview
+                        .set_content("", "", "", "Select an inbox to view messages");
+                }
+            }
+            SidebarView::Approvals => {
+                let idx = self.approvals.selected();
+                if let Some(approval) = self.approval_data.get(idx) {
+                    self.preview.set_content(
+                        approval.from_addr.as_deref().unwrap_or(""),
+                        approval.subject.as_deref().unwrap_or("(no subject)"),
+                        &approval.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                        "Press y to approve, n to reject",
+                    );
+                    // Load full message body
+                    self.dispatch(Command::LoadApprovalMessage {
+                        inbox_id: approval.inbox_id,
+                        message_id: approval.message_id,
+                    });
+                }
+            }
+            _ => {}
         }
     }
 
@@ -521,10 +606,7 @@ impl App {
                     _ => {}
                 }
             } else {
-                match self.compose.field {
-                    ComposeField::Body => self.compose.handle_key_for_body(key),
-                    _ => self.compose.handle_key_for_header(key),
-                }
+                self.compose.handle_key(key);
             }
             return None;
         }
@@ -587,13 +669,24 @@ impl App {
                 self.move_bottom();
                 self.update_preview();
             }
-            Action::PanelLeft => self.focus = Panel::Sidebar,
+            Action::PanelLeft => self.cycle_focus_back(),
             Action::PanelRight => {
-                self.focus = if self.focus == Panel::Sidebar {
-                    Panel::MessageList
-                } else {
-                    Panel::Preview
-                };
+                if self.focus == Panel::Sidebar {
+                    // If current inbox is already loaded, just move focus
+                    let idx = self.inbox_list.logical_selected();
+                    let inboxes_count = self.inbox_list.inbox_count();
+                    if idx > 0 && idx < inboxes_count {
+                        let inbox_id = self.inboxes.get(idx - 1).map(|i| i.id);
+                        if inbox_id == self.selected_inbox_id
+                            && self.sidebar_view == SidebarView::Inboxes
+                        {
+                            self.focus = Panel::MessageList;
+                            return None;
+                        }
+                    }
+                    return self.handle_select();
+                }
+                self.cycle_focus();
             }
             Action::CyclePanel => self.cycle_focus(),
             Action::CyclePanelBack => self.cycle_focus_back(),
@@ -618,20 +711,34 @@ impl App {
             Action::ShowBriefing => {
                 self.sidebar_view = SidebarView::Briefing;
                 self.focus = Panel::MessageList;
+                self.preview.set_content("", "", "", "");
+                self.status_text = Some("Briefing".into());
+                self.update_status_bar();
                 return Some(Command::LoadBriefing);
             }
             Action::ShowAllInboxes => {
                 self.sidebar_view = SidebarView::Inboxes;
+                self.selected_inbox_id = None;
                 self.inbox_list.select_first();
+                self.messages.clear();
+                self.refresh_message_display();
+                self.status_text = None;
+                self.update_status_bar();
+                self.focus = Panel::Sidebar;
             }
             Action::SlopToggle => {
                 self.show_slop = !self.show_slop;
                 self.refresh_message_display();
             }
+            Action::Refresh => return self.handle_refresh(),
             Action::ApproveSelected => return self.handle_approve(),
             Action::RejectSelected => return self.handle_reject(),
             Action::QuickJump(n) => {
-                self.inbox_list.select(n as usize);
+                let idx = n as usize;
+                self.inbox_list.select(idx);
+                if self.focus == Panel::Sidebar {
+                    return self.handle_select();
+                }
             }
         }
 
@@ -672,11 +779,42 @@ impl App {
         Some(Command::Reject(approval.id))
     }
 
+    fn handle_refresh(&mut self) -> Option<Command> {
+        self.status_text = Some("Refreshing…".into());
+        self.update_status_bar();
+        match self.sidebar_view {
+            SidebarView::Inboxes => {
+                self.dispatch(Command::LoadInboxes);
+                if let Some(id) = self.selected_inbox_id {
+                    return Some(Command::LoadMessages(id));
+                }
+            }
+            SidebarView::Approvals => return Some(Command::LoadApprovals),
+            SidebarView::Drafts => {
+                if let Some(id) = self
+                    .selected_inbox_id
+                    .or_else(|| self.inboxes.first().map(|i| i.id))
+                {
+                    return Some(Command::LoadDrafts(id));
+                }
+            }
+            SidebarView::Briefing => return Some(Command::LoadBriefing),
+            SidebarView::Search => {
+                let query = self.search.query.clone();
+                if !query.is_empty() {
+                    return Some(Command::Search(query));
+                }
+            }
+        }
+        None
+    }
+
     fn move_up(&mut self) {
         match self.focus {
             Panel::Sidebar => self.inbox_list.select_prev(),
             Panel::MessageList => match self.sidebar_view {
                 SidebarView::Approvals => self.approvals.select_prev(),
+                SidebarView::Drafts => self.drafts.select_prev(),
                 SidebarView::Search => self.search.select_prev(),
                 _ => self.message_list.select_prev(),
             },
@@ -692,6 +830,7 @@ impl App {
             Panel::Sidebar => self.inbox_list.select_next(),
             Panel::MessageList => match self.sidebar_view {
                 SidebarView::Approvals => self.approvals.select_next(),
+                SidebarView::Drafts => self.drafts.select_next(),
                 SidebarView::Search => self.search.select_next(),
                 _ => self.message_list.select_next(),
             },
@@ -714,7 +853,9 @@ impl App {
         match self.focus {
             Panel::Sidebar => self.inbox_list.select_last(),
             Panel::MessageList => self.message_list.select_last(),
-            Panel::Preview => {}
+            Panel::Preview => {
+                self.preview.scroll = self.preview.body.lines().count().saturating_sub(1) as u16;
+            }
         }
     }
 
@@ -740,7 +881,6 @@ impl App {
             let inboxes_count = self.inbox_list.inbox_count();
             if idx < inboxes_count {
                 if idx == 0 {
-                    // All Inboxes
                     self.selected_inbox_id = None;
                     self.messages.clear();
                     self.refresh_message_display();
@@ -749,6 +889,7 @@ impl App {
                     let inbox_id = self.inboxes.get(idx - 1).map(|i| i.id);
                     if let Some(id) = inbox_id {
                         self.selected_inbox_id = Some(id);
+                        self.status_text = Some("Loading…".into());
                         self.update_status_bar();
                         self.sidebar_view = SidebarView::Inboxes;
                         self.focus = Panel::MessageList;
@@ -763,23 +904,46 @@ impl App {
                     0 => {
                         self.sidebar_view = SidebarView::Approvals;
                         self.focus = Panel::MessageList;
+                        self.preview
+                            .set_content("", "", "", "Select an approval to preview");
+                        self.status_text = Some("Approvals".into());
+                        self.update_status_bar();
                         return Some(Command::LoadApprovals);
                     }
                     1 => {
-                        self.sidebar_view = SidebarView::Briefing;
+                        self.sidebar_view = SidebarView::Drafts;
                         self.focus = Panel::MessageList;
-                        return Some(Command::LoadBriefing);
+                        self.preview
+                            .set_content("", "", "", "Select a draft to preview");
+                        self.status_text = Some("Drafts".into());
+                        self.update_status_bar();
+                        if let Some(id) = self
+                            .selected_inbox_id
+                            .or_else(|| self.inboxes.first().map(|i| i.id))
+                        {
+                            return Some(Command::LoadDrafts(id));
+                        }
                     }
                     2 => {
+                        self.sidebar_view = SidebarView::Briefing;
+                        self.focus = Panel::MessageList;
+                        self.preview.set_content("", "", "", "");
+                        self.status_text = Some("Briefing".into());
+                        self.update_status_bar();
+                        return Some(Command::LoadBriefing);
+                    }
+                    3 => {
                         self.mode = Mode::Search;
                         self.sidebar_view = SidebarView::Search;
+                        self.preview.set_content("", "", "", "");
+                        self.status_text = Some("Search".into());
+                        self.update_status_bar();
                     }
                     _ => {}
                 }
             }
         }
 
-        // Enter on message list: load thread if available
         if self.focus == Panel::MessageList && self.sidebar_view == SidebarView::Inboxes {
             let idx = self.message_list.selected();
             if let Some(msg) = self.displayed_messages.get(idx) {
@@ -802,9 +966,18 @@ impl App {
             return;
         }
         match self.sidebar_view {
-            SidebarView::Approvals | SidebarView::Briefing | SidebarView::Search => {
+            SidebarView::Search => {
+                self.search.clear();
                 self.sidebar_view = SidebarView::Inboxes;
                 self.focus = Panel::Sidebar;
+                self.status_text = None;
+                self.update_status_bar();
+            }
+            SidebarView::Approvals | SidebarView::Drafts | SidebarView::Briefing => {
+                self.sidebar_view = SidebarView::Inboxes;
+                self.focus = Panel::Sidebar;
+                self.status_text = None;
+                self.update_status_bar();
             }
             SidebarView::Inboxes => {
                 if self.focus != Panel::Sidebar {
@@ -839,6 +1012,14 @@ impl App {
                     self.focus == Panel::MessageList,
                 );
             }
+            SidebarView::Drafts => {
+                self.drafts.render(
+                    frame,
+                    layout.message_list,
+                    theme,
+                    self.focus == Panel::MessageList,
+                );
+            }
             SidebarView::Briefing => {
                 self.briefing.render(
                     frame,
@@ -858,8 +1039,7 @@ impl App {
         }
 
         if self.mode == Mode::Compose {
-            self.compose
-                .render(frame, layout.preview, theme, self.focus == Panel::Preview);
+            self.compose.render(frame, layout.preview, theme);
         } else {
             self.preview
                 .render(frame, layout.preview, theme, self.focus == Panel::Preview);
@@ -880,7 +1060,7 @@ impl App {
 
 fn render_help_overlay(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
     let help_w = 50.min(area.width.saturating_sub(4));
-    let help_h = 18.min(area.height.saturating_sub(4));
+    let help_h = 22.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(help_w)) / 2;
     let y = (area.height.saturating_sub(help_h)) / 2;
     let help_area = Rect::new(x, y, help_w, help_h);
@@ -899,7 +1079,7 @@ fn render_help_overlay(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
         "  Tab/Shift+Tab   Cycle panels",
         "  h/l or ←/→     Switch panels",
         "  g/G             Top/bottom",
-        "  1-9             Quick jump",
+        "  1-9             Quick jump to inbox",
         "",
         "  Actions",
         "  Enter           Select",
@@ -909,6 +1089,10 @@ fn render_help_overlay(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
         "  / or Ctrl+F     Search",
         "  Ctrl+Enter      Send message",
         "  y/n             Approve/reject",
+        "  R               Refresh",
+        "  s               Toggle slop filter",
+        "  b               Briefing",
+        "  a               All Inboxes",
         "  q or Ctrl+C     Quit",
     ];
 

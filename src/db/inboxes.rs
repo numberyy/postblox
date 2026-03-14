@@ -40,6 +40,18 @@ pub async fn get_by_email(pool: &PgPool, email: &str) -> Result<Option<Inbox>, s
     .await
 }
 
+pub async fn get_first_by_emails(
+    pool: &PgPool,
+    emails: &[&str],
+) -> Result<Option<Inbox>, sqlx::Error> {
+    sqlx::query_as(&format!(
+        "SELECT {SELECT_COLS} FROM inboxes WHERE email = ANY($1) LIMIT 1"
+    ))
+    .bind(emails)
+    .fetch_optional(pool)
+    .await
+}
+
 pub async fn list_by_org(pool: &PgPool, org_id: Uuid) -> Result<Vec<Inbox>, sqlx::Error> {
     sqlx::query_as(&format!(
         "SELECT {SELECT_COLS} FROM inboxes WHERE org_id = $1 ORDER BY created_at"

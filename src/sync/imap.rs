@@ -104,7 +104,6 @@ pub async fn one_shot_sync(
         .await
         .map_err(|e| SyncError::Protocol(e.to_string()))?;
 
-    // Collect parsed messages first, then batch-dedup
     struct ParsedMsg {
         message_id: Option<String>,
         create_msg: crate::models::CreateMessage,
@@ -136,7 +135,6 @@ pub async fn one_shot_sync(
     }
     drop(messages);
 
-    // Batch dedup: collect all message_ids, query once
     let mids: Vec<&str> = parsed_msgs
         .iter()
         .filter_map(|m| m.message_id.as_deref())

@@ -12,18 +12,22 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    pub fn new(base_url: &str, model: &str, api_key: Option<String>, dimensions: usize) -> Self {
+    pub fn new(
+        base_url: &str,
+        model: &str,
+        api_key: Option<String>,
+        dimensions: usize,
+    ) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("failed to build embedding http client");
-        Self {
+            .build()?;
+        Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key,
             dimensions,
-        }
+        })
     }
 }
 
@@ -95,13 +99,14 @@ mod tests {
 
     #[test]
     fn test_provider_new_trims_trailing_slash() {
-        let p = OpenAiProvider::new("http://localhost:11434/", "nomic-embed-text", None, 768);
+        let p =
+            OpenAiProvider::new("http://localhost:11434/", "nomic-embed-text", None, 768).unwrap();
         assert_eq!(p.base_url, "http://localhost:11434");
     }
 
     #[test]
     fn test_provider_new_preserves_clean_url() {
-        let p = OpenAiProvider::new("http://localhost:11434", "test-model", None, 384);
+        let p = OpenAiProvider::new("http://localhost:11434", "test-model", None, 384).unwrap();
         assert_eq!(p.base_url, "http://localhost:11434");
         assert_eq!(p.model, "test-model");
         assert_eq!(p.dimensions, 384);

@@ -24,8 +24,7 @@ pub async fn list(
     AuthOrg { org_id, .. }: AuthOrg,
     Query(params): Query<AuditQueryParams>,
 ) -> Result<Json<Vec<AuditEntry>>, ApiError> {
-    let limit = params.limit.unwrap_or(50).clamp(1, 100);
-    let offset = params.offset.unwrap_or(0).max(0);
+    let (limit, offset) = super::clamp_pagination_raw(params.limit, params.offset);
 
     let entries = crate::db::audit::list_entries(
         &state.pool,

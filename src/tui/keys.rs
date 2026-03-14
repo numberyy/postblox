@@ -25,6 +25,7 @@ pub enum Action {
     SlopToggle,
     ApproveSelected,
     RejectSelected,
+    Refresh,
     QuickJump(u8),
 }
 
@@ -100,6 +101,7 @@ pub fn resolve(key: KeyEvent, mode: Mode, focus: Panel, vim_mode: bool) -> Optio
         KeyCode::Char('b') => Some(Action::ShowBriefing),
         KeyCode::Char('a') => Some(Action::ShowAllInboxes),
         KeyCode::Char('q') => Some(Action::Quit),
+        KeyCode::Char('R') => Some(Action::Refresh),
         KeyCode::Char('y') if focus == Panel::MessageList => Some(Action::ApproveSelected),
         KeyCode::Char('n') if focus == Panel::MessageList => Some(Action::RejectSelected),
         KeyCode::Char(c @ '1'..='9') => Some(Action::QuickJump(c as u8 - b'0')),

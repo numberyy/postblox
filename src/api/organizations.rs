@@ -27,24 +27,65 @@ pub async fn bootstrap(
         return Err(ApiError::BadRequest("name is required".into()));
     }
 
-    let org = crate::db::organizations::create(&state.pool, name)
+    let mut tx = state
+        .pool
+        .begin()
         .await
-        .map_err(ApiError::from_sqlx)?;
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let gk = generate_api_key();
-    let key = crate::db::api_keys::create(
-        &state.pool,
-        org.id,
-        &gk.key_hash,
-        &gk.prefix,
-        Some("default"),
+    // Advisory lock prevents concurrent bootstrap race
+    sqlx::query("SELECT pg_advisory_xact_lock(42)")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM organizations")
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if count > 0 {
+        return Err(ApiError::Forbidden(
+            "bootstrap disabled: organization already exists".into(),
+        ));
+    }
+
+    let org: crate::models::Organization = sqlx::query_as(
+        "INSERT INTO organizations (name) VALUES ($1) RETURNING id, name, created_at",
     )
+    .bind(name)
+    .fetch_one(&mut *tx)
     .await
     .map_err(ApiError::from_sqlx)?;
 
-    crate::db::members::ensure_admin_exists(&state.pool, org.id, key.id)
+    let gk = generate_api_key();
+    let key: crate::models::ApiKey = sqlx::query_as(
+        "INSERT INTO api_keys (org_id, key_hash, prefix, name) \
+         VALUES ($1, $2, $3, $4) \
+         RETURNING id, org_id, key_hash, prefix, name, created_at, last_used_at",
+    )
+    .bind(org.id)
+    .bind(&gk.key_hash)
+    .bind(&gk.prefix)
+    .bind("default")
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(ApiError::from_sqlx)?;
+
+    let _: crate::models::OrgMember = sqlx::query_as(
+        "INSERT INTO org_members (org_id, api_key_id, role) \
+         VALUES ($1, $2, 'admin') \
+         ON CONFLICT (org_id, api_key_id) DO UPDATE SET role = org_members.role \
+         RETURNING id, org_id, api_key_id, role, created_at",
+    )
+    .bind(org.id)
+    .bind(key.id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(ApiError::from_sqlx)?;
+
+    tx.commit()
         .await
-        .map_err(ApiError::from_sqlx)?;
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     Ok((
         StatusCode::CREATED,

@@ -113,6 +113,15 @@ impl SearchPanel {
         }
 
         let inner = block.inner(area);
+        let has_snippet = inner.height > 3;
+        let list_area = if has_snippet {
+            Rect {
+                height: inner.height.saturating_sub(1),
+                ..inner
+            }
+        } else {
+            inner
+        };
 
         let items: Vec<ListItem> = self
             .results
@@ -139,12 +148,11 @@ impl SearchPanel {
 
         frame.render_stateful_widget(list, area, &mut self.state);
 
-        // Show snippet for selected
-        if let Some(idx) = self.state.selected() {
-            if let Some(result) = self.results.get(idx) {
-                if inner.height > 2 {
+        if has_snippet {
+            if let Some(idx) = self.state.selected() {
+                if let Some(result) = self.results.get(idx) {
                     let snippet_area = Rect {
-                        y: inner.y + inner.height.saturating_sub(1),
+                        y: list_area.y + list_area.height,
                         height: 1,
                         ..inner
                     };

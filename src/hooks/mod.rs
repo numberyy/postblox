@@ -271,7 +271,6 @@ mod tests {
     async fn test_run_before_send_block_action() {
         let hooks = vec![HookConfig {
             event: "before_send".into(),
-            // Output valid JSON with action=block
             command: "bash".into(),
             args: vec![
                 "-c".into(),

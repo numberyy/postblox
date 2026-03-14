@@ -21,9 +21,15 @@ impl FromRequestParts<AppState> for AuthOrg {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let token = extract_bearer_token(parts)?;
-        let auth_info = validate_api_key(&state.pool, &token)
-            .await
-            .map_err(|()| ApiError::Unauthorized)?;
+        let auth_info = match validate_api_key(&state.pool, &token).await {
+            Ok(info) => info,
+            Err(AuthError::Invalid) => return Err(ApiError::Unauthorized),
+            Err(AuthError::DatabaseError) => {
+                return Err(ApiError::Internal(
+                    "authentication service unavailable".into(),
+                ))
+            }
+        };
 
         // Best-effort update; auth must not fail if this write fails.
         let pool = state.pool.clone();
@@ -75,22 +81,30 @@ fn extract_bearer_token(parts: &Parts) -> Result<String, ApiError> {
     Ok(token.to_string())
 }
 
+pub enum AuthError {
+    Invalid,
+    DatabaseError,
+}
+
 pub async fn validate_api_key(
     pool: &sqlx::PgPool,
     key: &str,
-) -> Result<crate::db::api_keys::AuthKeyInfo, ()> {
+) -> Result<crate::db::api_keys::AuthKeyInfo, AuthError> {
     if key.len() < 8 || !key.starts_with("pb_") {
-        return Err(());
+        return Err(AuthError::Invalid);
     }
     let prefix = &key[..8];
-    let stored = crate::db::api_keys::find_by_prefix_with_role(pool, prefix)
-        .await
-        .ok()
-        .flatten()
-        .ok_or(())?;
+    let stored = match crate::db::api_keys::find_by_prefix_with_role(pool, prefix).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return Err(AuthError::Invalid),
+        Err(e) => {
+            tracing::error!("database error during API key validation: {e}");
+            return Err(AuthError::DatabaseError);
+        }
+    };
     let token_hash = hash_key(key);
     if !constant_time_eq(token_hash.as_bytes(), stored.key_hash.as_bytes()) {
-        return Err(());
+        return Err(AuthError::Invalid);
     }
     Ok(stored)
 }

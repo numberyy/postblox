@@ -131,7 +131,6 @@ pub async fn dispatch(
     hooks: &[crate::hooks::HookConfig],
     ws_hub: &websocket::WebSocketHub,
 ) {
-    // Fire notifications for relevant events
     match &event {
         PostbloxEvent::ApprovalRequested {
             message_id,

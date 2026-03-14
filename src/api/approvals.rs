@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::auth::AuthOrg;
 use super::error::ApiError;
 use super::AppState;
-use crate::models::{Approval, ApprovalStatus};
+use crate::models::{Approval, ApprovalStatus, ApprovalWithDetails};
 
 pub async fn record_trust_and_maybe_upgrade(
     state: &AppState,
@@ -84,11 +84,10 @@ pub async fn list(
     State(state): State<AppState>,
     AuthOrg { org_id, .. }: AuthOrg,
     Query(params): Query<ApprovalListParams>,
-) -> Result<Json<Vec<Approval>>, ApiError> {
-    let limit = params.limit.unwrap_or(50).clamp(1, 100);
-    let offset = params.offset.unwrap_or(0).max(0);
+) -> Result<Json<Vec<ApprovalWithDetails>>, ApiError> {
+    let (limit, offset) = super::clamp_pagination_raw(params.limit, params.offset);
 
-    let approvals = crate::db::approvals::list_by_status(
+    let approvals = crate::db::approvals::list_with_details(
         &state.pool,
         org_id,
         params.status.as_deref(),
@@ -148,10 +147,10 @@ pub async fn approve(
             subject: msg.subject.as_deref().unwrap_or(""),
             text_body: msg.text_body.as_deref(),
             html_body: msg.html_body.as_deref(),
-            message_id_header: msg
+            message_id_header: &msg
                 .message_id_header
-                .as_deref()
-                .unwrap_or("unknown@postblox"),
+                .clone()
+                .unwrap_or_else(|| format!("{}@postblox", uuid::Uuid::new_v4())),
         },
     )
     .await?;
@@ -263,15 +262,26 @@ pub async fn batch(
                 );
                 let msg = match msg_result {
                     Ok(Some(m)) => m,
-                    _ => {
+                    Ok(None) => {
                         tracing::error!("batch approve: message {} not found", d.message_id);
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "batch approve: failed to fetch message {}: {e}",
+                            d.message_id
+                        );
                         continue;
                     }
                 };
                 let inbox = match inbox_result {
                     Ok(Some(i)) => i,
-                    _ => {
+                    Ok(None) => {
                         tracing::error!("batch approve: inbox {} not found", d.inbox_id);
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!("batch approve: failed to fetch inbox {}: {e}", d.inbox_id);
                         continue;
                     }
                 };
@@ -289,10 +299,10 @@ pub async fn batch(
                         subject: msg.subject.as_deref().unwrap_or(""),
                         text_body: msg.text_body.as_deref(),
                         html_body: msg.html_body.as_deref(),
-                        message_id_header: msg
+                        message_id_header: &msg
                             .message_id_header
-                            .as_deref()
-                            .unwrap_or("unknown@postblox"),
+                            .clone()
+                            .unwrap_or_else(|| format!("{}@postblox", uuid::Uuid::new_v4())),
                     },
                 )
                 .await

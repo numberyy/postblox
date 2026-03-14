@@ -33,13 +33,16 @@ impl StatusBar {
 
         let hints = mode_hints(mode, self.vim_mode);
 
+        let info = if self.inbox_count > 0 {
+            format!("{} ({})", self.inbox_name, self.inbox_count)
+        } else {
+            self.inbox_name.clone()
+        };
+
         let line = Line::from(vec![
             Span::styled(format!(" {conn_icon}"), Style::default().fg(conn_color)),
             Span::styled(" │ ", Style::default().fg(theme.muted)),
-            Span::styled(
-                format!("{} ({})", self.inbox_name, self.inbox_count),
-                Style::default().fg(theme.fg),
-            ),
+            Span::styled(info, Style::default().fg(theme.fg)),
             Span::styled(" │ ", Style::default().fg(theme.muted)),
             Span::styled(hints, Style::default().fg(theme.muted)),
         ]);

@@ -75,7 +75,13 @@ pub async fn create(
                 }
             }
             Err(e) => {
-                tracing::warn!("stalwart domain creation failed for {name}: {e}");
+                tracing::error!("stalwart domain creation failed for {name}: {e}");
+                if let Err(re) = crate::db::domains::delete(&state.pool, domain.id).await {
+                    tracing::error!("rollback delete of domain {} also failed: {re}", domain.id);
+                }
+                return Err(ApiError::Internal(format!(
+                    "mail server domain creation failed: {e}"
+                )));
             }
         }
     }
@@ -102,7 +108,13 @@ pub async fn get(
 
     let dns_records = if let Some(ref stalwart) = state.stalwart {
         if domain.stalwart_principal_id.is_some() {
-            stalwart.get_dns_records(&domain.name).await.ok()
+            match stalwart.get_dns_records(&domain.name).await {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    tracing::error!(domain = %domain.name, "failed to fetch DNS records: {e}");
+                    None
+                }
+            }
         } else {
             None
         }
@@ -136,19 +148,15 @@ pub async fn verify(
     let records = dns["data"].as_array();
     let verified = records.is_some_and(|r| !r.is_empty());
 
-    if verified {
-        let updated = crate::db::domains::set_verified(&state.pool, domain.id)
-            .await
-            .map_err(ApiError::from_sqlx)?
-            .ok_or(ApiError::NotFound)?;
-        Ok(Json(updated))
+    let updated = if verified {
+        crate::db::domains::set_verified(&state.pool, domain.id).await
     } else {
-        let updated = crate::db::domains::update_status(&state.pool, domain.id, "failed", None)
-            .await
-            .map_err(ApiError::from_sqlx)?
-            .ok_or(ApiError::NotFound)?;
-        Ok(Json(updated))
+        crate::db::domains::update_status(&state.pool, domain.id, "failed", None).await
     }
+    .map_err(ApiError::from_sqlx)?
+    .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(updated))
 }
 
 pub async fn delete(
