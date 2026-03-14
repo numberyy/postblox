@@ -597,6 +597,31 @@ pub fn tool_definitions() -> Vec<Value> {
                 "required": ["linked_account_id"]
             }
         }),
+        json!({
+            "name": "postblox_list_attachments",
+            "description": "List attachments for a message.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "message_id": { "type": "string", "description": "UUID of the message" }
+                },
+                "required": ["inbox_id", "message_id"]
+            }
+        }),
+        json!({
+            "name": "postblox_get_attachment",
+            "description": "Download an attachment's content (base64-encoded).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "inbox_id": { "type": "string", "description": "UUID of the inbox" },
+                    "message_id": { "type": "string", "description": "UUID of the message" },
+                    "attachment_id": { "type": "string", "description": "UUID of the attachment" }
+                },
+                "required": ["inbox_id", "message_id", "attachment_id"]
+            }
+        }),
     ]
 }
 
@@ -1029,6 +1054,38 @@ pub async fn dispatch(
                 .await
         }
 
+        "postblox_list_attachments" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let msg_id = require_str(&args, "message_id")?;
+            client
+                .get(&format!(
+                    "/inboxes/{inbox_id}/messages/{msg_id}/attachments"
+                ))
+                .await
+        }
+
+        "postblox_get_attachment" => {
+            let inbox_id = require_str(&args, "inbox_id")?;
+            let msg_id = require_str(&args, "message_id")?;
+            let att_id = require_str(&args, "attachment_id")?;
+            // Download raw bytes and encode as base64 for JSON transport
+            let resp = client
+                .get_raw(&format!(
+                    "/inboxes/{inbox_id}/messages/{msg_id}/attachments/{att_id}"
+                ))
+                .await?;
+            use base64::Engine;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&resp.data);
+            Ok(json!({
+                "filename": resp.filename,
+                "content_type": resp.content_type,
+                "data_base64": encoded,
+                "size_bytes": resp.data.len(),
+                "encoding": "base64",
+            })
+            .to_string())
+        }
+
         _ => Err(McpError::UnknownTool(name.into())),
     }
 }
@@ -1064,7 +1121,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let defs = tool_definitions();
-        assert_eq!(defs.len(), 44);
+        assert_eq!(defs.len(), 46);
     }
 
     #[test]

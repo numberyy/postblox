@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
@@ -40,8 +40,10 @@ impl From<crate::models::OrgMember> for MemberResponse {
 pub async fn list(
     State(state): State<AppState>,
     AdminOrg(org_id): AdminOrg,
+    Query(params): Query<super::PaginationParams>,
 ) -> Result<Json<Vec<MemberResponse>>, ApiError> {
-    let members = crate::db::members::list_by_org(&state.pool, org_id)
+    let (limit, offset) = super::clamp_pagination(&params);
+    let members = crate::db::members::list_by_org(&state.pool, org_id, limit, offset)
         .await
         .map_err(ApiError::from_sqlx)?;
     Ok(Json(
@@ -79,10 +81,10 @@ pub async fn remove(
     match crate::db::members::delete_unless_last_admin(&state.pool, org_id, api_key_id).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
         Ok(false) => Err(ApiError::NotFound),
-        Err(e) if e.to_string().contains("last_admin") => {
+        Err(crate::db::members::MemberError::LastAdmin) => {
             Err(ApiError::BadRequest("cannot remove the last admin".into()))
         }
-        Err(e) => Err(ApiError::from_sqlx(e)),
+        Err(crate::db::members::MemberError::Db(e)) => Err(ApiError::from_sqlx(e)),
     }
 }
 

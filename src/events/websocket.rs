@@ -45,9 +45,10 @@ impl WebSocketHub {
     }
 
     pub fn unsubscribe(&self, org_id: Uuid) {
-        self.total_connections.fetch_sub(1, Ordering::Relaxed);
-        // Prune channel if no receivers remain — single write lock avoids TOCTOU
+        // Acquire lock before decrementing — prevents subscribe from seeing
+        // the decremented count and reusing a channel about to be pruned.
         let mut channels = self.channels.write().unwrap();
+        self.total_connections.fetch_sub(1, Ordering::Relaxed);
         if let std::collections::hash_map::Entry::Occupied(e) = channels.entry(org_id) {
             if e.get().receiver_count() == 0 {
                 e.remove();

@@ -50,6 +50,9 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 tui-textarea = { version = "0.7", features = ["crossterm"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 urlencoding = "2"
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+dialoguer = "0.11"
 
 [dev-dependencies]
 tempfile = "3"

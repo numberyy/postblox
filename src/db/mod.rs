@@ -2,6 +2,7 @@ use sqlx::{postgres::PgPoolOptions, PgPool};
 
 pub mod api_keys;
 pub mod approvals;
+pub mod attachments;
 pub mod audit;
 pub mod bounces;
 pub mod briefing;

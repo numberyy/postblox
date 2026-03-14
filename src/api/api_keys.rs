@@ -44,13 +44,13 @@ impl From<crate::models::ApiKey> for KeyResponse {
     }
 }
 
-pub(super) struct GeneratedKey {
+pub(crate) struct GeneratedKey {
     pub full_key: String,
     pub key_hash: String,
     pub prefix: String,
 }
 
-pub(super) fn generate_api_key() -> GeneratedKey {
+pub(crate) fn generate_api_key() -> GeneratedKey {
     let uuid_hex = Uuid::new_v4().simple().to_string();
     let prefix = format!("pb_{}", &uuid_hex[..5]);
     let secret = Uuid::new_v4().simple().to_string();
@@ -122,15 +122,22 @@ pub async fn delete(
     AdminOrg(org_id): AdminOrg,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    // Check if this key is the last admin before deleting (FK CASCADE removes org_member)
-    let role = crate::db::members::get_role(&state.pool, org_id, id)
-        .await
-        .map_err(ApiError::from_sqlx)?;
-    if role == Some(crate::models::Role::Admin) {
+    let mut tx = state.pool.begin().await.map_err(ApiError::from_sqlx)?;
+
+    let role: Option<(crate::models::Role,)> = sqlx::query_as(
+        "SELECT role FROM org_members WHERE org_id = $1 AND api_key_id = $2 FOR UPDATE",
+    )
+    .bind(org_id)
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(ApiError::from_sqlx)?;
+
+    if let Some((crate::models::Role::Admin,)) = role {
         let (count,): (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM org_members WHERE org_id = $1 AND role = 'admin'")
                 .bind(org_id)
-                .fetch_one(&state.pool)
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(ApiError::from_sqlx)?;
         if count <= 1 {
@@ -140,14 +147,18 @@ pub async fn delete(
         }
     }
 
-    let deleted = crate::db::api_keys::delete(&state.pool, id, org_id)
+    let result = sqlx::query("DELETE FROM api_keys WHERE id = $1 AND org_id = $2")
+        .bind(id)
+        .bind(org_id)
+        .execute(&mut *tx)
         .await
         .map_err(ApiError::from_sqlx)?;
 
-    if !deleted {
+    if result.rows_affected() == 0 {
         return Err(ApiError::NotFound);
     }
 
+    tx.commit().await.map_err(ApiError::from_sqlx)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

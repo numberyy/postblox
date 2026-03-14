@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 pub mod api_keys;
 pub mod approvals;
+pub mod attachments;
 pub mod audit;
 pub mod auth;
 pub mod bounces;
@@ -48,6 +49,8 @@ pub struct AppState {
     pub hooks: std::sync::Arc<[crate::hooks::HookConfig]>,
     pub ws_hub: Arc<crate::events::websocket::WebSocketHub>,
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
+    pub attachment_storage_path: String,
+    pub max_attachment_size_bytes: i64,
 }
 
 #[derive(Deserialize)]
@@ -212,10 +215,18 @@ pub fn router(state: AppState) -> axum::Router {
             "/inboxes/{inbox_id}/messages",
             get(messages::list).post(messages::send),
         )
-        .route("/inboxes/{inbox_id}/messages/{id}", get(messages::get))
+        .route("/inboxes/{inbox_id}/messages/{message_id}", get(messages::get))
         .route(
-            "/inboxes/{inbox_id}/messages/{id}/delivery-status",
+            "/inboxes/{inbox_id}/messages/{message_id}/delivery-status",
             get(bounces::get_delivery_status),
+        )
+        .route(
+            "/inboxes/{inbox_id}/messages/{message_id}/attachments",
+            get(attachments::list),
+        )
+        .route(
+            "/inboxes/{inbox_id}/messages/{message_id}/attachments/{attachment_id}",
+            get(attachments::download),
         )
         .route(
             "/inboxes/{inbox_id}/labels",

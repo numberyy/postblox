@@ -50,11 +50,13 @@ pub fn resolve(key: KeyEvent, mode: Mode, focus: Panel, vim_mode: bool) -> Optio
         };
     }
 
-    // Search mode — Esc and Enter
+    // Search mode — Esc, Enter, and arrow navigation
     if mode == Mode::Search {
         return match key.code {
             KeyCode::Esc => Some(Action::Back),
             KeyCode::Enter => Some(Action::Select),
+            KeyCode::Up => Some(Action::MoveUp),
+            KeyCode::Down => Some(Action::MoveDown),
             _ => None,
         };
     }
@@ -279,6 +281,26 @@ mod tests {
         assert_eq!(
             resolve(key(KeyCode::Enter), Mode::Search, Panel::Sidebar, false),
             Some(Action::Select)
+        );
+    }
+
+    #[test]
+    fn test_search_mode_arrow_navigation() {
+        assert_eq!(
+            resolve(key(KeyCode::Up), Mode::Search, Panel::Sidebar, false),
+            Some(Action::MoveUp)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Down), Mode::Search, Panel::Sidebar, false),
+            Some(Action::MoveDown)
+        );
+    }
+
+    #[test]
+    fn test_search_mode_chars_not_mapped() {
+        assert_eq!(
+            resolve(key(KeyCode::Char('j')), Mode::Search, Panel::Sidebar, true),
+            None
         );
     }
 

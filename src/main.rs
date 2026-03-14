@@ -1,10 +1,25 @@
 use std::net::SocketAddr;
 
+use clap::Parser;
+use postblox::cli::{self, Cli, Command};
 use postblox::{api, config, dashboard, db, embeddings, events, hooks, mail, stalwart};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    if let Some(cmd) = cli.command {
+        return match cmd {
+            Command::Init(args) => cli::init::run(*args)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}")),
+            Command::Doctor(args) => cli::doctor::run(args)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}")),
+        };
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -98,6 +113,8 @@ async fn main() -> anyhow::Result<()> {
             config.rate_limit.requests_per_minute,
             config.rate_limit.requests_per_hour,
         )),
+        attachment_storage_path: config.attachment_storage_path,
+        max_attachment_size_bytes: config.max_attachment_size_bytes,
     };
     let templates = dashboard::build_templates();
     let dashboard_routes = dashboard::router(templates, state.clone());

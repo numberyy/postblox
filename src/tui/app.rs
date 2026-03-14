@@ -1,7 +1,10 @@
 use std::io;
 use std::time::Duration;
 
-use crossterm::event::{Event as CtEvent, EventStream, KeyEventKind};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyEventKind,
+    MouseButton, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -39,7 +42,7 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         // Best-effort terminal restore during panic/drop — nothing useful to do on failure.
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
     }
 }
 
@@ -121,8 +124,12 @@ pub struct App {
     msg_rx: mpsc::Receiver<AppMsg>,
     ws_shutdown: watch::Sender<bool>,
 
-    // Search debounce
+    // Search
     search_deadline: Option<tokio::time::Instant>,
+    pending_select_message: Option<Uuid>,
+
+    // Layout cache for mouse handling
+    last_layout: Option<layout::AppLayout>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,13 +174,15 @@ impl App {
             msg_rx,
             ws_shutdown,
             search_deadline: None,
+            pending_select_message: None,
+            last_layout: None,
         }
     }
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let _guard = TerminalGuard;
 
         let backend = CrosstermBackend::new(stdout);
@@ -193,6 +202,7 @@ impl App {
 
             enum Tick {
                 Key(crossterm::event::KeyEvent),
+                Mouse(crossterm::event::MouseEvent),
                 Msg(Box<AppMsg>),
                 Timeout,
             }
@@ -202,6 +212,8 @@ impl App {
                 maybe_event = event_stream.next() => {
                     match maybe_event {
                         Some(Ok(CtEvent::Key(key))) if key.kind == KeyEventKind::Press => Tick::Key(key),
+                        Some(Ok(CtEvent::Mouse(mouse))) => Tick::Mouse(mouse),
+                        Some(Ok(CtEvent::Resize(_, _))) => Tick::Timeout,
                         _ => Tick::Timeout,
                     }
                 }
@@ -221,6 +233,11 @@ impl App {
             match tick {
                 Tick::Key(key) => {
                     if let Some(cmd) = self.handle_key(key) {
+                        self.dispatch(cmd);
+                    }
+                }
+                Tick::Mouse(mouse) => {
+                    if let Some(cmd) = self.handle_mouse(mouse) {
                         self.dispatch(cmd);
                     }
                 }
@@ -374,6 +391,16 @@ impl App {
             AppMsg::MessagesLoaded(Ok(messages)) => {
                 self.messages = messages;
                 self.refresh_message_display();
+                if let Some(target_id) = self.pending_select_message.take() {
+                    if let Some(idx) = self
+                        .displayed_messages
+                        .iter()
+                        .position(|m| m.id == target_id)
+                    {
+                        self.message_list.state.select(Some(idx));
+                        self.update_preview();
+                    }
+                }
                 self.status_text = None;
                 self.update_status_bar();
             }
@@ -573,14 +600,36 @@ impl App {
         if let Some(ref text) = self.status_text {
             self.status_bar.inbox_name = text.clone();
             self.status_bar.inbox_count = 0;
-        } else if let Some(inbox_id) = self.selected_inbox_id {
-            if let Some(inbox) = self.inboxes.iter().find(|i| i.id == inbox_id) {
-                self.status_bar.inbox_name = inbox.email.clone();
-            }
-            self.status_bar.inbox_count = self.displayed_messages.len();
         } else {
-            self.status_bar.inbox_name = "All Inboxes".into();
-            self.status_bar.inbox_count = self.inboxes.len();
+            match self.sidebar_view {
+                SidebarView::Inboxes => {
+                    if let Some(inbox_id) = self.selected_inbox_id {
+                        if let Some(inbox) = self.inboxes.iter().find(|i| i.id == inbox_id) {
+                            self.status_bar.inbox_name = inbox.email.clone();
+                        }
+                        self.status_bar.inbox_count = self.displayed_messages.len();
+                    } else {
+                        self.status_bar.inbox_name = "All Inboxes".into();
+                        self.status_bar.inbox_count = self.inboxes.len();
+                    }
+                }
+                SidebarView::Approvals => {
+                    self.status_bar.inbox_name = "Approvals".into();
+                    self.status_bar.inbox_count = self.approval_data.len();
+                }
+                SidebarView::Drafts => {
+                    self.status_bar.inbox_name = "Drafts".into();
+                    self.status_bar.inbox_count = self.drafts.entries.len();
+                }
+                SidebarView::Briefing => {
+                    self.status_bar.inbox_name = "Briefing".into();
+                    self.status_bar.inbox_count = 0;
+                }
+                SidebarView::Search => {
+                    self.status_bar.inbox_name = "Search".into();
+                    self.status_bar.inbox_count = self.search.results.len();
+                }
+            }
         }
     }
 
@@ -620,8 +669,25 @@ impl App {
                         self.sidebar_view = SidebarView::Inboxes;
                     }
                     Action::Select => {
+                        if let Some(result) = self.search.selected_result() {
+                            let inbox_id = result.inbox_id;
+                            let message_id = result.id;
+                            self.selected_inbox_id = Some(inbox_id);
+                            self.pending_select_message = Some(message_id);
+                            if let Some(pos) = self.inboxes.iter().position(|i| i.id == inbox_id) {
+                                self.inbox_list.select(pos + 1);
+                            }
+                            self.mode = Mode::Normal;
+                            self.sidebar_view = SidebarView::Inboxes;
+                            self.focus = Panel::MessageList;
+                            self.status_text = Some("Loading…".into());
+                            self.update_status_bar();
+                            return Some(Command::LoadMessages(inbox_id));
+                        }
                         self.mode = Mode::Normal;
                     }
+                    Action::MoveUp => self.search.select_prev(),
+                    Action::MoveDown => self.search.select_next(),
                     Action::Quit => self.running = false,
                     _ => {}
                 }
@@ -987,10 +1053,87 @@ impl App {
         }
     }
 
+    fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> Option<Command> {
+        let layout = self.last_layout?;
+        let col = event.column;
+        let row = event.row;
+
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if rect_contains(layout.sidebar, col, row) {
+                    self.focus = Panel::Sidebar;
+                    let border_y = layout.sidebar.y + 1;
+                    if row > border_y {
+                        let inner_y = (row - border_y) as usize;
+                        let visual_idx = inner_y + self.inbox_list.state.offset();
+                        if visual_idx < self.inbox_list.items.len() {
+                            self.inbox_list.state.select(Some(visual_idx));
+                            return self.handle_select();
+                        }
+                    }
+                } else if rect_contains(layout.message_list, col, row) {
+                    self.focus = Panel::MessageList;
+                    let border_y = layout.message_list.y + 1;
+                    if row > border_y {
+                        let inner_y = (row - border_y) as usize;
+                        match self.sidebar_view {
+                            SidebarView::Inboxes => {
+                                let idx = inner_y + self.message_list.state.offset();
+                                if idx < self.displayed_messages.len() {
+                                    self.message_list.state.select(Some(idx));
+                                    self.update_preview();
+                                }
+                            }
+                            SidebarView::Approvals => {
+                                let idx = inner_y + self.approvals.state.offset();
+                                if idx < self.approval_data.len() {
+                                    self.approvals.state.select(Some(idx));
+                                    self.update_preview();
+                                }
+                            }
+                            SidebarView::Search => {
+                                let idx = inner_y + self.search.state.offset();
+                                if idx < self.search.results.len() {
+                                    self.search.state.select(Some(idx));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if rect_contains(layout.preview, col, row) {
+                    self.focus = Panel::Preview;
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if rect_contains(layout.preview, col, row) {
+                    self.preview.scroll_up();
+                } else if rect_contains(layout.sidebar, col, row) {
+                    self.inbox_list.select_prev();
+                } else if rect_contains(layout.message_list, col, row) {
+                    self.move_up();
+                    self.update_preview();
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if rect_contains(layout.preview, col, row) {
+                    self.preview.scroll_down();
+                } else if rect_contains(layout.sidebar, col, row) {
+                    self.inbox_list.select_next();
+                } else if rect_contains(layout.message_list, col, row) {
+                    self.move_down();
+                    self.update_preview();
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
     fn render(&mut self, frame: &mut ratatui::Frame) {
         let theme = &self.theme;
         let area = frame.area();
         let layout = layout::compute(area);
+        self.last_layout = Some(layout);
 
         self.inbox_list
             .render(frame, layout.sidebar, theme, self.focus == Panel::Sidebar);
@@ -1034,6 +1177,7 @@ impl App {
                     layout.message_list,
                     theme,
                     self.focus == Panel::MessageList,
+                    self.mode == Mode::Search,
                 );
             }
         }
@@ -1047,10 +1191,6 @@ impl App {
 
         self.status_bar
             .render(frame, layout.status_bar, theme, self.mode);
-
-        if self.mode == Mode::Search {
-            self.search.render_input(frame, layout.status_bar, theme);
-        }
 
         if self.mode == Mode::Help {
             render_help_overlay(frame, area, theme);
@@ -1107,4 +1247,11 @@ fn render_help_overlay(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
 
     frame.render_widget(Clear, help_area);
     frame.render_widget(p, help_area);
+}
+
+fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
+    col >= rect.x
+        && col < rect.x + rect.width
+        && row >= rect.y
+        && row < rect.y + rect.height
 }

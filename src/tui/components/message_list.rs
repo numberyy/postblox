@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::components::{themed_block, truncate};
@@ -20,6 +20,7 @@ pub struct MessageEntry {
     pub is_slop: bool,
     pub direction: String,
     pub category: Option<String>,
+    pub has_thread: bool,
 }
 
 impl MessageList {
@@ -40,6 +41,7 @@ impl MessageList {
                 is_slop: m.triage_status.as_deref() == Some("slopified"),
                 direction: m.direction.clone(),
                 category: m.category.clone(),
+                has_thread: m.thread_id.is_some(),
             })
             .collect();
         if self.entries.is_empty() {
@@ -92,6 +94,17 @@ impl MessageList {
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme, focused: bool) {
         let block = themed_block(format!(" {ICON_MESSAGE} Messages "), theme, focused);
 
+        if self.entries.is_empty() {
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            let p = Paragraph::new(Line::from(Span::styled(
+                "  Select an inbox or press ? for help",
+                Style::default().fg(theme.muted),
+            )));
+            frame.render_widget(p, inner);
+            return;
+        }
+
         let items: Vec<ListItem> = self
             .entries
             .iter()
@@ -131,6 +144,9 @@ fn render_entry<'a>(entry: &MessageEntry, theme: &Theme) -> ListItem<'a> {
         Span::styled(format!(" {subject:<26}"), Style::default().fg(theme.muted)),
         Span::styled(format!(" {age:>6}"), Style::default().fg(theme.muted)),
     ];
+    if entry.has_thread {
+        spans.push(Span::styled(" ⤷", Style::default().fg(theme.muted)));
+    }
     if entry.is_slop {
         spans.push(Span::styled(
             format!(" {ICON_SLOP}"),
@@ -281,6 +297,21 @@ mod tests {
         list.set_entries(&[]);
         assert!(list.entries.is_empty());
         assert_eq!(list.state.selected(), None);
+    }
+
+    #[test]
+    fn test_set_entries_marks_thread() {
+        let mut list = MessageList::new();
+        let mut msg = make_message("alice@co.com", "Test", false);
+        msg.thread_id = Some(Uuid::new_v4());
+        list.set_entries(&[msg]);
+        assert!(list.entries[0].has_thread);
+    }
+
+    #[test]
+    fn test_set_entries_no_thread_when_none() {
+        let list = populated_list();
+        assert!(!list.entries[0].has_thread);
     }
 
     #[test]

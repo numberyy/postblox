@@ -45,6 +45,7 @@ pub async fn search(
             org_id,
             &embedding,
             limit,
+            offset,
             threshold,
             params.inbox_id,
         )

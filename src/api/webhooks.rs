@@ -58,8 +58,36 @@ pub async fn create(
     AuthOrg { org_id, .. }: AuthOrg,
     Json(req): Json<CreateWebhookRequest>,
 ) -> Result<(StatusCode, Json<CreateWebhookResponse>), ApiError> {
-    if req.url.trim().is_empty() {
+    let url = req.url.trim();
+    if url.is_empty() {
         return Err(ApiError::BadRequest("url is required".into()));
+    }
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err(ApiError::BadRequest("webhook url must use http or https".into()));
+    }
+    let host = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    if host == "localhost"
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "0.0.0.0"
+        || host.starts_with("169.254.")
+        || (host.starts_with("10.") && host.chars().nth(3).is_some_and(|c| c.is_ascii_digit()))
+        || host.starts_with("192.168.")
+        || is_rfc1918_172(host)
+        || host.ends_with(".internal")
+        || host.ends_with(".local")
+    {
+        return Err(ApiError::BadRequest(
+            "webhook url must not point to internal addresses".into(),
+        ));
     }
 
     for event in &req.events {
@@ -72,7 +100,7 @@ pub async fn create(
     let events =
         serde_json::to_value(&req.events).map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let wh = crate::db::webhooks::create(&state.pool, org_id, &req.url, &events, &secret)
+    let wh = crate::db::webhooks::create(&state.pool, org_id, url, &events, &secret)
         .await
         .map_err(ApiError::from_sqlx)?;
 
@@ -139,6 +167,17 @@ async fn get_webhook_for_org(
         return Err(ApiError::NotFound);
     }
     Ok(wh)
+}
+
+fn is_rfc1918_172(host: &str) -> bool {
+    if let Some(rest) = host.strip_prefix("172.") {
+        if let Some(octet_str) = rest.split('.').next() {
+            if let Ok(octet) = octet_str.parse::<u8>() {
+                return (16..=31).contains(&octet);
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]

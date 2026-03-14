@@ -1,7 +1,16 @@
 use sqlx::PgPool;
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::models::{OrgMember, Role};
+
+#[derive(Debug, Error)]
+pub enum MemberError {
+    #[error("cannot remove the last admin")]
+    LastAdmin,
+    #[error("database error: {0}")]
+    Db(#[from] sqlx::Error),
+}
 
 pub async fn create(
     pool: &PgPool,
@@ -35,12 +44,19 @@ pub async fn get_role(
     Ok(row.map(|(role,)| role))
 }
 
-pub async fn list_by_org(pool: &PgPool, org_id: Uuid) -> Result<Vec<OrgMember>, sqlx::Error> {
+pub async fn list_by_org(
+    pool: &PgPool,
+    org_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<OrgMember>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, org_id, api_key_id, role, created_at \
-         FROM org_members WHERE org_id = $1 ORDER BY created_at LIMIT 100",
+         FROM org_members WHERE org_id = $1 ORDER BY created_at LIMIT $2 OFFSET $3",
     )
     .bind(org_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
 }
@@ -54,15 +70,11 @@ pub async fn delete(pool: &PgPool, org_id: Uuid, api_key_id: Uuid) -> Result<boo
     Ok(result.rows_affected() > 0)
 }
 
-/// Deletes a member unless they are the last admin. Returns:
-/// - Ok(true) if deleted
-/// - Ok(false) if member not found
-/// - Err with "last_admin" in message if blocked
 pub async fn delete_unless_last_admin(
     pool: &PgPool,
     org_id: Uuid,
     api_key_id: Uuid,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, MemberError> {
     let mut tx = pool.begin().await?;
 
     let row: Option<(Role,)> = sqlx::query_as(
@@ -85,7 +97,7 @@ pub async fn delete_unless_last_admin(
                 .await?;
 
         if count <= 1 {
-            return Err(sqlx::Error::Protocol("last_admin".into()));
+            return Err(MemberError::LastAdmin);
         }
     }
 
@@ -194,7 +206,7 @@ mod tests {
         create(&pool, org.id, k1.id, Role::Admin).await.unwrap();
         create(&pool, org.id, k2.id, Role::Member).await.unwrap();
 
-        let members = list_by_org(&pool, org.id).await.unwrap();
+        let members = list_by_org(&pool, org.id, 100, 0).await.unwrap();
         assert_eq!(members.len(), 2);
     }
 
@@ -205,7 +217,7 @@ mod tests {
         let org = crate::db::organizations::create(&pool, "Empty Members Org")
             .await
             .unwrap();
-        let members = list_by_org(&pool, org.id).await.unwrap();
+        let members = list_by_org(&pool, org.id, 100, 0).await.unwrap();
         assert!(members.is_empty());
     }
 

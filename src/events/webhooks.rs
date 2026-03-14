@@ -18,7 +18,7 @@ pub fn sign_payload(secret: &str, payload: &[u8]) -> String {
         HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(payload);
     let result = mac.finalize().into_bytes();
-    format!("{result:x}")
+    format!("{result:02x}")
 }
 
 pub async fn deliver(

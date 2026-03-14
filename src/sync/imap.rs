@@ -25,7 +25,9 @@ pub async fn one_shot_sync(
             .with_no_client_auth(),
     ));
 
-    let server = (account.imap_host.as_str(), account.imap_port as u16);
+    let port: u16 = u16::try_from(account.imap_port)
+        .map_err(|_| SyncError::Connection(format!("invalid IMAP port: {}", account.imap_port)))?;
+    let server = (account.imap_host.as_str(), port);
     let domain: tokio_rustls::rustls::pki_types::ServerName<'static> =
         tokio_rustls::rustls::pki_types::ServerName::try_from(account.imap_host.clone())
             .map_err(|e| SyncError::Connection(e.to_string()))?;

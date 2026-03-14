@@ -629,6 +629,28 @@ pub struct DeliveryStatus {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Attachment {
+    pub id: Uuid,
+    pub message_id: Uuid,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub storage_key: String,
+    pub disposition: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateAttachment {
+    pub message_id: Uuid,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub storage_key: String,
+    pub disposition: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1537,5 +1559,53 @@ mod tests {
         let json = serde_json::to_string(&member).unwrap();
         let back: OrgMember = serde_json::from_str(&json).unwrap();
         assert_eq!(member, back);
+    }
+
+    #[test]
+    fn test_attachment_serialization_roundtrip() {
+        let att = Attachment {
+            id: Uuid::new_v4(),
+            message_id: Uuid::new_v4(),
+            filename: "report.pdf".into(),
+            content_type: "application/pdf".into(),
+            size_bytes: 1048576,
+            storage_key: "msg-123/report.pdf".into(),
+            disposition: "attachment".into(),
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&att).unwrap();
+        let back: Attachment = serde_json::from_str(&json).unwrap();
+        assert_eq!(att, back);
+    }
+
+    #[test]
+    fn test_create_attachment_serialization_roundtrip() {
+        let ca = CreateAttachment {
+            message_id: Uuid::new_v4(),
+            filename: "data.csv".into(),
+            content_type: "text/csv".into(),
+            size_bytes: 512,
+            storage_key: "msg-456/data.csv".into(),
+            disposition: "attachment".into(),
+        };
+        let json = serde_json::to_string(&ca).unwrap();
+        let back: CreateAttachment = serde_json::from_str(&json).unwrap();
+        assert_eq!(ca, back);
+    }
+
+    #[test]
+    fn test_attachment_inline_disposition() {
+        let att = Attachment {
+            id: Uuid::new_v4(),
+            message_id: Uuid::new_v4(),
+            filename: "logo.png".into(),
+            content_type: "image/png".into(),
+            size_bytes: 2048,
+            storage_key: "msg-789/logo.png".into(),
+            disposition: "inline".into(),
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_value(&att).unwrap();
+        assert_eq!(json["disposition"], "inline");
     }
 }

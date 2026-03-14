@@ -102,6 +102,7 @@ mod tests {
             text_body: None,
             html_body: None,
             raw_headers: serde_json::Value::Null,
+            attachments: vec![],
         }
     }
 

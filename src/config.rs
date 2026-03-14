@@ -25,6 +25,10 @@ pub struct Config {
     pub hooks: Option<Vec<crate::hooks::HookConfig>>,
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    #[serde(default = "default_attachment_storage_path")]
+    pub attachment_storage_path: String,
+    #[serde(default = "default_max_attachment_size")]
+    pub max_attachment_size_bytes: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +64,14 @@ pub struct GuardPatternConfig {
 
 fn default_trust_threshold() -> i32 {
     10
+}
+
+fn default_attachment_storage_path() -> String {
+    "data/attachments".into()
+}
+
+fn default_max_attachment_size() -> i64 {
+    25 * 1024 * 1024
 }
 
 fn default_host() -> String {
@@ -125,6 +137,12 @@ impl Config {
                 trust_auto_upgrade_threshold: parse_env_or_default(
                     "TRUST_AUTO_UPGRADE_THRESHOLD",
                     default_trust_threshold,
+                ),
+                attachment_storage_path: std::env::var("ATTACHMENT_STORAGE_PATH")
+                    .unwrap_or_else(|_| default_attachment_storage_path()),
+                max_attachment_size_bytes: parse_env_or_default(
+                    "MAX_ATTACHMENT_SIZE_BYTES",
+                    default_max_attachment_size,
                 ),
             })
         }
@@ -239,5 +257,25 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.rate_limit.requests_per_minute, 200);
         assert_eq!(config.rate_limit.requests_per_hour, 1000);
+    }
+
+    #[test]
+    fn test_config_attachment_defaults() {
+        let toml_str = r#"database_url = "postgres://localhost/postblox""#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.attachment_storage_path, "data/attachments");
+        assert_eq!(config.max_attachment_size_bytes, 25 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_config_attachment_custom() {
+        let toml_str = r#"
+            database_url = "postgres://localhost/postblox"
+            attachment_storage_path = "/var/data/attachments"
+            max_attachment_size_bytes = 10485760
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.attachment_storage_path, "/var/data/attachments");
+        assert_eq!(config.max_attachment_size_bytes, 10_485_760);
     }
 }

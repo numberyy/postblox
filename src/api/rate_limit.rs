@@ -191,7 +191,7 @@ pub async fn middleware(
 }
 
 fn header_val(n: u64) -> HeaderValue {
-    HeaderValue::from_str(&n.to_string()).unwrap()
+    HeaderValue::from(n)
 }
 
 fn set_rate_headers(headers: &mut axum::http::HeaderMap, result: &CheckResult) {

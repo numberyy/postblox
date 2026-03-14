@@ -1,6 +1,14 @@
-use mail_parser::{Address, HeaderValue, MessageParser};
+use mail_parser::{Address, HeaderValue, MessageParser, MimeHeaders, PartType};
 
 use crate::mail::error::MailError;
+
+#[derive(Debug, Clone)]
+pub struct ParsedAttachment {
+    pub filename: String,
+    pub content_type: String,
+    pub data: Vec<u8>,
+    pub disposition: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct ParsedEmail {
@@ -14,6 +22,7 @@ pub struct ParsedEmail {
     pub text_body: Option<String>,
     pub html_body: Option<String>,
     pub raw_headers: serde_json::Value,
+    pub attachments: Vec<ParsedAttachment>,
 }
 
 pub fn parse(raw: &[u8]) -> Result<ParsedEmail, MailError> {
@@ -55,6 +64,65 @@ pub fn parse(raw: &[u8]) -> Result<ParsedEmail, MailError> {
 
     let raw_headers = build_raw_headers(&message);
 
+    let mut attachments = Vec::new();
+    for (i, part) in message.parts.iter().enumerate() {
+        let disposition = part.content_disposition();
+        let disposition_type = disposition.map(|d| d.ctype());
+        let is_attachment = disposition_type == Some("attachment");
+        let is_inline = disposition_type == Some("inline");
+
+        let has_filename = part.attachment_name().is_some();
+
+        if !is_attachment && !is_inline && !has_filename {
+            continue;
+        }
+
+        // Skip text/html and text/plain body parts (index 0 is the root)
+        if i == 0 {
+            continue;
+        }
+        match &part.body {
+            PartType::Text(_) | PartType::Html(_) if !is_attachment && !has_filename => continue,
+            PartType::Multipart(_) | PartType::Message(_) => continue,
+            _ => {}
+        }
+
+        let data = match &part.body {
+            PartType::Binary(cow) | PartType::InlineBinary(cow) => cow.to_vec(),
+            PartType::Text(cow) => cow.as_bytes().to_vec(),
+            PartType::Html(cow) => cow.as_bytes().to_vec(),
+            _ => continue,
+        };
+
+        let content_type = part
+            .content_type()
+            .map(|ct| {
+                let ctype = ct.ctype();
+                match ct.subtype() {
+                    Some(sub) => format!("{ctype}/{sub}"),
+                    None => ctype.to_string(),
+                }
+            })
+            .unwrap_or_else(|| "application/octet-stream".into());
+
+        let filename = part
+            .attachment_name()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                let ext = mime_to_ext(&content_type);
+                format!("attachment_{i}.{ext}")
+            });
+
+        let disposition = if is_inline { "inline" } else { "attachment" };
+
+        attachments.push(ParsedAttachment {
+            filename,
+            content_type,
+            data,
+            disposition: disposition.into(),
+        });
+    }
+
     Ok(ParsedEmail {
         message_id,
         in_reply_to,
@@ -66,7 +134,26 @@ pub fn parse(raw: &[u8]) -> Result<ParsedEmail, MailError> {
         text_body,
         html_body,
         raw_headers,
+        attachments,
     })
+}
+
+fn mime_to_ext(content_type: &str) -> &'static str {
+    match content_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "application/pdf" => "pdf",
+        "text/plain" => "txt",
+        "text/html" => "html",
+        "text/csv" => "csv",
+        "application/json" => "json",
+        "application/zip" => "zip",
+        "application/gzip" => "gz",
+        _ => "bin",
+    }
 }
 
 fn strip_angles(s: &str) -> &str {
@@ -274,6 +361,80 @@ mod tests {
     fn test_parse_attachment_multipart_has_text() {
         let email = parse(&fixture("attachment_multipart.eml")).unwrap();
         assert!(email.text_body.as_ref().unwrap().contains("attached file"));
+    }
+
+    #[test]
+    fn test_parse_attachment_multipart_extracts_attachment() {
+        let email = parse(&fixture("attachment_multipart.eml")).unwrap();
+        assert_eq!(email.attachments.len(), 1);
+        let att = &email.attachments[0];
+        assert_eq!(att.filename, "data.bin");
+        assert_eq!(att.content_type, "application/octet-stream");
+        assert_eq!(att.disposition, "attachment");
+        assert_eq!(att.data, b"Hello World");
+    }
+
+    #[test]
+    fn test_parse_simple_text_no_attachments() {
+        let email = parse(&fixture("simple_text.eml")).unwrap();
+        assert!(email.attachments.is_empty());
+    }
+
+    #[test]
+    fn test_parse_multipart_no_spurious_attachments() {
+        let email = parse(&fixture("multipart.eml")).unwrap();
+        assert!(
+            email.attachments.is_empty(),
+            "text/plain + text/html bodies should not be treated as attachments"
+        );
+    }
+
+    #[test]
+    fn test_parse_inline_attachment() {
+        let raw = b"From: a@b.com\r\nTo: x@y.com\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"bound\"\r\n\r\n\
+--bound\r\nContent-Type: text/plain\r\n\r\nHello\r\n\
+--bound\r\nContent-Type: image/png\r\nContent-Disposition: inline; filename=\"logo.png\"\r\n\
+Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
+--bound--\r\n";
+        let email = parse(raw).unwrap();
+        assert_eq!(email.attachments.len(), 1);
+        assert_eq!(email.attachments[0].filename, "logo.png");
+        assert_eq!(email.attachments[0].disposition, "inline");
+    }
+
+    #[test]
+    fn test_parse_attachment_missing_filename_generates_name() {
+        let raw = b"From: a@b.com\r\nTo: x@y.com\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"bound\"\r\n\r\n\
+--bound\r\nContent-Type: text/plain\r\n\r\nHello\r\n\
+--bound\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment\r\n\
+Content-Transfer-Encoding: base64\r\n\r\nJVBERi0=\r\n\
+--bound--\r\n";
+        let email = parse(raw).unwrap();
+        assert_eq!(email.attachments.len(), 1);
+        assert!(
+            email.attachments[0].filename.starts_with("attachment_"),
+            "generated filename should start with attachment_"
+        );
+        assert!(
+            email.attachments[0].filename.ends_with(".pdf"),
+            "generated filename should end with .pdf for application/pdf"
+        );
+    }
+
+    #[test]
+    fn test_mime_to_ext_known_types() {
+        assert_eq!(mime_to_ext("image/png"), "png");
+        assert_eq!(mime_to_ext("image/jpeg"), "jpg");
+        assert_eq!(mime_to_ext("application/pdf"), "pdf");
+        assert_eq!(mime_to_ext("text/plain"), "txt");
+        assert_eq!(mime_to_ext("application/json"), "json");
+    }
+
+    #[test]
+    fn test_mime_to_ext_unknown_type() {
+        assert_eq!(mime_to_ext("application/x-custom"), "bin");
     }
 
     #[test]

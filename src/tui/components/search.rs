@@ -1,8 +1,9 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
+use uuid::Uuid;
 
 use crate::components::{themed_block, truncate};
 use crate::theme::{Theme, ICON_SEARCH};
@@ -14,6 +15,8 @@ pub struct SearchPanel {
 }
 
 pub struct SearchResult {
+    pub id: Uuid,
+    pub inbox_id: Uuid,
     pub from: String,
     pub subject: String,
     pub snippet: String,
@@ -32,6 +35,8 @@ impl SearchPanel {
         self.results = messages
             .iter()
             .map(|m| SearchResult {
+                id: m.id,
+                inbox_id: m.inbox_id,
                 from: m.from_addr.clone(),
                 subject: m.subject.clone().unwrap_or_default(),
                 snippet: m.text_body.clone().unwrap_or_default(),
@@ -50,6 +55,10 @@ impl SearchPanel {
 
     pub fn pop_char(&mut self) {
         self.query.pop();
+    }
+
+    pub fn selected_result(&self) -> Option<&SearchResult> {
+        self.state.selected().and_then(|i| self.results.get(i))
     }
 
     pub fn clear(&mut self) {
@@ -81,20 +90,41 @@ impl SearchPanel {
         }
     }
 
-    pub fn render_input(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let input = Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!(" {ICON_SEARCH} / "),
-                Style::default().fg(theme.accent),
-            ),
-            Span::styled(&self.query, Style::default().fg(theme.fg)),
-            Span::styled("│", Style::default().fg(theme.accent)),
-        ]));
-        frame.render_widget(input, area);
-    }
-
-    pub fn render_results(&mut self, frame: &mut Frame, area: Rect, theme: &Theme, focused: bool) {
-        let block = themed_block(format!(" {ICON_SEARCH} Search Results "), theme, focused);
+    pub fn render_results(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        focused: bool,
+        searching: bool,
+    ) {
+        let block = if searching {
+            let border_color = if focused {
+                theme.border_focused
+            } else {
+                theme.border
+            };
+            let title = Line::from(vec![
+                Span::styled(
+                    format!(" {ICON_SEARCH} Search: "),
+                    Style::default().fg(border_color),
+                ),
+                Span::styled(
+                    &self.query,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("│ ", Style::default().fg(theme.accent)),
+            ]);
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(border_color))
+        } else {
+            themed_block(format!(" {ICON_SEARCH} Search Results "), theme, focused)
+        };
 
         if self.results.is_empty() {
             let inner = block.inner(area);
@@ -140,13 +170,14 @@ impl SearchPanel {
             })
             .collect();
 
-        let list = List::new(items).block(block).highlight_style(
+        let list = List::new(items).highlight_style(
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         );
 
-        frame.render_stateful_widget(list, area, &mut self.state);
+        frame.render_widget(block, area);
+        frame.render_stateful_widget(list, list_area, &mut self.state);
 
         if has_snippet {
             if let Some(idx) = self.state.selected() {
@@ -281,5 +312,23 @@ mod tests {
             s.select_next();
         }
         assert_eq!(s.selected(), Some(s.results.len() - 1));
+    }
+
+    #[test]
+    fn test_selected_result_returns_ids() {
+        let mut s = SearchPanel::new();
+        let msgs = make_messages();
+        let expected_id = msgs[0].id;
+        let expected_inbox = msgs[0].inbox_id;
+        s.set_results(&msgs);
+        let result = s.selected_result().unwrap();
+        assert_eq!(result.id, expected_id);
+        assert_eq!(result.inbox_id, expected_inbox);
+    }
+
+    #[test]
+    fn test_selected_result_none_when_empty() {
+        let s = SearchPanel::new();
+        assert!(s.selected_result().is_none());
     }
 }

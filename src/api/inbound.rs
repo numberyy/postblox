@@ -118,6 +118,39 @@ pub async fn receive_inbound(
         .await
         .map_err(ApiError::from_sqlx)?;
 
+    let mut attachment_count: usize = 0;
+    let storage_path = std::path::Path::new(&state.attachment_storage_path);
+    let max_size = state.max_attachment_size_bytes as u64;
+    let msg_id_str = msg.id.to_string();
+    for att in &parsed.attachments {
+        match crate::storage::store_attachment(storage_path, &msg_id_str, &att.filename, &att.data, max_size).await {
+            Ok(storage_key) => {
+                let create_att = crate::models::CreateAttachment {
+                    message_id: msg.id,
+                    filename: att.filename.clone(),
+                    content_type: att.content_type.clone(),
+                    size_bytes: att.data.len() as i64,
+                    storage_key: storage_key.clone(),
+                    disposition: att.disposition.clone(),
+                };
+                if let Err(e) = crate::db::attachments::create(&state.pool, &create_att).await {
+                    tracing::error!(message_id = %msg.id, filename = %att.filename, "failed to store attachment metadata: {e}");
+                    if let Err(cleanup) = crate::storage::delete_attachment(storage_path, &storage_key).await {
+                        tracing::error!(message_id = %msg.id, storage_key = %storage_key, "failed to clean up orphaned attachment: {cleanup}");
+                    }
+                } else {
+                    attachment_count += 1;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(message_id = %msg.id, filename = %att.filename, "failed to store attachment file: {e}");
+            }
+        }
+    }
+    if attachment_count > 0 {
+        tracing::info!(message_id = %msg.id, count = attachment_count, "stored inbound attachments");
+    }
+
     let sender_rep =
         match crate::db::slop::get_sender_reputation(&state.pool, inbox.org_id, &parsed.from).await
         {

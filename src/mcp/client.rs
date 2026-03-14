@@ -65,6 +65,43 @@ impl PostbloxClient {
         Self::handle_response(resp).await
     }
 
+    pub async fn get_raw(&self, path: &str) -> Result<RawResponse, McpError> {
+        let resp = self
+            .http
+            .get(self.url(path))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await?;
+            return Err(McpError::Api(format!("{status}: {body}")));
+        }
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let filename = resp
+            .headers()
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| {
+                v.split("filename=\"")
+                    .nth(1)
+                    .and_then(|s| s.strip_suffix('"'))
+            })
+            .unwrap_or("download")
+            .to_string();
+        let data = resp.bytes().await?.to_vec();
+        Ok(RawResponse {
+            data,
+            content_type,
+            filename,
+        })
+    }
+
     async fn handle_response(resp: reqwest::Response) -> Result<String, McpError> {
         let status = resp.status();
         let body = resp.text().await?;
@@ -74,6 +111,12 @@ impl PostbloxClient {
             Err(McpError::Api(format!("{status}: {body}")))
         }
     }
+}
+
+pub struct RawResponse {
+    pub data: Vec<u8>,
+    pub content_type: String,
+    pub filename: String,
 }
 
 #[cfg(test)]
