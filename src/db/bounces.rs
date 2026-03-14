@@ -6,8 +6,8 @@ use crate::models::DeliveryStatus;
 pub async fn create_status(
     pool: &PgPool,
     message_id: Uuid,
-    status: &str,
-    bounce_type: Option<&str>,
+    status: crate::models::DeliveryStatusType,
+    bounce_type: Option<crate::models::BounceType>,
     details: Option<serde_json::Value>,
 ) -> Result<DeliveryStatus, sqlx::Error> {
     sqlx::query_as(
@@ -84,18 +84,24 @@ mod tests {
                 text_body: Some("Body".into()),
                 html_body: None,
                 extracted_text: None,
-                direction: "outbound".into(),
+                direction: crate::models::Direction::Outbound,
                 raw_headers: None,
             },
         )
         .await
         .unwrap();
 
-        let ds = create_status(&pool, msg.id, "delivered", None, None)
-            .await
-            .unwrap();
+        let ds = create_status(
+            &pool,
+            msg.id,
+            crate::models::DeliveryStatusType::Delivered,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(ds.message_id, msg.id);
-        assert_eq!(ds.status, "delivered");
+        assert_eq!(ds.status, crate::models::DeliveryStatusType::Delivered);
         assert!(ds.bounce_type.is_none());
 
         let list = get_by_message(&pool, msg.id).await.unwrap();
@@ -129,7 +135,7 @@ mod tests {
                 text_body: Some("Body".into()),
                 html_body: None,
                 extracted_text: None,
-                direction: "outbound".into(),
+                direction: crate::models::Direction::Outbound,
                 raw_headers: None,
             },
         )
@@ -140,14 +146,14 @@ mod tests {
         let ds = create_status(
             &pool,
             msg.id,
-            "bounced",
-            Some("hard"),
+            crate::models::DeliveryStatusType::Bounced,
+            Some(crate::models::BounceType::Hard),
             Some(details.clone()),
         )
         .await
         .unwrap();
-        assert_eq!(ds.status, "bounced");
-        assert_eq!(ds.bounce_type.as_deref(), Some("hard"));
+        assert_eq!(ds.status, crate::models::DeliveryStatusType::Bounced);
+        assert_eq!(ds.bounce_type, Some(crate::models::BounceType::Hard));
         assert_eq!(ds.details, Some(details));
     }
 
@@ -180,7 +186,7 @@ mod tests {
                     text_body: Some("Body".into()),
                     html_body: None,
                     extracted_text: None,
-                    direction: "outbound".into(),
+                    direction: crate::models::Direction::Outbound,
                     raw_headers: None,
                 },
             )
@@ -191,18 +197,36 @@ mod tests {
 
         // 4 hard bounces
         for &mid in &msg_ids[..4] {
-            create_status(&pool, mid, "bounced", Some("hard"), None)
-                .await
-                .unwrap();
+            create_status(
+                &pool,
+                mid,
+                crate::models::DeliveryStatusType::Bounced,
+                Some(crate::models::BounceType::Hard),
+                None,
+            )
+            .await
+            .unwrap();
         }
         // 1 soft bounce (should not count)
-        create_status(&pool, msg_ids[4], "bounced", Some("soft"), None)
-            .await
-            .unwrap();
+        create_status(
+            &pool,
+            msg_ids[4],
+            crate::models::DeliveryStatusType::Bounced,
+            Some(crate::models::BounceType::Soft),
+            None,
+        )
+        .await
+        .unwrap();
         // 1 delivered (should not count)
-        create_status(&pool, msg_ids[5], "delivered", None, None)
-            .await
-            .unwrap();
+        create_status(
+            &pool,
+            msg_ids[5],
+            crate::models::DeliveryStatusType::Delivered,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let count = count_hard_bounces_for_inbox(&pool, inbox.id).await.unwrap();
         assert_eq!(count, 4);
@@ -234,7 +258,7 @@ mod tests {
                 text_body: None,
                 html_body: None,
                 extracted_text: None,
-                direction: "outbound".into(),
+                direction: crate::models::Direction::Outbound,
                 raw_headers: None,
             },
         )
@@ -277,15 +301,21 @@ mod tests {
                 text_body: None,
                 html_body: None,
                 extracted_text: None,
-                direction: "outbound".into(),
+                direction: crate::models::Direction::Outbound,
                 raw_headers: None,
             },
         )
         .await
         .unwrap();
-        create_status(&pool, msg.id, "bounced", Some("hard"), None)
-            .await
-            .unwrap();
+        create_status(
+            &pool,
+            msg.id,
+            crate::models::DeliveryStatusType::Bounced,
+            Some(crate::models::BounceType::Hard),
+            None,
+        )
+        .await
+        .unwrap();
 
         // inbox1 should have 0
         let count = count_hard_bounces_for_inbox(&pool, inbox1.id)

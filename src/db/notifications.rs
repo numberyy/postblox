@@ -29,7 +29,7 @@ pub async fn create(
          RETURNING {SELECT_COLS}"
     ))
     .bind(input.org_id)
-    .bind(input.provider.to_string())
+    .bind(input.provider)
     .bind(&input.config)
     .fetch_one(pool)
     .await
@@ -69,7 +69,7 @@ mod tests {
         };
         let nc = create(&pool, &input).await.unwrap();
         assert_eq!(nc.org_id, org_id);
-        assert_eq!(nc.provider, "ntfy");
+        assert_eq!(nc.provider, NotificationProvider::Ntfy);
         assert!(nc.active);
         assert_eq!(nc.config["url"], "https://ntfy.sh/postblox");
     }

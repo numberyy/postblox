@@ -63,7 +63,9 @@ pub async fn create(
         return Err(ApiError::BadRequest("url is required".into()));
     }
     if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err(ApiError::BadRequest("webhook url must use http or https".into()));
+        return Err(ApiError::BadRequest(
+            "webhook url must use http or https".into(),
+        ));
     }
     let host = url
         .trim_start_matches("https://")

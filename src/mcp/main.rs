@@ -15,7 +15,13 @@ async fn main() {
         }
     };
 
-    let client = client::PostbloxClient::new(base_url, api_key);
+    let client = match client::PostbloxClient::new(base_url, api_key) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("failed to create client: {e}");
+            std::process::exit(1);
+        }
+    };
 
     if let Err(e) = transport::run(client).await {
         eprintln!("transport error: {e}");

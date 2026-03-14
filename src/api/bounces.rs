@@ -54,15 +54,12 @@ pub async fn receive_bounce(
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or(ApiError::NotFound)?;
 
-    let status_str = req.status.to_string();
-    let bounce_type_str = req.bounce_type.map(|bt| bt.to_string());
-
     let (create_result, inbox_result) = tokio::join!(
         crate::db::bounces::create_status(
             &state.pool,
             req.message_id,
-            &status_str,
-            bounce_type_str.as_deref(),
+            req.status,
+            req.bounce_type,
             req.details,
         ),
         crate::db::inboxes::get_by_id(&state.pool, msg.inbox_id),

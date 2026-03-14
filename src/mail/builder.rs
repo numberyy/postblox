@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -38,57 +40,57 @@ pub fn build_mime_with_attachments(
     attachments: &[MimeAttachment],
 ) -> Vec<u8> {
     let mut msg = String::new();
-    msg.push_str(&format!("From: {}\r\n", sanitize_header(from)));
-    msg.push_str(&format!("To: {}\r\n", sanitize_header(&to.join(", "))));
+    let _ = write!(msg, "From: {}\r\n", sanitize_header(from));
+    let _ = write!(msg, "To: {}\r\n", sanitize_header(&to.join(", ")));
     if !cc.is_empty() {
-        msg.push_str(&format!("Cc: {}\r\n", sanitize_header(&cc.join(", "))));
+        let _ = write!(msg, "Cc: {}\r\n", sanitize_header(&cc.join(", ")));
     }
-    msg.push_str(&format!("Subject: {}\r\n", sanitize_header(subject)));
-    msg.push_str(&format!("Message-ID: {}\r\n", sanitize_header(message_id)));
-    msg.push_str(&format!(
+    let _ = write!(msg, "Subject: {}\r\n", sanitize_header(subject));
+    let _ = write!(msg, "Message-ID: {}\r\n", sanitize_header(message_id));
+    let _ = write!(
+        msg,
         "Date: {}\r\n",
         Utc::now().format("%a, %d %b %Y %H:%M:%S +0000")
-    ));
+    );
     msg.push_str("MIME-Version: 1.0\r\n");
 
     if attachments.is_empty() {
         build_body_only(&mut msg, text_body, html_body);
     } else {
         let mixed_boundary = format!("postblox-mixed-{}", Uuid::new_v4().simple());
-        msg.push_str(&format!(
+        let _ = write!(
+            msg,
             "Content-Type: multipart/mixed; boundary=\"{mixed_boundary}\"\r\n"
-        ));
+        );
         msg.push_str("\r\n");
 
-        // First part: the message body
-        msg.push_str(&format!("--{mixed_boundary}\r\n"));
+        let _ = write!(msg, "--{mixed_boundary}\r\n");
         build_body_only(&mut msg, text_body, html_body);
 
-        // Attachment parts
         for att in attachments {
-            msg.push_str(&format!("\r\n--{mixed_boundary}\r\n"));
-            msg.push_str(&format!(
+            let _ = write!(msg, "\r\n--{mixed_boundary}\r\n");
+            let _ = write!(
+                msg,
                 "Content-Type: {}; name=\"{}\"\r\n",
                 sanitize_header(&att.content_type),
                 sanitize_header(&att.filename)
-            ));
+            );
             msg.push_str("Content-Transfer-Encoding: base64\r\n");
-            msg.push_str(&format!(
+            let _ = write!(
+                msg,
                 "Content-Disposition: attachment; filename=\"{}\"\r\n",
                 sanitize_header(&att.filename)
-            ));
+            );
             msg.push_str("\r\n");
             let encoded = base64::engine::general_purpose::STANDARD.encode(&att.data);
             // Line-wrap at 76 chars per RFC 2045
             for chunk in encoded.as_bytes().chunks(76) {
-                // base64 output is always valid ASCII — from_utf8 cannot fail
-if let Ok(s) = std::str::from_utf8(chunk) {
-                    msg.push_str(s);
-                }
+                // base64 Standard encoding always produces valid ASCII
+                msg.push_str(std::str::from_utf8(chunk).expect("base64 is always valid ASCII"));
                 msg.push_str("\r\n");
             }
         }
-        msg.push_str(&format!("--{mixed_boundary}--\r\n"));
+        let _ = write!(msg, "--{mixed_boundary}--\r\n");
     }
 
     msg.into_bytes()
@@ -98,17 +100,18 @@ fn build_body_only(msg: &mut String, text_body: Option<&str>, html_body: Option<
     match (text_body, html_body) {
         (Some(text), Some(html)) => {
             let boundary = format!("postblox-{}", Uuid::new_v4().simple());
-            msg.push_str(&format!(
+            let _ = write!(
+                msg,
                 "Content-Type: multipart/alternative; boundary=\"{boundary}\"\r\n"
-            ));
+            );
             msg.push_str("\r\n");
-            msg.push_str(&format!("--{boundary}\r\n"));
+            let _ = write!(msg, "--{boundary}\r\n");
             msg.push_str("Content-Type: text/plain; charset=utf-8\r\n\r\n");
             msg.push_str(text);
-            msg.push_str(&format!("\r\n--{boundary}\r\n"));
+            let _ = write!(msg, "\r\n--{boundary}\r\n");
             msg.push_str("Content-Type: text/html; charset=utf-8\r\n\r\n");
             msg.push_str(html);
-            msg.push_str(&format!("\r\n--{boundary}--\r\n"));
+            let _ = write!(msg, "\r\n--{boundary}--\r\n");
         }
         (Some(text), None) => {
             msg.push_str("Content-Type: text/plain; charset=utf-8\r\n\r\n");

@@ -46,15 +46,14 @@ impl StalwartClient {
                 .to_string()
         });
 
-        let smtp_transport =
-            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&parsed_host)
-                .port(smtp_port.unwrap_or(25))
-                .credentials(Credentials::new(
-                    admin_user.to_string(),
-                    admin_token.to_string(),
-                ))
-                .timeout(Some(Duration::from_secs(30)))
-                .build();
+        let smtp_transport = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&parsed_host)
+            .port(smtp_port.unwrap_or(25))
+            .credentials(Credentials::new(
+                admin_user.to_string(),
+                admin_token.to_string(),
+            ))
+            .timeout(Some(Duration::from_secs(30)))
+            .build();
 
         Ok(Self {
             http,
@@ -68,7 +67,10 @@ impl StalwartClient {
     async fn check_response(resp: reqwest::Response) -> Result<reqwest::Response, StalwartError> {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("(body read failed: {e})"));
             return Err(StalwartError::Api { status, body });
         }
         Ok(resp)
@@ -118,7 +120,13 @@ impl StalwartClient {
 
         let resp = Self::check_response(resp).await?;
         let body: serde_json::Value = resp.json().await?;
-        let principal_id = body["data"]["id"].as_str().unwrap_or(name).to_string();
+        let principal_id = match body["data"]["id"].as_str() {
+            Some(id) => id.to_string(),
+            None => {
+                tracing::warn!("stalwart create_domain response missing data.id, using domain name as principal_id");
+                name.to_string()
+            }
+        };
         Ok(principal_id)
     }
 

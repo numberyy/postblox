@@ -18,12 +18,32 @@ pub struct SyncResult {
     pub skipped: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[allow(dead_code)] // Idle used for DB reads, complete_sync sets it via SQL
 pub enum SyncStatus {
     Idle,
     Syncing,
     Error,
+}
+
+impl std::fmt::Display for SyncStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for SyncStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "idle" => Ok(Self::Idle),
+            "syncing" => Ok(Self::Syncing),
+            "error" => Ok(Self::Error),
+            other => Err(format!("unknown sync status: {other}")),
+        }
+    }
 }
 
 impl SyncStatus {
@@ -33,6 +53,33 @@ impl SyncStatus {
             Self::Syncing => "syncing",
             Self::Error => "error",
         }
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for SyncStatus {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for SyncStatus {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        s.parse::<SyncStatus>()
+            .map_err(|e| -> sqlx::error::BoxDynError { e.into() })
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for SyncStatus {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <&str as sqlx::Encode<sqlx::Postgres>>::encode(self.as_str(), buf)
     }
 }
 

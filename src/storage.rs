@@ -48,10 +48,7 @@ pub async fn store_attachment(
     Ok(format!("{message_id}/{filename}"))
 }
 
-pub async fn read_attachment(
-    base_path: &Path,
-    storage_key: &str,
-) -> Result<Vec<u8>, StorageError> {
+pub async fn read_attachment(base_path: &Path, storage_key: &str) -> Result<Vec<u8>, StorageError> {
     let parts: Vec<&str> = storage_key.splitn(2, '/').collect();
     if parts.len() != 2 {
         return Err(StorageError::InvalidKey(storage_key.to_string()));
@@ -62,10 +59,7 @@ pub async fn read_attachment(
     Ok(fs::read(&path).await?)
 }
 
-pub async fn delete_attachment(
-    base_path: &Path,
-    storage_key: &str,
-) -> Result<(), StorageError> {
+pub async fn delete_attachment(base_path: &Path, storage_key: &str) -> Result<(), StorageError> {
     let parts: Vec<&str> = storage_key.splitn(2, '/').collect();
     if parts.len() != 2 {
         return Err(StorageError::InvalidKey(storage_key.to_string()));
@@ -105,7 +99,13 @@ mod tests {
         let data = vec![0u8; 100];
         let result = store_attachment(tmp.path(), "msg-1", "big.bin", &data, 50).await;
 
-        assert!(matches!(result, Err(StorageError::TooLarge { size: 100, limit: 50 })));
+        assert!(matches!(
+            result,
+            Err(StorageError::TooLarge {
+                size: 100,
+                limit: 50
+            })
+        ));
     }
 
     #[tokio::test]
@@ -146,7 +146,9 @@ mod tests {
             .await
             .unwrap();
 
-        delete_attachment(tmp.path(), "msg-1/del.txt").await.unwrap();
+        delete_attachment(tmp.path(), "msg-1/del.txt")
+            .await
+            .unwrap();
         let result = read_attachment(tmp.path(), "msg-1/del.txt").await;
         assert!(matches!(result, Err(StorageError::Io(_))));
     }
@@ -154,7 +156,9 @@ mod tests {
     #[tokio::test]
     async fn test_delete_attachment_nonexistent_ok() {
         let tmp = TempDir::new().unwrap();
-        delete_attachment(tmp.path(), "msg-1/nope.txt").await.unwrap();
+        delete_attachment(tmp.path(), "msg-1/nope.txt")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

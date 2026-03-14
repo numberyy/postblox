@@ -155,15 +155,11 @@ pub async fn run(args: InitArgs) -> Result<(), InitError> {
 }
 
 fn collect_non_interactive(args: &InitArgs) -> Result<CollectedConfig, InitError> {
-    let database_url = args
-        .database_url
-        .clone()
-        .ok_or_else(|| InitError::Other("--database-url is required in non-interactive mode".into()))?;
+    let database_url = args.database_url.clone().ok_or_else(|| {
+        InitError::Other("--database-url is required in non-interactive mode".into())
+    })?;
 
-    let org_name = args
-        .org_name
-        .clone()
-        .unwrap_or_else(|| "default".into());
+    let org_name = args.org_name.clone().unwrap_or_else(|| "default".into());
 
     Ok(CollectedConfig {
         database_url,
@@ -185,7 +181,10 @@ fn collect_interactive(args: &InitArgs) -> Result<CollectedConfig, InitError> {
 
     let mode = Select::new()
         .with_prompt("Setup mode")
-        .items(&["QuickStart (Docker Compose, minimal config)", "Advanced (bare metal, full config)"])
+        .items(&[
+            "QuickStart (Docker Compose, minimal config)",
+            "Advanced (bare metal, full config)",
+        ])
         .default(0)
         .interact()?;
 
@@ -263,10 +262,7 @@ fn collect_interactive(args: &InitArgs) -> Result<CollectedConfig, InitError> {
             .interact()?;
 
         let (default_url, default_model) = if provider == 1 {
-            (
-                "http://localhost:11434/v1/embeddings",
-                "nomic-embed-text",
-            )
+            ("http://localhost:11434/v1/embeddings", "nomic-embed-text")
         } else {
             (
                 "https://api.openai.com/v1/embeddings",
@@ -283,9 +279,7 @@ fn collect_interactive(args: &InitArgs) -> Result<CollectedConfig, InitError> {
             .default(default_model.into())
             .interact_text()?;
         let api_key = if provider == 0 {
-            let k: String = Password::new()
-                .with_prompt("API key")
-                .interact()?;
+            let k: String = Password::new().with_prompt("API key").interact()?;
             Some(k).filter(|s| !s.is_empty())
         } else {
             None
@@ -333,52 +327,32 @@ async fn test_db_connection(url: &str) -> Result<sqlx::PgPool, InitError> {
     Ok(pool)
 }
 
-async fn test_stalwart(url: &str) -> Result<(), InitError> {
+async fn test_url(url: &str, map_err: fn(String) -> InitError) -> Result<(), InitError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .map_err(|e| InitError::Stalwart(e.to_string()))?;
+        .map_err(|e| map_err(e.to_string()))?;
 
     let resp = client
         .get(url)
         .send()
         .await
-        .map_err(|e| InitError::Stalwart(e.to_string()))?;
+        .map_err(|e| map_err(e.to_string()))?;
 
     if resp.status().is_server_error() {
-        return Err(InitError::Stalwart(format!(
-            "server returned HTTP {}",
-            resp.status()
-        )));
+        return Err(map_err(format!("server returned HTTP {}", resp.status())));
     }
 
     Ok(())
 }
 
+async fn test_stalwart(url: &str) -> Result<(), InitError> {
+    test_url(url, InitError::Stalwart).await
+}
+
 async fn test_embedding(url: &str) -> Result<(), InitError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| InitError::Embedding(e.to_string()))?;
-
-    let base = url
-        .trim_end_matches("/v1/embeddings")
-        .trim_end_matches('/');
-
-    let resp = client
-        .get(base)
-        .send()
-        .await
-        .map_err(|e| InitError::Embedding(e.to_string()))?;
-
-    if resp.status().is_server_error() {
-        return Err(InitError::Embedding(format!(
-            "server returned HTTP {}",
-            resp.status()
-        )));
-    }
-
-    Ok(())
+    let base = url.trim_end_matches("/v1/embeddings").trim_end_matches('/');
+    test_url(base, InitError::Embedding).await
 }
 
 fn generate_toml(config: &CollectedConfig) -> String {
@@ -460,10 +434,9 @@ async fn create_org_and_key(pool: &sqlx::PgPool, org_name: &str) -> Result<Strin
         .await
         .map_err(|e| InitError::Database(e.to_string()))?;
 
-    let key =
-        crate::db::api_keys::create(pool, org.id, &gk.key_hash, &gk.prefix, Some("default"))
-            .await
-            .map_err(|e| InitError::Database(e.to_string()))?;
+    let key = crate::db::api_keys::create(pool, org.id, &gk.key_hash, &gk.prefix, Some("default"))
+        .await
+        .map_err(|e| InitError::Database(e.to_string()))?;
 
     crate::db::members::ensure_admin_exists(pool, org.id, key.id)
         .await
@@ -717,7 +690,10 @@ mod tests {
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 8080);
         assert_eq!(config.stalwart_url.as_deref(), Some("http://stalwart:8080"));
-        assert_eq!(config.embedding_url.as_deref(), Some("http://ollama:11434/v1/embeddings"));
+        assert_eq!(
+            config.embedding_url.as_deref(),
+            Some("http://ollama:11434/v1/embeddings")
+        );
         assert_eq!(config.org_name, "acme");
     }
 

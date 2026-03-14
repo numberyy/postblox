@@ -4,7 +4,10 @@ pub mod init;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "postblox", about = "Self-hosted email infrastructure for AI agents")]
+#[command(
+    name = "postblox",
+    about = "Self-hosted email infrastructure for AI agents"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,

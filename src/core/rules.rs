@@ -88,23 +88,30 @@ impl RuleSet {
                     end_hour,
                     timezone,
                 } => {
-                    if let Ok(tz) = timezone.parse::<chrono_tz::Tz>() {
-                        use chrono::Timelike;
-                        let local = now.with_timezone(&tz);
-                        let hour = local.hour() as u8;
-                        let in_window = if start_hour <= end_hour {
-                            hour >= *start_hour && hour < *end_hour
-                        } else {
-                            hour >= *start_hour || hour < *end_hour
-                        };
-                        if !in_window {
+                    let tz = match timezone.parse::<chrono_tz::Tz>() {
+                        Ok(tz) => tz,
+                        Err(_) => {
                             return RuleVerdict::Block {
                                 rule: "time_window".into(),
-                                reason: format!(
-                                    "current hour {hour} outside window {start_hour}-{end_hour} {timezone}"
-                                ),
+                                reason: format!("invalid timezone: {timezone}"),
                             };
                         }
+                    };
+                    use chrono::Timelike;
+                    let local = now.with_timezone(&tz);
+                    let hour = local.hour() as u8;
+                    let in_window = if start_hour <= end_hour {
+                        hour >= *start_hour && hour < *end_hour
+                    } else {
+                        hour >= *start_hour || hour < *end_hour
+                    };
+                    if !in_window {
+                        return RuleVerdict::Block {
+                            rule: "time_window".into(),
+                            reason: format!(
+                                "current hour {hour} outside window {start_hour}-{end_hour} {timezone}"
+                            ),
+                        };
                     }
                 }
                 Rule::KeywordBlocklist { keywords } => {
@@ -401,16 +408,14 @@ mod tests {
     }
 
     #[test]
-    fn test_time_window_invalid_timezone_skips() {
+    fn test_time_window_invalid_timezone_blocks() {
         let rs = RuleSet(vec![Rule::TimeWindow {
             start_hour: 9,
             end_hour: 17,
             timezone: "Fake/Timezone".into(),
         }]);
-        assert_eq!(
-            rs.evaluate(&[addr("a@b.com")], "", "", None),
-            RuleVerdict::Allow,
-        );
+        let v = rs.evaluate(&[addr("a@b.com")], "", "", None);
+        assert!(matches!(v, RuleVerdict::Block { .. }));
     }
 
     // === KeywordBlocklist ===

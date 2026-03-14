@@ -400,7 +400,7 @@ async fn test_dashboard_approve_htmx_post() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(fetched.status, "approved");
+    assert_eq!(fetched.status, postblox::models::ApprovalStatus::Approved);
     assert_eq!(fetched.decided_by.as_deref(), Some("dashboard"));
 }
 
@@ -438,7 +438,7 @@ async fn test_dashboard_reject_htmx_post() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(fetched.status, "rejected");
+    assert_eq!(fetched.status, postblox::models::ApprovalStatus::Rejected);
 }
 
 #[tokio::test]

@@ -61,6 +61,59 @@ pub async fn record_trust_and_maybe_upgrade(
     }
 }
 
+pub async fn execute_approval(
+    state: &AppState,
+    org_id: Uuid,
+    approval: &Approval,
+    decided_by: &str,
+) -> Result<(), ApiError> {
+    let (msg_result, inbox_result) = tokio::join!(
+        crate::db::messages::get_by_id(&state.pool, approval.message_id),
+        crate::db::inboxes::get_by_id(&state.pool, approval.inbox_id),
+    );
+    let msg = msg_result
+        .map_err(ApiError::from_sqlx)?
+        .ok_or(ApiError::Internal("approved message not found".into()))?;
+    let inbox = inbox_result
+        .map_err(ApiError::from_sqlx)?
+        .ok_or(ApiError::Internal("inbox not found".into()))?;
+
+    let (to, cc) = super::deliver::extract_addrs(&msg);
+    super::deliver::deliver_message(
+        state,
+        org_id,
+        &inbox,
+        approval.message_id,
+        &super::deliver::DeliveryParams {
+            from: &inbox.email,
+            to: &to,
+            cc: &cc,
+            subject: msg.subject.as_deref().unwrap_or(""),
+            text_body: msg.text_body.as_deref(),
+            html_body: msg.html_body.as_deref(),
+            message_id_header: &msg
+                .message_id_header
+                .clone()
+                .unwrap_or_else(super::new_message_id),
+        },
+    )
+    .await?;
+
+    crate::events::audit(
+        &state.pool,
+        org_id,
+        Some(approval.inbox_id),
+        crate::models::AuditAction::MessageApproved,
+        decided_by,
+        serde_json::json!({"message_id": approval.message_id.to_string(), "approval_id": approval.id.to_string()}),
+    )
+    .await;
+
+    record_trust_and_maybe_upgrade(state, org_id, approval.inbox_id, true).await;
+
+    Ok(())
+}
+
 #[derive(Deserialize)]
 pub struct ApprovalListParams {
     pub limit: Option<i64>,
@@ -123,55 +176,7 @@ pub async fn approve(
         .map_err(ApiError::from_sqlx)?
         .ok_or(ApiError::NotFound)?;
 
-    let (msg_result, inbox_result) = tokio::join!(
-        crate::db::messages::get_by_id(&state.pool, approval.message_id),
-        crate::db::inboxes::get_by_id(&state.pool, approval.inbox_id),
-    );
-    let msg = msg_result
-        .map_err(ApiError::from_sqlx)?
-        .ok_or(ApiError::Internal("approved message not found".into()))?;
-    let inbox = inbox_result
-        .map_err(ApiError::from_sqlx)?
-        .ok_or(ApiError::Internal("inbox not found".into()))?;
-
-    let (to, cc) = super::deliver::extract_addrs(&msg);
-    super::deliver::deliver_message(
-        &state,
-        org_id,
-        &inbox,
-        approval.message_id,
-        &super::deliver::DeliveryParams {
-            from: &inbox.email,
-            to: &to,
-            cc: &cc,
-            subject: msg.subject.as_deref().unwrap_or(""),
-            text_body: msg.text_body.as_deref(),
-            html_body: msg.html_body.as_deref(),
-            message_id_header: &msg
-                .message_id_header
-                .clone()
-                .unwrap_or_else(|| format!("{}@postblox", uuid::Uuid::new_v4())),
-        },
-    )
-    .await?;
-
-    let state_clone = state.clone();
-    let msg_id = approval.message_id;
-    let inbox_id = approval.inbox_id;
-    let decided_by = req.decided_by.clone();
-    tokio::spawn(async move {
-        crate::events::audit(
-            &state_clone.pool,
-            org_id,
-            Some(inbox_id),
-            crate::models::AuditAction::MessageApproved,
-            &decided_by,
-            serde_json::json!({"message_id": msg_id.to_string(), "approval_id": id.to_string()}),
-        )
-        .await;
-
-        record_trust_and_maybe_upgrade(&state_clone, org_id, inbox_id, true).await;
-    });
+    execute_approval(&state, org_id, &approval, &req.decided_by).await?;
 
     Ok(Json(approval))
 }
@@ -239,83 +244,26 @@ pub async fn batch(
     let decided_by = req.decided_by.clone();
     let decided_clone = decided.clone();
     tokio::spawn(async move {
-        let action = if status == ApprovalStatus::Approved {
-            crate::models::AuditAction::MessageApproved
-        } else {
-            crate::models::AuditAction::MessageRejected
-        };
         for d in &decided_clone {
-            crate::events::audit(
-                &state_clone.pool,
-                org_id,
-                Some(d.inbox_id),
-                action,
-                &decided_by,
-                serde_json::json!({"message_id": d.message_id.to_string(), "approval_id": d.id.to_string(), "batch": true}),
-            )
-            .await;
-
             if status == ApprovalStatus::Approved {
-                let (msg_result, inbox_result) = tokio::join!(
-                    crate::db::messages::get_by_id(&state_clone.pool, d.message_id),
-                    crate::db::inboxes::get_by_id(&state_clone.pool, d.inbox_id),
-                );
-                let msg = match msg_result {
-                    Ok(Some(m)) => m,
-                    Ok(None) => {
-                        tracing::error!("batch approve: message {} not found", d.message_id);
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "batch approve: failed to fetch message {}: {e}",
-                            d.message_id
-                        );
-                        continue;
-                    }
-                };
-                let inbox = match inbox_result {
-                    Ok(Some(i)) => i,
-                    Ok(None) => {
-                        tracing::error!("batch approve: inbox {} not found", d.inbox_id);
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::error!("batch approve: failed to fetch inbox {}: {e}", d.inbox_id);
-                        continue;
-                    }
-                };
-
-                let (to, cc) = super::deliver::extract_addrs(&msg);
-                if let Err(e) = super::deliver::deliver_message(
-                    &state_clone,
-                    org_id,
-                    &inbox,
-                    d.message_id,
-                    &super::deliver::DeliveryParams {
-                        from: &inbox.email,
-                        to: &to,
-                        cc: &cc,
-                        subject: msg.subject.as_deref().unwrap_or(""),
-                        text_body: msg.text_body.as_deref(),
-                        html_body: msg.html_body.as_deref(),
-                        message_id_header: &msg
-                            .message_id_header
-                            .clone()
-                            .unwrap_or_else(|| format!("{}@postblox", uuid::Uuid::new_v4())),
-                    },
-                )
-                .await
-                {
+                if let Err(e) = execute_approval(&state_clone, org_id, d, &decided_by).await {
                     tracing::error!(
                         "batch approve: delivery failed for message {}: {e:?}",
                         d.message_id
                     );
                 }
+            } else {
+                crate::events::audit(
+                    &state_clone.pool,
+                    org_id,
+                    Some(d.inbox_id),
+                    crate::models::AuditAction::MessageRejected,
+                    &decided_by,
+                    serde_json::json!({"message_id": d.message_id.to_string(), "approval_id": d.id.to_string(), "batch": true}),
+                )
+                .await;
+                record_trust_and_maybe_upgrade(&state_clone, org_id, d.inbox_id, false).await;
             }
-
-            let approved = status == ApprovalStatus::Approved;
-            record_trust_and_maybe_upgrade(&state_clone, org_id, d.inbox_id, approved).await;
         }
     });
 

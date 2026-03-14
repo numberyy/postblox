@@ -7,16 +7,16 @@ pub struct PostbloxClient {
 }
 
 impl PostbloxClient {
-    pub fn new(base_url: String, api_key: String) -> Self {
+    pub fn new(base_url: String, api_key: String) -> Result<Self, McpError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .expect("failed to build http client");
-        Self {
+            .map_err(|e| McpError::Api(format!("failed to build http client: {e}")))?;
+        Ok(Self {
             http,
             base_url,
             api_key,
-        }
+        })
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn test_url_building_basic_path() {
-        let client = PostbloxClient::new("http://localhost:3000".into(), "key".into());
+        let client = PostbloxClient::new("http://localhost:3000".into(), "key".into()).unwrap();
         assert_eq!(
             client.url("/inboxes"),
             "http://localhost:3000/api/v1/inboxes"
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_url_building_trailing_slash_stripped() {
-        let client = PostbloxClient::new("http://localhost:3000/".into(), "key".into());
+        let client = PostbloxClient::new("http://localhost:3000/".into(), "key".into()).unwrap();
         assert_eq!(
             client.url("/inboxes"),
             "http://localhost:3000/api/v1/inboxes"
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_url_building_nested_path() {
-        let client = PostbloxClient::new("http://localhost:3000".into(), "key".into());
+        let client = PostbloxClient::new("http://localhost:3000".into(), "key".into()).unwrap();
         let id = "550e8400-e29b-41d4-a716-446655440000";
         assert_eq!(
             client.url(&format!("/inboxes/{id}/messages")),
@@ -153,7 +153,8 @@ mod tests {
 
     #[test]
     fn test_url_building_with_custom_port() {
-        let client = PostbloxClient::new("http://mail.example.com:8080".into(), "key".into());
+        let client =
+            PostbloxClient::new("http://mail.example.com:8080".into(), "key".into()).unwrap();
         assert_eq!(
             client.url("/search"),
             "http://mail.example.com:8080/api/v1/search"

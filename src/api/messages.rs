@@ -54,7 +54,7 @@ pub async fn send(
     .await?;
 
     // Store without angle brackets for consistent threading with inbound (parser strips them).
-    let message_id = format!("{}@postblox", Uuid::new_v4());
+    let message_id = super::new_message_id();
 
     // DB write first so the message is tracked even if delivery fails.
     let cm = crate::models::CreateMessage {
@@ -70,7 +70,7 @@ pub async fn send(
         text_body: req.text_body.clone(),
         html_body: req.html_body.clone(),
         extracted_text: None,
-        direction: "outbound".into(),
+        direction: crate::models::Direction::Outbound,
         raw_headers: None,
     };
 

@@ -55,10 +55,10 @@ pub async fn download(
         return Err(ApiError::NotFound);
     }
 
-    let storage_path = std::path::Path::new(&state.attachment_storage_path);
-    let data = crate::storage::read_attachment(storage_path, &attachment.storage_key)
-        .await
-        .map_err(|e| ApiError::Internal(format!("failed to read attachment: {e}")))?;
+    let data =
+        crate::storage::read_attachment(&state.attachment_storage_path, &attachment.storage_key)
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to read attachment: {e}")))?;
 
     let disposition = format!(
         "{}; filename=\"{}\"",
@@ -77,25 +77,17 @@ pub async fn download(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_content_disposition_escapes_quotes() {
         let filename = r#"file"name.txt"#;
-        let disposition = format!(
-            "attachment; filename=\"{}\"",
-            filename.replace('"', "\\\"")
-        );
+        let disposition = format!("attachment; filename=\"{}\"", filename.replace('"', "\\\""));
         assert_eq!(disposition, r#"attachment; filename="file\"name.txt""#);
     }
 
     #[test]
     fn test_content_disposition_normal_filename() {
         let filename = "report.pdf";
-        let disposition = format!(
-            "attachment; filename=\"{}\"",
-            filename.replace('"', "\\\"")
-        );
+        let disposition = format!("attachment; filename=\"{}\"", filename.replace('"', "\\\""));
         assert_eq!(disposition, "attachment; filename=\"report.pdf\"");
     }
 }

@@ -19,21 +19,23 @@ pub async fn notify_org(
     };
 
     for nc in configs {
-        match nc.provider.as_str() {
-            "ntfy" | "webhook" => {
+        use crate::models::NotificationProvider;
+        match nc.provider {
+            NotificationProvider::Ntfy | NotificationProvider::Webhook => {
                 let url = match nc.config.get("url").and_then(|v| v.as_str()) {
                     Some(u) => u.to_string(),
                     None => {
-                        tracing::warn!(config_id = %nc.id, provider = nc.provider, "config missing 'url'");
+                        tracing::warn!(config_id = %nc.id, provider = %nc.provider, "config missing 'url'");
                         continue;
                     }
                 };
-                let provider = nc.provider.clone();
+                let is_ntfy = matches!(nc.provider, NotificationProvider::Ntfy);
+                let provider = nc.provider;
                 let client = client.clone();
                 let title = title.to_string();
                 let body = body.to_string();
                 tokio::spawn(async move {
-                    let req = if provider == "ntfy" {
+                    let req = if is_ntfy {
                         client.post(&url).header("Title", &title).body(body)
                     } else {
                         client
@@ -49,7 +51,7 @@ pub async fn notify_org(
                     }
                 });
             }
-            "desktop" => {
+            NotificationProvider::Desktop => {
                 let title = title.to_string();
                 let body = body.to_string();
                 tokio::spawn(async move {
@@ -71,11 +73,8 @@ pub async fn notify_org(
                     }
                 });
             }
-            "email" => {
+            NotificationProvider::Email => {
                 tracing::debug!(config_id = %nc.id, "email notification provider not yet implemented");
-            }
-            other => {
-                tracing::warn!(config_id = %nc.id, provider = other, "unknown notification provider");
             }
         }
     }

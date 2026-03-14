@@ -100,7 +100,7 @@ mod tests {
             text_body: Some("Hello".into()),
             html_body: None,
             extracted_text: None,
-            direction: "inbound".into(),
+            direction: crate::models::Direction::Inbound,
             raw_headers: None,
         };
         let msg = crate::db::messages::create(pool, &cm).await.unwrap();

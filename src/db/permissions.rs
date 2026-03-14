@@ -16,7 +16,7 @@ pub async fn upsert(
          RETURNING id, inbox_id, send_mode, rules, created_at, updated_at",
     )
     .bind(inbox_id)
-    .bind(send_mode.to_string())
+    .bind(send_mode)
     .bind(rules)
     .fetch_one(pool)
     .await
@@ -68,7 +68,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(perm.inbox_id, inbox.id);
-        assert_eq!(perm.send_mode, "approval");
+        assert_eq!(perm.send_mode, SendMode::Approval);
         assert_eq!(perm.rules, serde_json::json!([]));
     }
 
@@ -96,7 +96,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(p1.id, p2.id);
-        assert_eq!(p2.send_mode, "autonomous");
+        assert_eq!(p2.send_mode, SendMode::Autonomous);
         assert!(p2.updated_at >= p1.updated_at);
     }
 
@@ -117,7 +117,7 @@ mod tests {
             .unwrap();
 
         let found = get_by_inbox(&pool, inbox.id).await.unwrap().unwrap();
-        assert_eq!(found.send_mode, "shadow");
+        assert_eq!(found.send_mode, SendMode::Shadow);
     }
 
     #[tokio::test]
@@ -205,7 +205,7 @@ mod tests {
             let perm = upsert(&pool, inbox.id, mode, &serde_json::json!([]))
                 .await
                 .unwrap();
-            assert_eq!(perm.send_mode, mode.to_string());
+            assert_eq!(perm.send_mode, mode);
             assert_eq!(perm.mode(), mode);
         }
     }

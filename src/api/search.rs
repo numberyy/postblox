@@ -55,10 +55,16 @@ pub async fn search(
         return Ok(Json(results));
     }
 
-    let results =
-        crate::db::messages::search(&state.pool, org_id, &params.q, params.inbox_id, limit, offset)
-            .await
-            .map_err(ApiError::from_sqlx)?;
+    let results = crate::db::messages::search(
+        &state.pool,
+        org_id,
+        &params.q,
+        params.inbox_id,
+        limit,
+        offset,
+    )
+    .await
+    .map_err(ApiError::from_sqlx)?;
 
     Ok(Json(results))
 }

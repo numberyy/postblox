@@ -10,9 +10,9 @@ pub struct ClassifierInput<'a> {
 
 pub struct SlopResult {
     pub score: f32,
-    pub signals: Vec<String>,
-    pub category: String,
-    pub priority: String,
+    pub signals: Vec<&'static str>,
+    pub category: &'static str,
+    pub priority: &'static str,
     pub requires_action: bool,
     pub triage_action: TriageAction,
 }
@@ -41,13 +41,14 @@ pub enum TriageAction {
 }
 
 fn header_value(headers: &Value, name: &str) -> Option<String> {
-    let obj = headers.as_object()?;
-    for (k, v) in obj {
-        if k.eq_ignore_ascii_case(name) {
-            return v.as_str().map(|s| s.to_string());
-        }
-    }
-    None
+    headers
+        .as_object()?
+        .iter()
+        .find_map(|(k, v)| {
+            k.eq_ignore_ascii_case(name)
+                .then(|| v.as_str().map(|s| s.to_string()))
+        })
+        .flatten()
 }
 
 fn has_noreply(from: &str) -> bool {
@@ -102,7 +103,7 @@ fn has_otp_pattern_lower(lower: &str, original: &str) -> bool {
 
 pub fn classify(input: &ClassifierInput) -> SlopResult {
     let mut score: f32 = 0.0;
-    let mut signals: Vec<String> = Vec::new();
+    let mut signals: Vec<&'static str> = Vec::with_capacity(6);
     let mut is_otp = false;
     let mut has_list_unsub = false;
     let mut has_auto_sub = false;
@@ -112,7 +113,7 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
     if let Some(headers) = input.raw_headers {
         if header_value(headers, "List-Unsubscribe").is_some() {
             score += 0.3;
-            signals.push("list-unsubscribe".into());
+            signals.push("list-unsubscribe");
             has_list_unsub = true;
         }
 
@@ -120,7 +121,7 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
             let lower = prec.to_lowercase();
             if lower == "bulk" || lower == "list" {
                 score += 0.2;
-                signals.push("precedence-bulk".into());
+                signals.push("precedence-bulk");
             }
         }
 
@@ -128,7 +129,7 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
             let lower = auto.to_lowercase();
             if lower == "auto-generated" || lower == "auto-replied" {
                 score += 0.15;
-                signals.push("auto-submitted".into());
+                signals.push("auto-submitted");
                 has_auto_sub = true;
             }
         }
@@ -137,14 +138,14 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
     // From address signals
     if has_noreply(input.from_addr) {
         score += 0.15;
-        signals.push("noreply-sender".into());
+        signals.push("noreply-sender");
         has_noreply_sig = true;
     }
 
     if let Some(subj) = input.subject {
         if has_cold_email_pattern(subj) {
             score += 0.2;
-            signals.push("cold-email".into());
+            signals.push("cold-email");
         }
     }
 
@@ -152,7 +153,7 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
     if let Some(ratio) = input.sender_slop_ratio {
         if ratio > 0.5 {
             score += 0.2;
-            signals.push("reputation-high-slop".into());
+            signals.push("reputation-high-slop");
         }
     }
 
@@ -181,9 +182,9 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
 
     // OTP overrides
     let (priority, requires_action) = if is_otp {
-        ("high".into(), true)
+        ("high", true)
     } else {
-        ("normal".into(), false)
+        ("normal", false)
     };
 
     let triage_action = if score > 0.95 {
@@ -197,7 +198,7 @@ pub fn classify(input: &ClassifierInput) -> SlopResult {
     SlopResult {
         score,
         signals,
-        category: category.into(),
+        category,
         priority,
         requires_action,
         triage_action,
@@ -272,7 +273,7 @@ mod tests {
         };
         let result = classify(&input);
         assert!((result.score - 0.3).abs() < f32::EPSILON);
-        assert!(result.signals.contains(&"list-unsubscribe".to_string()));
+        assert!(result.signals.contains(&"list-unsubscribe"));
     }
 
     #[test]
@@ -284,7 +285,7 @@ mod tests {
         };
         let result = classify(&input);
         assert!((result.score - 0.2).abs() < f32::EPSILON);
-        assert!(result.signals.contains(&"precedence-bulk".to_string()));
+        assert!(result.signals.contains(&"precedence-bulk"));
     }
 
     #[test]
@@ -296,7 +297,7 @@ mod tests {
         };
         let result = classify(&input);
         assert!((result.score - 0.2).abs() < f32::EPSILON);
-        assert!(result.signals.contains(&"precedence-bulk".to_string()));
+        assert!(result.signals.contains(&"precedence-bulk"));
     }
 
     #[test]
@@ -308,7 +309,7 @@ mod tests {
         };
         let result = classify(&input);
         assert_eq!(result.score, 0.0);
-        assert!(!result.signals.contains(&"precedence-bulk".to_string()));
+        assert!(!result.signals.contains(&"precedence-bulk"));
     }
 
     #[test]
@@ -319,7 +320,7 @@ mod tests {
         };
         let result = classify(&input);
         assert!((result.score - 0.15).abs() < f32::EPSILON);
-        assert!(result.signals.contains(&"noreply-sender".to_string()));
+        assert!(result.signals.contains(&"noreply-sender"));
     }
 
     #[test]
@@ -329,7 +330,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert!(result.signals.contains(&"noreply-sender".to_string()));
+        assert!(result.signals.contains(&"noreply-sender"));
     }
 
     #[test]
@@ -339,7 +340,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert!(result.signals.contains(&"noreply-sender".to_string()));
+        assert!(result.signals.contains(&"noreply-sender"));
     }
 
     #[test]
@@ -351,7 +352,7 @@ mod tests {
         };
         let result = classify(&input);
         assert!((result.score - 0.15).abs() < f32::EPSILON);
-        assert!(result.signals.contains(&"auto-submitted".to_string()));
+        assert!(result.signals.contains(&"auto-submitted"));
     }
 
     #[test]
@@ -362,7 +363,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert!(result.signals.contains(&"auto-submitted".to_string()));
+        assert!(result.signals.contains(&"auto-submitted"));
     }
 
     #[test]
@@ -373,7 +374,7 @@ mod tests {
         };
         let result = classify(&input);
         assert!((result.score - 0.2).abs() < f32::EPSILON);
-        assert!(result.signals.contains(&"cold-email".to_string()));
+        assert!(result.signals.contains(&"cold-email"));
     }
 
     #[test]
@@ -383,7 +384,7 @@ mod tests {
             ..empty_input()
         };
         let result = classify(&input);
-        assert!(result.signals.contains(&"cold-email".to_string()));
+        assert!(result.signals.contains(&"cold-email"));
     }
 
     #[test]
@@ -402,7 +403,7 @@ mod tests {
             };
             let result = classify(&input);
             assert!(
-                result.signals.contains(&"cold-email".to_string()),
+                result.signals.contains(&"cold-email"),
                 "pattern '{}' should trigger cold-email",
                 pattern
             );
@@ -417,7 +418,7 @@ mod tests {
         };
         let result = classify(&input);
         assert!((result.score - 0.2).abs() < f32::EPSILON);
-        assert!(result.signals.contains(&"reputation-high-slop".to_string()));
+        assert!(result.signals.contains(&"reputation-high-slop"));
     }
 
     #[test]
@@ -428,7 +429,7 @@ mod tests {
         };
         let result = classify(&input);
         assert_eq!(result.score, 0.0);
-        assert!(!result.signals.contains(&"reputation-high-slop".to_string()));
+        assert!(!result.signals.contains(&"reputation-high-slop"));
     }
 
     #[test]

@@ -122,7 +122,7 @@ mod tests {
                 text_body: Some("Body".into()),
                 html_body: None,
                 extracted_text: None,
-                direction: "inbound".into(),
+                direction: crate::models::Direction::Inbound,
                 raw_headers: None,
             },
         )

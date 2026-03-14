@@ -219,7 +219,7 @@ pub async fn send_draft(
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .unwrap_or_default();
 
-    let message_id = format!("{}@postblox", Uuid::new_v4());
+    let message_id = super::new_message_id();
 
     let in_reply_to = if let Some(reply_id) = draft.in_reply_to_message_id {
         let orig = crate::db::messages::get_by_id(&state.pool, reply_id)
@@ -247,7 +247,7 @@ pub async fn send_draft(
         text_body: draft.text_body,
         html_body: draft.html_body,
         extracted_text: None,
-        direction: "outbound".into(),
+        direction: crate::models::Direction::Outbound,
         raw_headers: None,
     };
 

@@ -118,7 +118,9 @@ async fn main() -> anyhow::Result<()> {
     };
     let templates = dashboard::build_templates();
     let dashboard_routes = dashboard::router(templates, state.clone());
-    let app = api::router(state).nest("/dashboard", dashboard_routes);
+    let app = api::router(state)
+        .nest("/dashboard", dashboard_routes)
+        .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024));
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
     tracing::info!("postblox listening on {addr}");

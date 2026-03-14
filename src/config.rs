@@ -26,7 +26,7 @@ pub struct Config {
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
     #[serde(default = "default_attachment_storage_path")]
-    pub attachment_storage_path: String,
+    pub attachment_storage_path: PathBuf,
     #[serde(default = "default_max_attachment_size")]
     pub max_attachment_size_bytes: i64,
 }
@@ -66,8 +66,8 @@ fn default_trust_threshold() -> i32 {
     10
 }
 
-fn default_attachment_storage_path() -> String {
-    "data/attachments".into()
+fn default_attachment_storage_path() -> PathBuf {
+    PathBuf::from("data/attachments")
 }
 
 fn default_max_attachment_size() -> i64 {
@@ -139,6 +139,7 @@ impl Config {
                     default_trust_threshold,
                 ),
                 attachment_storage_path: std::env::var("ATTACHMENT_STORAGE_PATH")
+                    .map(PathBuf::from)
                     .unwrap_or_else(|_| default_attachment_storage_path()),
                 max_attachment_size_bytes: parse_env_or_default(
                     "MAX_ATTACHMENT_SIZE_BYTES",
@@ -263,7 +264,10 @@ mod tests {
     fn test_config_attachment_defaults() {
         let toml_str = r#"database_url = "postgres://localhost/postblox""#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.attachment_storage_path, "data/attachments");
+        assert_eq!(
+            config.attachment_storage_path,
+            PathBuf::from("data/attachments")
+        );
         assert_eq!(config.max_attachment_size_bytes, 25 * 1024 * 1024);
     }
 
@@ -275,7 +279,10 @@ mod tests {
             max_attachment_size_bytes = 10485760
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.attachment_storage_path, "/var/data/attachments");
+        assert_eq!(
+            config.attachment_storage_path,
+            PathBuf::from("/var/data/attachments")
+        );
         assert_eq!(config.max_attachment_size_bytes, 10_485_760);
     }
 }

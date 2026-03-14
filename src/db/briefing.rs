@@ -197,7 +197,7 @@ mod tests {
             text_body: Some("Hello".into()),
             html_body: None,
             extracted_text: None,
-            direction: "inbound".into(),
+            direction: crate::models::Direction::Inbound,
             raw_headers: None,
         };
         crate::db::messages::create(&pool, &cm).await.unwrap();
@@ -257,7 +257,7 @@ mod tests {
                     text_body: None,
                     html_body: None,
                     extracted_text: None,
-                    direction: "inbound".into(),
+                    direction: crate::models::Direction::Inbound,
                     raw_headers: None,
                 };
                 crate::db::messages::create(&pool, &cm).await.unwrap();
@@ -297,7 +297,7 @@ mod tests {
             text_body: None,
             html_body: None,
             extracted_text: None,
-            direction: "outbound".into(),
+            direction: crate::models::Direction::Outbound,
             raw_headers: None,
         };
         crate::db::messages::create(&pool, &cm).await.unwrap();
@@ -332,7 +332,7 @@ mod tests {
             text_body: None,
             html_body: None,
             extracted_text: None,
-            direction: "inbound".into(),
+            direction: crate::models::Direction::Inbound,
             raw_headers: None,
         };
         crate::db::messages::create(&pool, &cm).await.unwrap();
@@ -367,7 +367,7 @@ mod tests {
             text_body: None,
             html_body: None,
             extracted_text: None,
-            direction: "inbound".into(),
+            direction: crate::models::Direction::Inbound,
             raw_headers: None,
         };
         crate::db::messages::create(&pool, &cm).await.unwrap();
@@ -405,7 +405,7 @@ mod tests {
             text_body: Some("No subject".into()),
             html_body: None,
             extracted_text: None,
-            direction: "inbound".into(),
+            direction: crate::models::Direction::Inbound,
             raw_headers: None,
         };
         crate::db::messages::create(&pool, &cm).await.unwrap();

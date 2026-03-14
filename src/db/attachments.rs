@@ -3,7 +3,10 @@ use uuid::Uuid;
 
 use crate::models::{Attachment, CreateAttachment};
 
-pub async fn create(pool: &PgPool, attachment: &CreateAttachment) -> Result<Attachment, sqlx::Error> {
+pub async fn create(
+    pool: &PgPool,
+    attachment: &CreateAttachment,
+) -> Result<Attachment, sqlx::Error> {
     sqlx::query_as(
         "INSERT INTO attachments (message_id, filename, content_type, size_bytes, storage_key, disposition) \
          VALUES ($1, $2, $3, $4, $5, $6) \
@@ -78,7 +81,7 @@ mod tests {
                 text_body: Some("Body".into()),
                 html_body: None,
                 extracted_text: None,
-                direction: "inbound".into(),
+                direction: crate::models::Direction::Inbound,
                 raw_headers: None,
             },
         )

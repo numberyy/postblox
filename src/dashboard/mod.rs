@@ -17,56 +17,48 @@ type Templates = Arc<Environment<'static>>;
 
 pub fn build_templates() -> Environment<'static> {
     let mut env = Environment::new();
-    env.add_template("base.html", include_str!("../../templates/base.html"))
-        .unwrap();
-    env.add_template("inboxes.html", include_str!("../../templates/inboxes.html"))
-        .unwrap();
-    env.add_template(
-        "inbox_detail.html",
-        include_str!("../../templates/inbox_detail.html"),
-    )
-    .unwrap();
-    env.add_template(
-        "messages_rows.html",
-        include_str!("../../templates/messages_rows.html"),
-    )
-    .unwrap();
-    env.add_template("message.html", include_str!("../../templates/message.html"))
-        .unwrap();
-    env.add_template("thread.html", include_str!("../../templates/thread.html"))
-        .unwrap();
-    env.add_template(
-        "approvals.html",
-        include_str!("../../templates/approvals.html"),
-    )
-    .unwrap();
-    env.add_template(
-        "briefing.html",
-        include_str!("../../templates/briefing.html"),
-    )
-    .unwrap();
-    env.add_template("search.html", include_str!("../../templates/search.html"))
-        .unwrap();
-    env.add_template(
-        "search_results.html",
-        include_str!("../../templates/search_results.html"),
-    )
-    .unwrap();
-    env.add_template(
-        "unauthorized.html",
-        include_str!("../../templates/unauthorized.html"),
-    )
-    .unwrap();
-    env.add_template(
-        "settings.html",
-        include_str!("../../templates/settings.html"),
-    )
-    .unwrap();
-    env.add_template(
-        "analytics.html",
-        include_str!("../../templates/analytics.html"),
-    )
-    .unwrap();
+    const TEMPLATES: &[(&str, &str)] = &[
+        ("base.html", include_str!("../../templates/base.html")),
+        ("inboxes.html", include_str!("../../templates/inboxes.html")),
+        (
+            "inbox_detail.html",
+            include_str!("../../templates/inbox_detail.html"),
+        ),
+        (
+            "messages_rows.html",
+            include_str!("../../templates/messages_rows.html"),
+        ),
+        ("message.html", include_str!("../../templates/message.html")),
+        ("thread.html", include_str!("../../templates/thread.html")),
+        (
+            "approvals.html",
+            include_str!("../../templates/approvals.html"),
+        ),
+        (
+            "briefing.html",
+            include_str!("../../templates/briefing.html"),
+        ),
+        ("search.html", include_str!("../../templates/search.html")),
+        (
+            "search_results.html",
+            include_str!("../../templates/search_results.html"),
+        ),
+        (
+            "unauthorized.html",
+            include_str!("../../templates/unauthorized.html"),
+        ),
+        (
+            "settings.html",
+            include_str!("../../templates/settings.html"),
+        ),
+        (
+            "analytics.html",
+            include_str!("../../templates/analytics.html"),
+        ),
+    ];
+    for (name, source) in TEMPLATES {
+        env.add_template(name, source).unwrap();
+    }
     env
 }
 
@@ -173,7 +165,7 @@ fn maybe_set_cookie(
 ) -> Response {
     if let Some(Extension(SetCookieKey(Some(key)))) = cookie_key {
         let cookie =
-            format!("postblox_key={key}; Path=/dashboard; HttpOnly; SameSite=Strict");
+            format!("postblox_key={key}; Path=/dashboard; HttpOnly; SameSite=Strict; Secure");
         if let Ok(val) = cookie.parse() {
             response.headers_mut().insert(header::SET_COOKIE, val);
         }
@@ -503,57 +495,17 @@ async fn approval_approve(
     match crate::db::approvals::approve(&state.pool, org_id, id, "dashboard").await {
         Ok(Some(approval)) => {
             let state_clone = state.clone();
-            let msg_id = approval.message_id;
-            let inbox_id = approval.inbox_id;
             tokio::spawn(async move {
-                let (msg_result, inbox_result) = tokio::join!(
-                    crate::db::messages::get_by_id(&state_clone.pool, msg_id),
-                    crate::db::inboxes::get_by_id(&state_clone.pool, inbox_id),
-                );
-                if let Err(ref e) = msg_result {
-                    tracing::error!(approval_id = %id, message_id = %msg_id, "failed to fetch message for delivery: {e}");
-                }
-                if let Err(ref e) = inbox_result {
-                    tracing::error!(approval_id = %id, inbox_id = %inbox_id, "failed to fetch inbox for delivery: {e}");
-                }
-                if let (Ok(Some(msg)), Ok(Some(inbox))) = (msg_result, inbox_result) {
-                    let (to, cc) = crate::api::deliver::extract_addrs(&msg);
-                    if let Err(e) = crate::api::deliver::deliver_message(
-                        &state_clone,
-                        org_id,
-                        &inbox,
-                        msg_id,
-                        &crate::api::deliver::DeliveryParams {
-                            from: &inbox.email,
-                            to: &to,
-                            cc: &cc,
-                            subject: msg.subject.as_deref().unwrap_or(""),
-                            text_body: msg.text_body.as_deref(),
-                            html_body: msg.html_body.as_deref(),
-                            message_id_header: &msg
-                                .message_id_header
-                                .clone()
-                                .unwrap_or_else(|| format!("{}@postblox", uuid::Uuid::new_v4())),
-                        },
-                    )
-                    .await
-                    {
-                        tracing::error!(approval_id = %id, "dashboard deliver failed: {e:?}");
-                    }
-                }
-                crate::events::audit(
-                    &state_clone.pool, org_id, Some(inbox_id),
-                    crate::models::AuditAction::MessageApproved,
-                    "dashboard",
-                    serde_json::json!({"approval_id": id.to_string(), "message_id": msg_id.to_string()}),
-                ).await;
-                crate::api::approvals::record_trust_and_maybe_upgrade(
+                if let Err(e) = crate::api::approvals::execute_approval(
                     &state_clone,
                     org_id,
-                    inbox_id,
-                    true,
+                    &approval,
+                    "dashboard",
                 )
-                .await;
+                .await
+                {
+                    tracing::error!(approval_id = %id, "dashboard approve failed: {e:?}");
+                }
             });
             approval_row(id, "var(--green)", true, "Approved")
         }
@@ -943,7 +895,7 @@ async fn settings_create_notification(
              hx-post=\"/dashboard/settings/notifications/{}/delete\" \
              hx-target=\"#notif-{}\" hx-swap=\"outerHTML\">Delete</button></td></tr>",
             n.id,
-            escape_html(&n.provider),
+            escape_html(&n.provider.to_string()),
             escape_html(&n.config.to_string()),
             n.created_at.format("%Y-%m-%d %H:%M"),
             n.id,

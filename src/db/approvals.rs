@@ -66,7 +66,7 @@ pub async fn count_by_status(
     let row: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM approvals WHERE org_id = $1 AND status = $2")
             .bind(org_id)
-            .bind(status.to_string())
+            .bind(status)
             .fetch_one(pool)
             .await?;
     Ok(row.0)
@@ -186,7 +186,7 @@ pub async fn batch_decide(
     sqlx::query_as(&query)
         .bind(org_id)
         .bind(approval_ids)
-        .bind(status.to_string())
+        .bind(status)
         .bind(decided_by)
         .fetch_all(pool)
         .await
@@ -217,7 +217,7 @@ mod tests {
             text_body: Some("Hello".into()),
             html_body: None,
             extracted_text: None,
-            direction: "outbound".into(),
+            direction: crate::models::Direction::Outbound,
             raw_headers: None,
         };
         let msg = crate::db::messages::create(pool, &cm).await.unwrap();
@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(approval.org_id, org_id);
         assert_eq!(approval.inbox_id, inbox_id);
         assert_eq!(approval.message_id, message_id);
-        assert_eq!(approval.status, "pending");
+        assert_eq!(approval.status, ApprovalStatus::Pending);
         assert!(approval.decided_by.is_none());
         assert!(approval.decided_at.is_none());
     }
@@ -271,7 +271,7 @@ mod tests {
             text_body: Some("Hello 2".into()),
             html_body: None,
             extracted_text: None,
-            direction: "outbound".into(),
+            direction: crate::models::Direction::Outbound,
             raw_headers: None,
         };
         let msg2 = crate::db::messages::create(&pool, &cm2).await.unwrap();
@@ -346,7 +346,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(approved.status, "approved");
+        assert_eq!(approved.status, ApprovalStatus::Approved);
         assert_eq!(approved.decided_by.as_deref(), Some("admin@example.com"));
         assert!(approved.decided_at.is_some());
     }
@@ -386,7 +386,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(rejected.status, "rejected");
+        assert_eq!(rejected.status, ApprovalStatus::Rejected);
         assert_eq!(rejected.decided_by.as_deref(), Some("moderator"));
     }
 
@@ -438,7 +438,7 @@ mod tests {
             text_body: Some("Batch body".into()),
             html_body: None,
             extracted_text: None,
-            direction: "outbound".into(),
+            direction: crate::models::Direction::Outbound,
             raw_headers: None,
         };
         let msg2 = crate::db::messages::create(&pool, &cm2).await.unwrap();
@@ -464,7 +464,7 @@ mod tests {
         .unwrap();
         assert_eq!(decided.len(), 2);
         for d in &decided {
-            assert_eq!(d.status, "approved");
+            assert_eq!(d.status, ApprovalStatus::Approved);
             assert_eq!(d.decided_by.as_deref(), Some("batch_admin"));
         }
     }
@@ -515,7 +515,7 @@ mod tests {
             text_body: Some("Body".into()),
             html_body: None,
             extracted_text: None,
-            direction: "outbound".into(),
+            direction: crate::models::Direction::Outbound,
             raw_headers: None,
         };
         let msg2 = crate::db::messages::create(&pool, &cm2).await.unwrap();
@@ -542,7 +542,7 @@ mod tests {
         // Only a2 should be decided (a1 was already approved)
         assert_eq!(decided.len(), 1);
         assert_eq!(decided[0].id, a2.id);
-        assert_eq!(decided[0].status, "rejected");
+        assert_eq!(decided[0].status, ApprovalStatus::Rejected);
     }
 
     #[tokio::test]
@@ -612,7 +612,7 @@ mod tests {
             text_body: Some("Body".into()),
             html_body: None,
             extracted_text: None,
-            direction: "outbound".into(),
+            direction: crate::models::Direction::Outbound,
             raw_headers: None,
         };
         let msg2 = crate::db::messages::create(&pool, &cm2).await.unwrap();
@@ -655,7 +655,7 @@ mod tests {
                 text_body: Some("Body".into()),
                 html_body: None,
                 extracted_text: None,
-                direction: "outbound".into(),
+                direction: crate::models::Direction::Outbound,
                 raw_headers: None,
             };
             let msg = crate::db::messages::create(&pool, &cm).await.unwrap();

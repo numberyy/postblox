@@ -369,7 +369,7 @@ async fn test_tui_approve_message_changes_status() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(fetched.status, "approved");
+    assert_eq!(fetched.status, postblox::models::ApprovalStatus::Approved);
 }
 
 #[tokio::test]
@@ -404,7 +404,7 @@ async fn test_tui_reject_message_changes_status() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(fetched.status, "rejected");
+    assert_eq!(fetched.status, postblox::models::ApprovalStatus::Rejected);
 }
 
 #[tokio::test]

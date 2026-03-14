@@ -49,7 +49,7 @@ pub struct AppState {
     pub hooks: std::sync::Arc<[crate::hooks::HookConfig]>,
     pub ws_hub: Arc<crate::events::websocket::WebSocketHub>,
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
-    pub attachment_storage_path: String,
+    pub attachment_storage_path: std::path::PathBuf,
     pub max_attachment_size_bytes: i64,
 }
 
@@ -83,6 +83,10 @@ pub async fn get_inbox_for_org(
         return Err(error::ApiError::NotFound);
     }
     Ok(inbox)
+}
+
+pub fn new_message_id() -> String {
+    format!("{}@postblox", Uuid::new_v4())
 }
 
 pub struct SendCheck<'a> {
@@ -215,7 +219,10 @@ pub fn router(state: AppState) -> axum::Router {
             "/inboxes/{inbox_id}/messages",
             get(messages::list).post(messages::send),
         )
-        .route("/inboxes/{inbox_id}/messages/{message_id}", get(messages::get))
+        .route(
+            "/inboxes/{inbox_id}/messages/{message_id}",
+            get(messages::get),
+        )
         .route(
             "/inboxes/{inbox_id}/messages/{message_id}/delivery-status",
             get(bounces::get_delivery_status),
@@ -334,6 +341,25 @@ struct WsParams {
     key: String,
 }
 
+async fn ws_upgrade(
+    State(state): State<AppState>,
+    Query(params): Query<WsParams>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> impl IntoResponse {
+    let stored = match auth::validate_api_key(&state.pool, &params.key).await {
+        Ok(k) => k,
+        Err(auth::AuthError::DatabaseError) => {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+        Err(auth::AuthError::Invalid) => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    let hub = state.ws_hub.clone();
+    let org_id = stored.org_id;
+    ws.on_upgrade(move |socket| async move { hub.handle_ws(socket, org_id).await })
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,23 +424,4 @@ mod tests {
         assert_eq!(limit, 30);
         assert_eq!(offset, 5);
     }
-}
-
-async fn ws_upgrade(
-    State(state): State<AppState>,
-    Query(params): Query<WsParams>,
-    ws: axum::extract::ws::WebSocketUpgrade,
-) -> impl IntoResponse {
-    let stored = match auth::validate_api_key(&state.pool, &params.key).await {
-        Ok(k) => k,
-        Err(auth::AuthError::DatabaseError) => {
-            return StatusCode::SERVICE_UNAVAILABLE.into_response()
-        }
-        Err(auth::AuthError::Invalid) => return StatusCode::UNAUTHORIZED.into_response(),
-    };
-
-    let hub = state.ws_hub.clone();
-    let org_id = stored.org_id;
-    ws.on_upgrade(move |socket| async move { hub.handle_ws(socket, org_id).await })
-        .into_response()
 }

@@ -102,10 +102,7 @@ pub async fn run(args: DoctorArgs) -> Result<(), DoctorError> {
     }
 }
 
-fn check_config(
-    path: &PathBuf,
-    results: &mut Vec<CheckResult>,
-) -> Option<crate::config::Config> {
+fn check_config(path: &PathBuf, results: &mut Vec<CheckResult>) -> Option<crate::config::Config> {
     if !path.exists() {
         results.push(CheckResult::fail(
             "Config file",
@@ -127,7 +124,10 @@ fn check_config(
 
     match toml::from_str::<crate::config::Config>(&contents) {
         Ok(config) => {
-            results.push(CheckResult::ok("Config file", format!("{} is valid TOML", path.display())));
+            results.push(CheckResult::ok(
+                "Config file",
+                format!("{} is valid TOML", path.display()),
+            ));
             Some(config)
         }
         Err(e) => {
@@ -140,10 +140,7 @@ fn check_config(
     }
 }
 
-async fn check_database(
-    url: &str,
-    results: &mut Vec<CheckResult>,
-) -> Option<sqlx::PgPool> {
+async fn check_database(url: &str, results: &mut Vec<CheckResult>) -> Option<sqlx::PgPool> {
     use sqlx::postgres::PgPoolOptions;
 
     let pool = match PgPoolOptions::new()
@@ -168,21 +165,17 @@ async fn check_database(
             Some(pool)
         }
         Err(e) => {
-            results.push(CheckResult::fail(
-                "Database",
-                format!("query failed: {e}"),
-            ));
+            results.push(CheckResult::fail("Database", format!("query failed: {e}")));
             None
         }
     }
 }
 
 async fn check_migrations(pool: &sqlx::PgPool, fix: bool, results: &mut Vec<CheckResult>) {
-    let applied: Result<Vec<(i64,)>, _> = sqlx::query_as(
-        "SELECT version FROM _sqlx_migrations ORDER BY version",
-    )
-    .fetch_all(pool)
-    .await;
+    let applied: Result<Vec<(i64,)>, _> =
+        sqlx::query_as("SELECT version FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(pool)
+            .await;
 
     let applied_count = match applied {
         Ok(rows) => rows.len(),
@@ -302,9 +295,7 @@ async fn check_embedding(url: &str, results: &mut Vec<CheckResult>) {
         }
     };
 
-    let base = url
-        .trim_end_matches("/v1/embeddings")
-        .trim_end_matches('/');
+    let base = url.trim_end_matches("/v1/embeddings").trim_end_matches('/');
 
     match client.get(base).send().await {
         Ok(resp) => {

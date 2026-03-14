@@ -1250,8 +1250,5 @@ fn render_help_overlay(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
 }
 
 fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
-    col >= rect.x
-        && col < rect.x + rect.width
-        && row >= rect.y
-        && row < rect.y + rect.height
+    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }

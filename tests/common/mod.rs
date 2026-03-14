@@ -38,6 +38,8 @@ pub fn test_state(pool: PgPool) -> api::AppState {
         hooks: Arc::from(vec![]),
         ws_hub: Arc::new(WebSocketHub::new()),
         rate_limiter: Arc::new(api::rate_limit::RateLimiter::new(1000, 10000)),
+        attachment_storage_path: std::env::temp_dir().join("postblox-test-attachments"),
+        max_attachment_size_bytes: 25 * 1024 * 1024,
     }
 }
 
@@ -81,7 +83,7 @@ pub fn create_message_input(inbox_id: Uuid, subject: &str, body: &str) -> Create
         text_body: Some(body.into()),
         html_body: None,
         extracted_text: Some(body.into()),
-        direction: "inbound".into(),
+        direction: postblox::models::Direction::Inbound,
         raw_headers: None,
     }
 }

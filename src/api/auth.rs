@@ -35,12 +35,15 @@ impl FromRequestParts<AppState> for AuthOrg {
         let pool = state.pool.clone();
         let key_id = auth_info.id;
         tokio::spawn(async move {
-            let _ = crate::db::api_keys::touch_last_used(&pool, key_id).await;
+            if let Err(e) = crate::db::api_keys::touch_last_used(&pool, key_id).await {
+                tracing::debug!("failed to touch last_used: {e}");
+            }
         });
 
         Ok(AuthOrg {
             org_id: auth_info.org_id,
-            role: auth_info.role.unwrap_or(Role::Admin),
+            // Default to Member (least privilege) for legacy keys without explicit role
+            role: auth_info.role.unwrap_or(Role::Member),
         })
     }
 }
@@ -109,11 +112,13 @@ pub async fn validate_api_key(
     Ok(stored)
 }
 
+#[must_use]
 pub fn hash_key(key: &str) -> String {
     let hash = Sha256::digest(key.as_bytes());
     format!("{hash:x}")
 }
 
+#[must_use]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

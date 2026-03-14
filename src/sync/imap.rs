@@ -110,7 +110,7 @@ pub async fn one_shot_sync(
         message_id: Option<String>,
         create_msg: crate::models::CreateMessage,
     }
-    let mut parsed_msgs: Vec<ParsedMsg> = Vec::new();
+    let mut parsed_msgs: Vec<ParsedMsg> = Vec::with_capacity(uid_vec.len());
     while let Some(msg_result) = messages.next().await {
         let fetch = msg_result.map_err(|e| SyncError::Protocol(e.to_string()))?;
         let body = match fetch.body() {

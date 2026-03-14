@@ -40,11 +40,46 @@ impl FromStr for SendMode {
     }
 }
 
+impl sqlx::Type<sqlx::Postgres> for SendMode {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for SendMode {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        s.parse::<SendMode>()
+            .map_err(|e| -> sqlx::error::BoxDynError { e.into() })
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for SendMode {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <&str as sqlx::Encode<sqlx::Postgres>>::encode(
+            match self {
+                Self::Shadow => "shadow",
+                Self::Approval => "approval",
+                Self::AutoApprove => "auto_approve",
+                Self::Autonomous => "autonomous",
+            },
+            buf,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Permission {
     pub id: Uuid,
     pub inbox_id: Uuid,
-    pub send_mode: String,
+    pub send_mode: SendMode,
     pub rules: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -56,7 +91,7 @@ impl Permission {
         Self {
             id: Uuid::nil(),
             inbox_id,
-            send_mode: SendMode::Approval.to_string(),
+            send_mode: SendMode::Approval,
             rules: serde_json::json!([]),
             created_at: now,
             updated_at: now,
@@ -64,17 +99,7 @@ impl Permission {
     }
 
     pub fn mode(&self) -> SendMode {
-        match self.send_mode.parse() {
-            Ok(m) => m,
-            Err(_) => {
-                tracing::warn!(
-                    permission_id = %self.id,
-                    send_mode = %self.send_mode,
-                    "invalid send_mode in DB, defaulting to shadow"
-                );
-                SendMode::default()
-            }
-        }
+        self.send_mode
     }
 
     pub fn rules(&self) -> crate::core::rules::RuleSet {
@@ -127,6 +152,67 @@ pub struct Thread {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    Inbound,
+    Outbound,
+}
+
+impl fmt::Display for Direction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Inbound => "inbound",
+            Self::Outbound => "outbound",
+        })
+    }
+}
+
+impl FromStr for Direction {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "inbound" => Ok(Self::Inbound),
+            "outbound" => Ok(Self::Outbound),
+            other => Err(format!("invalid direction: {other}")),
+        }
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for Direction {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for Direction {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        s.parse::<Direction>()
+            .map_err(|e| -> sqlx::error::BoxDynError { e.into() })
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for Direction {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <&str as sqlx::Encode<sqlx::Postgres>>::encode(
+            match self {
+                Self::Inbound => "inbound",
+                Self::Outbound => "outbound",
+            },
+            buf,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Message {
     pub id: Uuid,
@@ -142,7 +228,7 @@ pub struct Message {
     pub text_body: Option<String>,
     pub html_body: Option<String>,
     pub extracted_text: Option<String>,
-    pub direction: String,
+    pub direction: Direction,
     pub raw_headers: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     #[sqlx(default)]
@@ -173,7 +259,7 @@ pub struct CreateMessage {
     pub text_body: Option<String>,
     pub html_body: Option<String>,
     pub extracted_text: Option<String>,
-    pub direction: String,
+    pub direction: Direction,
     pub raw_headers: Option<serde_json::Value>,
 }
 
@@ -245,7 +331,7 @@ pub struct LinkedAccount {
     #[serde(skip_serializing)]
     pub password: String,
     pub last_sync_at: Option<DateTime<Utc>>,
-    pub sync_status: String,
+    pub sync_status: crate::sync::SyncStatus,
     pub message_count: i32,
     pub created_at: DateTime<Utc>,
 }
@@ -345,12 +431,39 @@ impl FromStr for AuditAction {
     }
 }
 
+impl sqlx::Type<sqlx::Postgres> for AuditAction {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for AuditAction {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        s.parse::<AuditAction>()
+            .map_err(|e| -> sqlx::error::BoxDynError { e.into() })
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for AuditAction {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <String as sqlx::Encode<sqlx::Postgres>>::encode(self.to_string(), buf)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AuditEntry {
     pub id: Uuid,
     pub org_id: Uuid,
     pub inbox_id: Option<Uuid>,
-    pub action: String,
+    pub action: AuditAction,
     pub actor: String,
     pub details: serde_json::Value,
     pub created_at: DateTime<Utc>,
@@ -387,13 +500,47 @@ impl FromStr for ApprovalStatus {
     }
 }
 
+impl sqlx::Type<sqlx::Postgres> for ApprovalStatus {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for ApprovalStatus {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        s.parse::<ApprovalStatus>()
+            .map_err(|e| -> sqlx::error::BoxDynError { e.into() })
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for ApprovalStatus {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <&str as sqlx::Encode<sqlx::Postgres>>::encode(
+            match self {
+                Self::Pending => "pending",
+                Self::Approved => "approved",
+                Self::Rejected => "rejected",
+            },
+            buf,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Approval {
     pub id: Uuid,
     pub org_id: Uuid,
     pub inbox_id: Uuid,
     pub message_id: Uuid,
-    pub status: String,
+    pub status: ApprovalStatus,
     pub decided_by: Option<String>,
     pub decided_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -420,7 +567,7 @@ pub struct ApprovalWithDetails {
     pub id: Uuid,
     pub inbox_id: Uuid,
     pub message_id: Uuid,
-    pub status: String,
+    pub status: ApprovalStatus,
     pub created_at: DateTime<Utc>,
     pub subject: Option<String>,
     pub from_addr: String,
@@ -475,11 +622,38 @@ impl FromStr for NotificationProvider {
     }
 }
 
+impl sqlx::Type<sqlx::Postgres> for NotificationProvider {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for NotificationProvider {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        s.parse::<NotificationProvider>()
+            .map_err(|e| -> sqlx::error::BoxDynError { e.into() })
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for NotificationProvider {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <String as sqlx::Encode<sqlx::Postgres>>::encode(self.to_string(), buf)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct NotificationConfig {
     pub id: Uuid,
     pub org_id: Uuid,
-    pub provider: String,
+    pub provider: NotificationProvider,
     pub config: serde_json::Value,
     pub active: bool,
     pub created_at: DateTime<Utc>,
@@ -523,6 +697,33 @@ impl FromStr for DeliveryStatusType {
     }
 }
 
+impl sqlx::Type<sqlx::Postgres> for DeliveryStatusType {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for DeliveryStatusType {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        s.parse::<DeliveryStatusType>()
+            .map_err(|e| -> sqlx::error::BoxDynError { e.into() })
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for DeliveryStatusType {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <String as sqlx::Encode<sqlx::Postgres>>::encode(self.to_string(), buf)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BounceType {
@@ -548,6 +749,33 @@ impl FromStr for BounceType {
             "soft" => Ok(Self::Soft),
             other => Err(format!("unknown bounce type: {other}")),
         }
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for BounceType {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for BounceType {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        s.parse::<BounceType>()
+            .map_err(|e| -> sqlx::error::BoxDynError { e.into() })
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for BounceType {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <String as sqlx::Encode<sqlx::Postgres>>::encode(self.to_string(), buf)
     }
 }
 
@@ -623,8 +851,8 @@ pub struct OrgMember {
 pub struct DeliveryStatus {
     pub id: Uuid,
     pub message_id: Uuid,
-    pub status: String,
-    pub bounce_type: Option<String>,
+    pub status: DeliveryStatusType,
+    pub bounce_type: Option<BounceType>,
     pub details: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
 }
@@ -714,11 +942,11 @@ mod tests {
     }
 
     #[test]
-    fn test_permission_mode_parses_send_mode() {
+    fn test_permission_mode_returns_send_mode() {
         let perm = Permission {
             id: Uuid::new_v4(),
             inbox_id: Uuid::new_v4(),
-            send_mode: "autonomous".into(),
+            send_mode: SendMode::Autonomous,
             rules: serde_json::json!({}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -727,24 +955,11 @@ mod tests {
     }
 
     #[test]
-    fn test_permission_mode_defaults_on_invalid() {
-        let perm = Permission {
-            id: Uuid::new_v4(),
-            inbox_id: Uuid::new_v4(),
-            send_mode: "garbage".into(),
-            rules: serde_json::json!({}),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        assert_eq!(perm.mode(), SendMode::Approval);
-    }
-
-    #[test]
     fn test_permission_serialization_roundtrip() {
         let perm = Permission {
             id: Uuid::new_v4(),
             inbox_id: Uuid::new_v4(),
-            send_mode: "approval".into(),
+            send_mode: SendMode::Approval,
             rules: serde_json::json!({"max_daily": 100}),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -861,7 +1076,7 @@ mod tests {
             text_body: Some("Hello".into()),
             html_body: None,
             extracted_text: None,
-            direction: "inbound".into(),
+            direction: Direction::Inbound,
             raw_headers: None,
             created_at: Utc::now(),
             slop_score: None,
@@ -892,7 +1107,7 @@ mod tests {
             text_body: None,
             html_body: None,
             extracted_text: None,
-            direction: "outbound".into(),
+            direction: Direction::Outbound,
             raw_headers: Some(serde_json::json!({"X-Custom": "val", "X-Other": "val2"})),
             created_at: Utc::now(),
             slop_score: None,
@@ -940,12 +1155,12 @@ mod tests {
             text_body: Some("Body".into()),
             html_body: None,
             extracted_text: None,
-            direction: "outbound".into(),
+            direction: Direction::Outbound,
             raw_headers: None,
         };
         let json = serde_json::to_value(&cm).unwrap();
         assert_eq!(json["direction"], "outbound");
-        assert_eq!(json["to_addrs"][0], "user@example.com");
+        assert!(json["to_addrs"][0] == "user@example.com");
     }
 
     #[test]
@@ -1042,7 +1257,7 @@ mod tests {
             username: "user@gmail.com".into(),
             password: "enc_secret".into(),
             last_sync_at: Some(Utc::now()),
-            sync_status: "idle".into(),
+            sync_status: crate::sync::SyncStatus::Idle,
             message_count: 42,
             created_at: Utc::now(),
         };
@@ -1119,7 +1334,7 @@ mod tests {
             text_body: Some("مرحبا بالعالم".into()),
             html_body: None,
             extracted_text: None,
-            direction: "inbound".into(),
+            direction: Direction::Inbound,
             raw_headers: None,
             created_at: Utc::now(),
             slop_score: None,
@@ -1196,7 +1411,7 @@ mod tests {
             id: Uuid::new_v4(),
             org_id: Uuid::new_v4(),
             inbox_id: Some(Uuid::new_v4()),
-            action: "message_sent".into(),
+            action: AuditAction::MessageSent,
             actor: "api_key:pb_1234".into(),
             details: serde_json::json!({"to": "user@example.com"}),
             created_at: Utc::now(),
@@ -1212,7 +1427,7 @@ mod tests {
             id: Uuid::new_v4(),
             org_id: Uuid::new_v4(),
             inbox_id: None,
-            action: "domain_created".into(),
+            action: AuditAction::DomainCreated,
             actor: "system".into(),
             details: serde_json::json!({}),
             created_at: Utc::now(),
@@ -1265,7 +1480,7 @@ mod tests {
             org_id: Uuid::new_v4(),
             inbox_id: Uuid::new_v4(),
             message_id: Uuid::new_v4(),
-            status: "pending".into(),
+            status: ApprovalStatus::Pending,
             decided_by: None,
             decided_at: None,
             created_at: Utc::now(),
@@ -1282,7 +1497,7 @@ mod tests {
             org_id: Uuid::new_v4(),
             inbox_id: Uuid::new_v4(),
             message_id: Uuid::new_v4(),
-            status: "approved".into(),
+            status: ApprovalStatus::Approved,
             decided_by: Some("admin@example.com".into()),
             decided_at: Some(Utc::now()),
             created_at: Utc::now(),
@@ -1386,7 +1601,7 @@ mod tests {
         let nc = NotificationConfig {
             id: Uuid::new_v4(),
             org_id: Uuid::new_v4(),
-            provider: "ntfy".into(),
+            provider: NotificationProvider::Ntfy,
             config: serde_json::json!({"url": "https://ntfy.sh/postblox"}),
             active: true,
             created_at: Utc::now(),
@@ -1490,8 +1705,8 @@ mod tests {
         let ds = DeliveryStatus {
             id: Uuid::new_v4(),
             message_id: Uuid::new_v4(),
-            status: "bounced".into(),
-            bounce_type: Some("hard".into()),
+            status: DeliveryStatusType::Bounced,
+            bounce_type: Some(BounceType::Hard),
             details: Some(serde_json::json!({"smtp_code": 550})),
             created_at: Utc::now(),
         };
@@ -1505,7 +1720,7 @@ mod tests {
         let ds = DeliveryStatus {
             id: Uuid::new_v4(),
             message_id: Uuid::new_v4(),
-            status: "delivered".into(),
+            status: DeliveryStatusType::Delivered,
             bounce_type: None,
             details: None,
             created_at: Utc::now(),

@@ -80,7 +80,7 @@ mod tests {
             text_body: Some("test body".into()),
             html_body: None,
             extracted_text: None,
-            direction: "inbound".into(),
+            direction: crate::models::Direction::Inbound,
             raw_headers: None,
         };
         crate::db::messages::create(pool, &cm).await.unwrap()

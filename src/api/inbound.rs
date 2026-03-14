@@ -119,11 +119,19 @@ pub async fn receive_inbound(
         .map_err(ApiError::from_sqlx)?;
 
     let mut attachment_count: usize = 0;
-    let storage_path = std::path::Path::new(&state.attachment_storage_path);
+    let storage_path = &state.attachment_storage_path;
     let max_size = state.max_attachment_size_bytes as u64;
     let msg_id_str = msg.id.to_string();
     for att in &parsed.attachments {
-        match crate::storage::store_attachment(storage_path, &msg_id_str, &att.filename, &att.data, max_size).await {
+        match crate::storage::store_attachment(
+            storage_path,
+            &msg_id_str,
+            &att.filename,
+            &att.data,
+            max_size,
+        )
+        .await
+        {
             Ok(storage_key) => {
                 let create_att = crate::models::CreateAttachment {
                     message_id: msg.id,
@@ -135,7 +143,9 @@ pub async fn receive_inbound(
                 };
                 if let Err(e) = crate::db::attachments::create(&state.pool, &create_att).await {
                     tracing::error!(message_id = %msg.id, filename = %att.filename, "failed to store attachment metadata: {e}");
-                    if let Err(cleanup) = crate::storage::delete_attachment(storage_path, &storage_key).await {
+                    if let Err(cleanup) =
+                        crate::storage::delete_attachment(storage_path, &storage_key).await
+                    {
                         tracing::error!(message_id = %msg.id, storage_key = %storage_key, "failed to clean up orphaned attachment: {cleanup}");
                     }
                 } else {
@@ -173,8 +183,8 @@ pub async fn receive_inbound(
     let slop_fields = crate::db::slop::SlopFields {
         score: slop_result.score,
         signals: &signals_json,
-        category: &slop_result.category,
-        priority: &slop_result.priority,
+        category: slop_result.category,
+        priority: slop_result.priority,
         triage_status: slop_result.triage_action.as_str(),
         requires_action: slop_result.requires_action,
     };
@@ -188,10 +198,10 @@ pub async fn receive_inbound(
         ),
     );
     if let Err(e) = slop_update {
-        tracing::warn!(message_id = %msg.id, "failed to update slop fields: {e}");
+        tracing::error!(message_id = %msg.id, "failed to update slop fields: {e}");
     }
     if let Err(e) = rep_update {
-        tracing::warn!(message_id = %msg.id, "failed to upsert sender reputation: {e}");
+        tracing::error!(message_id = %msg.id, "failed to upsert sender reputation: {e}");
     }
 
     let pool = state.pool.clone();
@@ -272,9 +282,10 @@ async fn subject_based_thread_match(
     parsed: &crate::mail::parser::ParsedEmail,
 ) -> Result<crate::mail::ThreadMatch, ApiError> {
     let cutoff = Utc::now() - chrono::Duration::days(7);
-    let recent_threads = crate::db::threads::list_recent_by_inbox(&state.pool, inbox_id, cutoff, 200)
-        .await
-        .map_err(ApiError::from_sqlx)?;
+    let recent_threads =
+        crate::db::threads::list_recent_by_inbox(&state.pool, inbox_id, cutoff, 200)
+            .await
+            .map_err(ApiError::from_sqlx)?;
 
     let thread_refs: Vec<_> = recent_threads
         .iter()

@@ -82,7 +82,10 @@ pub async fn delete(
 
     if let Some(ref stalwart) = state.stalwart {
         if let Err(e) = stalwart.delete_account(&inbox.email).await {
-            tracing::error!("stalwart account deletion failed for {}: {e}", inbox.email);
+            tracing::error!(
+                inbox_email = %inbox.email,
+                "stalwart account deletion failed, inbox will be deleted but mail account may remain orphaned: {e}"
+            );
         }
     }
 

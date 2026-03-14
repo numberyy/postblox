@@ -63,7 +63,7 @@ pub async fn set_sync_status(
 ) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE linked_accounts SET sync_status = $2 WHERE id = $1")
         .bind(id)
-        .bind(status.as_str())
+        .bind(status)
         .execute(pool)
         .await?;
     Ok(())
@@ -116,7 +116,7 @@ mod tests {
         assert_eq!(acct.org_id, org.id);
         assert_eq!(acct.imap_host, "imap.example.com");
         assert_eq!(acct.imap_port, 993);
-        assert_eq!(acct.sync_status, "idle");
+        assert_eq!(acct.sync_status, crate::sync::SyncStatus::Idle);
         assert_eq!(acct.message_count, 0);
         assert!(acct.last_sync_at.is_none());
 
@@ -307,12 +307,12 @@ mod tests {
             .await
             .unwrap();
         let fetched = get_by_id(&pool, acct.id).await.unwrap().unwrap();
-        assert_eq!(fetched.sync_status, "syncing");
+        assert_eq!(fetched.sync_status, crate::sync::SyncStatus::Syncing);
 
         let now = Utc::now();
         complete_sync(&pool, acct.id, 15, now).await.unwrap();
         let fetched = get_by_id(&pool, acct.id).await.unwrap().unwrap();
-        assert_eq!(fetched.sync_status, "idle");
+        assert_eq!(fetched.sync_status, crate::sync::SyncStatus::Idle);
         assert_eq!(fetched.message_count, 15);
         assert!(fetched.last_sync_at.is_some());
     }

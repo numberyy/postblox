@@ -31,7 +31,7 @@ pub async fn create(pool: &PgPool, msg: &CreateMessage) -> Result<Message, sqlx:
         .bind(&msg.text_body)
         .bind(&msg.html_body)
         .bind(&msg.extracted_text)
-        .bind(&msg.direction)
+        .bind(msg.direction)
         .bind(&msg.raw_headers)
         .fetch_one(pool)
         .await
@@ -240,7 +240,7 @@ mod tests {
             text_body: Some("Hello".into()),
             html_body: None,
             extracted_text: None,
-            direction: "inbound".into(),
+            direction: crate::models::Direction::Inbound,
             raw_headers: None,
         }
     }
@@ -255,7 +255,7 @@ mod tests {
         let msg = create(&pool, &cm).await.unwrap();
         assert_eq!(msg.inbox_id, inbox.id);
         assert_eq!(msg.from_addr, "sender@example.com");
-        assert_eq!(msg.direction, "inbound");
+        assert_eq!(msg.direction, crate::models::Direction::Inbound);
         assert_eq!(msg.to_addrs, json!(["rcpt@example.com"]));
 
         let fetched = get_by_id(&pool, msg.id).await.unwrap().unwrap();

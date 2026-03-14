@@ -32,7 +32,7 @@ impl WebSocketHub {
     pub fn subscribe(&self, org_id: Uuid) -> Option<broadcast::Receiver<String>> {
         // Acquire write lock first, then increment counter — prevents counter
         // leak if the lock panics (poisoned) between CAS and subscribe.
-        let mut channels = self.channels.write().unwrap();
+        let mut channels = self.channels.write().unwrap_or_else(|e| e.into_inner());
         let current = self.total_connections.load(Ordering::Relaxed);
         if current >= MAX_CONNECTIONS {
             return None;
@@ -47,7 +47,7 @@ impl WebSocketHub {
     pub fn unsubscribe(&self, org_id: Uuid) {
         // Acquire lock before decrementing — prevents subscribe from seeing
         // the decremented count and reusing a channel about to be pruned.
-        let mut channels = self.channels.write().unwrap();
+        let mut channels = self.channels.write().unwrap_or_else(|e| e.into_inner());
         self.total_connections.fetch_sub(1, Ordering::Relaxed);
         if let std::collections::hash_map::Entry::Occupied(e) = channels.entry(org_id) {
             if e.get().receiver_count() == 0 {
@@ -57,7 +57,7 @@ impl WebSocketHub {
     }
 
     pub fn broadcast(&self, org_id: Uuid, event: &str, data: &serde_json::Value) {
-        let channels = self.channels.read().unwrap();
+        let channels = self.channels.read().unwrap_or_else(|e| e.into_inner());
         if let Some(tx) = channels.get(&org_id) {
             if tx.receiver_count() > 0 {
                 let msg = serde_json::json!({
@@ -121,7 +121,7 @@ impl WebSocketHub {
 
     #[cfg(test)]
     pub fn connection_count(&self, org_id: Uuid) -> usize {
-        let channels = self.channels.read().unwrap();
+        let channels = self.channels.read().unwrap_or_else(|e| e.into_inner());
         channels
             .get(&org_id)
             .map(|tx| tx.receiver_count())

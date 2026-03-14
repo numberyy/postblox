@@ -116,8 +116,7 @@ pub async fn audit(
     details: serde_json::Value,
 ) {
     if let Err(e) =
-        crate::db::audit::create_entry(pool, org_id, inbox_id, &action.to_string(), actor, details)
-            .await
+        crate::db::audit::create_entry(pool, org_id, inbox_id, action, actor, details).await
     {
         tracing::error!("failed to create audit entry: {e}");
     }

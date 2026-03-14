@@ -36,7 +36,7 @@ pub fn parsed_to_create_message(
         text_body: parsed.text_body.clone(),
         html_body: parsed.html_body.clone(),
         extracted_text,
-        direction: "inbound".into(),
+        direction: crate::models::Direction::Inbound,
         raw_headers: Some(parsed.raw_headers.clone()),
     }
 }

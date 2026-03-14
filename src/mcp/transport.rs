@@ -155,7 +155,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tools_call_unknown_tool() {
-        let client = PostbloxClient::new("http://localhost:1".into(), "key".into());
+        let client = PostbloxClient::new("http://localhost:1".into(), "key".into()).unwrap();
         let params = json!({ "name": "nonexistent", "arguments": {} });
         let resp = handle_tools_call(json!(3), &params, &client).await;
         assert_eq!(resp["result"]["isError"], true);
@@ -165,7 +165,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tools_call_missing_args() {
-        let client = PostbloxClient::new("http://localhost:1".into(), "key".into());
+        let client = PostbloxClient::new("http://localhost:1".into(), "key".into()).unwrap();
         let params = json!({ "name": "postblox_get_message", "arguments": {} });
         let resp = handle_tools_call(json!(4), &params, &client).await;
         assert_eq!(resp["result"]["isError"], true);
@@ -177,7 +177,7 @@ mod tests {
     async fn test_handle_tools_call_success_format() {
         // postblox_list_inboxes doesn't need args, but will fail HTTP — that's fine,
         // we're testing dispatch routing, not HTTP success
-        let client = PostbloxClient::new("http://localhost:1".into(), "key".into());
+        let client = PostbloxClient::new("http://localhost:1".into(), "key".into()).unwrap();
         let params = json!({ "name": "postblox_list_inboxes", "arguments": {} });
         let resp = handle_tools_call(json!(5), &params, &client).await;
         // will be an error because localhost:1 isn't real, but it should be a tool error not a protocol error

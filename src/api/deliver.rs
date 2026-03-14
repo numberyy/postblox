@@ -54,7 +54,9 @@ pub async fn deliver_message(
             return Err(ApiError::Internal("email delivery failed".into()));
         }
     } else {
-        tracing::warn!("stalwart not configured, skipping email delivery");
+        return Err(ApiError::Internal(
+            "email delivery unavailable: stalwart not configured".into(),
+        ));
     }
 
     let pool = state.pool.clone();
@@ -122,7 +124,7 @@ mod tests {
             text_body: None,
             html_body: None,
             extracted_text: None,
-            direction: "outbound".into(),
+            direction: crate::models::Direction::Outbound,
             raw_headers: None,
             created_at: chrono::Utc::now(),
             slop_score: None,
@@ -153,7 +155,7 @@ mod tests {
             text_body: None,
             html_body: None,
             extracted_text: None,
-            direction: "outbound".into(),
+            direction: crate::models::Direction::Outbound,
             raw_headers: None,
             created_at: chrono::Utc::now(),
             slop_score: None,
@@ -184,7 +186,7 @@ mod tests {
             text_body: None,
             html_body: None,
             extracted_text: None,
-            direction: "outbound".into(),
+            direction: crate::models::Direction::Outbound,
             raw_headers: None,
             created_at: chrono::Utc::now(),
             slop_score: None,

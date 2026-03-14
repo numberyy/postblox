@@ -194,7 +194,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(perm.send_mode, "auto_approve");
+        assert_eq!(perm.send_mode, crate::models::SendMode::AutoApprove);
     }
 
     #[tokio::test]

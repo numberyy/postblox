@@ -10,7 +10,7 @@ pub async fn create_entry(
     pool: &PgPool,
     org_id: Uuid,
     inbox_id: Option<Uuid>,
-    action: &str,
+    action: crate::models::AuditAction,
     actor: &str,
     details: serde_json::Value,
 ) -> Result<AuditEntry, sqlx::Error> {
@@ -88,6 +88,7 @@ pub async fn list_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::AuditAction;
 
     async fn setup_org(pool: &PgPool) -> (Uuid, Uuid) {
         let org = crate::db::organizations::create(pool, "Audit Test Org")
@@ -110,7 +111,7 @@ mod tests {
             &pool,
             org_id,
             Some(inbox_id),
-            "message_sent",
+            AuditAction::MessageSent,
             "api_key:pb_1234",
             serde_json::json!({"to": "user@example.com"}),
         )
@@ -119,7 +120,7 @@ mod tests {
 
         assert_eq!(entry.org_id, org_id);
         assert_eq!(entry.inbox_id, Some(inbox_id));
-        assert_eq!(entry.action, "message_sent");
+        assert_eq!(entry.action, AuditAction::MessageSent);
         assert_eq!(entry.actor, "api_key:pb_1234");
         assert_eq!(entry.details["to"], "user@example.com");
     }
@@ -136,7 +137,7 @@ mod tests {
             &pool,
             org.id,
             None,
-            "domain_created",
+            AuditAction::DomainCreated,
             "system",
             serde_json::json!({"domain": "example.com"}),
         )
@@ -144,7 +145,7 @@ mod tests {
         .unwrap();
 
         assert!(entry.inbox_id.is_none());
-        assert_eq!(entry.action, "domain_created");
+        assert_eq!(entry.action, AuditAction::DomainCreated);
     }
 
     #[tokio::test]
@@ -158,7 +159,7 @@ mod tests {
                 &pool,
                 org_id,
                 Some(inbox_id),
-                "message_sent",
+                AuditAction::MessageSent,
                 &format!("actor_{i}"),
                 serde_json::json!({}),
             )
@@ -187,7 +188,7 @@ mod tests {
             &pool,
             org_id,
             Some(inbox_id),
-            "message_sent",
+            AuditAction::MessageSent,
             "actor",
             serde_json::json!({}),
         )
@@ -197,7 +198,7 @@ mod tests {
             &pool,
             org_id,
             Some(inbox_id),
-            "inbox_created",
+            AuditAction::InboxCreated,
             "actor",
             serde_json::json!({}),
         )
@@ -217,7 +218,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].action, "inbox_created");
+        assert_eq!(filtered[0].action, AuditAction::InboxCreated);
     }
 
     #[tokio::test]
@@ -234,7 +235,7 @@ mod tests {
             &pool,
             org_id,
             Some(inbox_id),
-            "message_sent",
+            AuditAction::MessageSent,
             "a",
             serde_json::json!({}),
         )
@@ -244,7 +245,7 @@ mod tests {
             &pool,
             org_id,
             Some(inbox2.id),
-            "message_sent",
+            AuditAction::MessageSent,
             "a",
             serde_json::json!({}),
         )
@@ -271,7 +272,7 @@ mod tests {
             &pool,
             org_id,
             Some(inbox_id),
-            "message_sent",
+            AuditAction::MessageSent,
             "a",
             serde_json::json!({}),
         )

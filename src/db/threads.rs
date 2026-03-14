@@ -89,7 +89,7 @@ pub async fn find_by_message_ids(
     .await
 }
 
-/// List recent threads for subject-based matching (7-day window).
+/// List threads with last_message_at >= since, for subject-based matching.
 pub async fn list_recent_by_inbox(
     pool: &PgPool,
     inbox_id: Uuid,

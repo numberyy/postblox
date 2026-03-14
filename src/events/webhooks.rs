@@ -9,6 +9,8 @@ type HmacSha256 = Hmac<Sha256>;
 pub enum WebhookError {
     #[error("webhook delivery failed: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("webhook payload serialization failed: {0}")]
+    Serialize(#[from] serde_json::Error),
     #[error("webhook endpoint returned {0}")]
     Status(u16),
 }
@@ -33,7 +35,7 @@ pub async fn deliver(
         "timestamp": Utc::now().to_rfc3339(),
         "data": data,
     });
-    let body = serde_json::to_vec(&payload).expect("webhook payload serialization");
+    let body = serde_json::to_vec(&payload)?;
     let signature = sign_payload(secret, &body);
 
     let resp = client

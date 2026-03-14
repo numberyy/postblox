@@ -1202,7 +1202,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_unknown_tool_returns_error() {
-        let client = PostbloxClient::new("http://localhost:1".into(), "key".into());
+        let client = PostbloxClient::new("http://localhost:1".into(), "key".into()).unwrap();
         let err = dispatch(&client, "nonexistent_tool", json!({}))
             .await
             .unwrap_err();
@@ -1211,7 +1211,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_missing_required_arg() {
-        let client = PostbloxClient::new("http://localhost:1".into(), "key".into());
+        let client = PostbloxClient::new("http://localhost:1".into(), "key".into()).unwrap();
         let err = dispatch(&client, "postblox_send_email", json!({}))
             .await
             .unwrap_err();
