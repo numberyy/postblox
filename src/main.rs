@@ -122,7 +122,21 @@ async fn main() -> anyhow::Result<()> {
             config.content_filter.allowed_types,
             config.content_filter.blocked_types,
         ),
+        syntect: std::sync::Arc::new(api::SyntectResources {
+            syntax_set: syntect::parsing::SyntaxSet::load_defaults_newlines(),
+            theme_set: syntect::highlighting::ThemeSet::load_defaults(),
+        }),
     };
+    if config.dns_check_interval_secs > 0 {
+        if let Some(ref stalwart) = state.stalwart {
+            let pool = state.pool.clone();
+            let stalwart = stalwart.clone();
+            let interval_secs = config.dns_check_interval_secs;
+            tokio::spawn(dns_check_loop(pool, stalwart, interval_secs));
+            tracing::info!("DNS verification poller started (interval: {interval_secs}s)");
+        }
+    }
+
     let templates = dashboard::build_templates();
     let dashboard_routes = dashboard::router(templates, state.clone());
     let app = api::router(state)
@@ -138,6 +152,56 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     Ok(())
+}
+
+async fn dns_check_loop(
+    pool: sqlx::PgPool,
+    stalwart: postblox::stalwart::StalwartClient,
+    interval_secs: u64,
+) {
+    use postblox::models::DomainStatus;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+        let domains = match postblox::db::domains::list_pending(&pool).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!("DNS poller: failed to query pending domains: {e}");
+                continue;
+            }
+        };
+        if domains.is_empty() {
+            continue;
+        }
+        tracing::info!("DNS poller: checking {} pending domain(s)", domains.len());
+        for domain in domains {
+            let dns = match stalwart.get_dns_records(&domain.name).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("DNS poller: failed to check {}: {e}", domain.name);
+                    continue;
+                }
+            };
+            let records = dns["data"].as_array();
+            let verified = records.is_some_and(|r| !r.is_empty());
+            let result = if verified {
+                postblox::db::domains::set_verified(&pool, domain.id).await
+            } else {
+                postblox::db::domains::update_status(&pool, domain.id, DomainStatus::Failed, None)
+                    .await
+            };
+            match result {
+                Ok(Some(d)) => {
+                    tracing::info!("DNS poller: {} → {}", domain.name, d.status);
+                }
+                Ok(None) => {
+                    tracing::warn!("DNS poller: {} disappeared during update", domain.name);
+                }
+                Err(e) => {
+                    tracing::error!("DNS poller: failed to update {}: {e}", domain.name);
+                }
+            }
+        }
+    }
 }
 
 async fn shutdown_signal() {

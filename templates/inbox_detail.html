@@ -12,7 +12,7 @@
   <button class="btn btn-primary" onclick="document.getElementById('compose-panel').classList.toggle('hidden')">Compose</button>
 </div>
 
-<div id="compose-panel" class="card hidden">
+<div id="compose-panel" class="card hidden" data-compose data-inbox-id="{{ inbox_id }}">
   <h3>Compose Message</h3>
   <form hx-post="/dashboard/inboxes/{{ inbox_id }}/compose" hx-target="#compose-result" hx-swap="innerHTML">
     <div class="compose-fields">
@@ -30,11 +30,19 @@
       </div>
       <div class="compose-row">
         <label>Body</label>
-        <textarea name="text_body" rows="6" placeholder="Plain text body"></textarea>
+        <div class="compose-toolbar">
+          <button type="button" data-action="bold" class="btn-tool" title="Bold"><strong>B</strong></button>
+          <button type="button" data-action="italic" class="btn-tool" title="Italic"><em>I</em></button>
+          <button type="button" data-action="link" class="btn-tool" title="Link">Link</button>
+          <button type="button" data-action="code" class="btn-tool" title="Code">Code</button>
+          <button type="button" class="btn-tool btn-preview" title="Preview">Preview</button>
+        </div>
+        <textarea name="text_body" class="compose-body" rows="8" placeholder="Markdown supported — paste images from clipboard"></textarea>
+        <div class="compose-preview hidden"></div>
+        <input type="hidden" name="html_body">
       </div>
       <div class="compose-row">
-        <label>HTML Body</label>
-        <textarea name="html_body" rows="6" placeholder="HTML body (optional)"></textarea>
+        <div class="compose-attachments"></div>
       </div>
     </div>
     <div style="display:flex;gap:.5rem;margin-top:.75rem">

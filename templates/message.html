@@ -58,6 +58,13 @@
   <div class="att-inline">
     <img src="{{ att.url }}" alt="{{ att.filename }}" class="att-img" onclick="openLightbox(this.src, this.alt)">
   </div>
+  {% elif att.content_type == "application/pdf" %}
+  <details class="att-preview">
+    <summary>{{ att.filename }} <span class="att-size">({{ att.size }})</span></summary>
+    <object data="{{ att.url }}" type="application/pdf" style="width:100%;min-height:500px;border:1px solid var(--border,#ddd);border-radius:4px">
+      <p>PDF preview not available. <a href="{{ att.url }}">Download</a></p>
+    </object>
+  </details>
   {% endif %}
   {% endfor %}
   <ul class="att-list">
@@ -65,6 +72,12 @@
     <li>
       <a href="{{ att.url }}" download>{{ att.filename }}</a>
       <span class="att-size">({{ att.size }})</span>
+      {% if att.content_type == "application/pdf" or att.content_type == "text/csv" or att.content_type == "text/plain" or att.content_type == "application/json" or att.content_type == "application/xml" %}
+      <span class="badge badge-blue" style="font-size:.75em;margin-left:.25em">preview</span>
+      {% endif %}
+      {% if att.content_type == "application/zip" or att.content_type == "application/x-tar" or att.content_type == "application/gzip" %}
+      <span class="badge badge-yellow" style="font-size:.75em;margin-left:.25em">archive</span>
+      {% endif %}
     </li>
     {% endfor %}
   </ul>

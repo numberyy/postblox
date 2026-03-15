@@ -53,6 +53,12 @@ pub struct AppState {
     pub attachment_storage_path: std::path::PathBuf,
     pub max_attachment_size_bytes: i64,
     pub content_filter: crate::core::content_filter::ContentFilter,
+    pub syntect: Arc<SyntectResources>,
+}
+
+pub struct SyntectResources {
+    pub syntax_set: syntect::parsing::SyntaxSet,
+    pub theme_set: syntect::highlighting::ThemeSet,
 }
 
 #[derive(Deserialize)]
@@ -256,6 +262,14 @@ pub fn router(state: AppState) -> axum::Router {
         .route(
             "/inboxes/{inbox_id}/messages/{message_id}/attachments/{attachment_id}",
             get(attachments::download).delete(attachments::delete),
+        )
+        .route(
+            "/inboxes/{inbox_id}/messages/{message_id}/attachments/{attachment_id}/preview",
+            get(attachments::preview),
+        )
+        .route(
+            "/inboxes/{inbox_id}/messages/{message_id}/attachments/{attachment_id}/contents",
+            get(attachments::contents),
         )
         .route(
             "/inboxes/{inbox_id}/labels",

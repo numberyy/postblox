@@ -188,7 +188,7 @@ pub async fn list(
         if thread.inbox_id != inbox_id {
             return Err(ApiError::NotFound);
         }
-        crate::db::messages::list_by_thread(&state.pool, thread_id).await
+        crate::db::messages::list_by_thread(&state.pool, thread_id, limit).await
     } else if unslopify {
         crate::db::messages::list_by_inbox_unslopified(&state.pool, inbox_id, limit, offset).await
     } else {

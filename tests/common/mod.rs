@@ -41,6 +41,10 @@ pub fn test_state(pool: PgPool) -> api::AppState {
         attachment_storage_path: std::env::temp_dir().join("postblox-test-attachments"),
         max_attachment_size_bytes: 25 * 1024 * 1024,
         content_filter: postblox::core::content_filter::ContentFilter::new(None, None),
+        syntect: Arc::new(api::SyntectResources {
+            syntax_set: syntect::parsing::SyntaxSet::load_defaults_newlines(),
+            theme_set: syntect::highlighting::ThemeSet::load_defaults(),
+        }),
     }
 }
 

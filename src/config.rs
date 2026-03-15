@@ -37,6 +37,8 @@ pub struct Config {
     pub max_attachment_size_bytes: i64,
     #[serde(default)]
     pub content_filter: ContentFilterConfig,
+    #[serde(default = "default_dns_check_interval")]
+    pub dns_check_interval_secs: u64,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -86,6 +88,10 @@ fn default_attachment_storage_path() -> PathBuf {
 
 fn default_max_attachment_size() -> i64 {
     25 * 1024 * 1024
+}
+
+fn default_dns_check_interval() -> u64 {
+    3600
 }
 
 fn default_host() -> String {
@@ -165,6 +171,10 @@ impl Config {
                     default_max_attachment_size,
                 ),
                 content_filter: ContentFilterConfig::default(),
+                dns_check_interval_secs: parse_env_or_default(
+                    "DNS_CHECK_INTERVAL_SECS",
+                    default_dns_check_interval,
+                ),
             })
         }
     }
@@ -389,5 +399,32 @@ mod tests {
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.content_filter.allowed_types.is_some());
         assert!(config.content_filter.blocked_types.is_some());
+    }
+
+    #[test]
+    fn test_config_dns_check_interval_default() {
+        let toml_str = r#"database_url = "postgres://localhost/postblox""#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.dns_check_interval_secs, 3600);
+    }
+
+    #[test]
+    fn test_config_dns_check_interval_custom() {
+        let toml_str = r#"
+            database_url = "postgres://localhost/postblox"
+            dns_check_interval_secs = 300
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.dns_check_interval_secs, 300);
+    }
+
+    #[test]
+    fn test_config_dns_check_interval_zero_disables() {
+        let toml_str = r#"
+            database_url = "postgres://localhost/postblox"
+            dns_check_interval_secs = 0
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.dns_check_interval_secs, 0);
     }
 }

@@ -84,6 +84,17 @@ textarea{padding:.5rem .75rem;border:1px solid var(--border);border-radius:var(-
 textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px rgba(37,99,235,.15)}
 .compose-fields{display:flex;flex-direction:column;gap:.5rem}
 .compose-row label{display:block;font-size:.8rem;color:var(--muted);margin-bottom:.15rem}
+.compose-toolbar{display:flex;gap:.25rem;margin-bottom:.25rem}
+.btn-tool{padding:.2rem .5rem;border:1px solid var(--border);border-radius:3px;background:var(--card-bg);font-size:.8rem;cursor:pointer;color:var(--fg)}
+.btn-tool:hover{background:#f3f4f6}
+.compose-preview{background:#f9fafb;border:1px solid var(--border);border-radius:var(--radius);padding:.75rem;font-size:.9rem;min-height:120px;overflow-y:auto;max-height:300px}
+.compose-preview p{margin-bottom:.5rem}
+.compose-preview pre{background:#1a1a1a;color:#e5e7eb;padding:.75rem;border-radius:var(--radius);overflow-x:auto;margin:.5rem 0}
+.compose-preview code{font-family:ui-monospace,monospace;font-size:.85rem}
+.compose-attachments{display:flex;flex-wrap:wrap;gap:.5rem}
+.compose-thumb{display:flex;align-items:center;gap:.4rem;padding:.3rem .5rem;background:#f3f4f6;border-radius:var(--radius);font-size:.8rem}
+.compose-thumb-img{width:40px;height:40px;object-fit:cover;border-radius:3px}
+.compose-thumb-err{color:var(--red);background:#fef2f2}
 
 /* Attachments */
 .att-list{list-style:none;padding:0;margin:.5rem 0 0;font-size:.85rem}

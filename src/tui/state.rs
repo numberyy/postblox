@@ -11,4 +11,5 @@ pub enum Mode {
     Compose,
     Search,
     Help,
+    Thread,
 }

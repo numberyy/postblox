@@ -14,6 +14,7 @@ pub mod message_list;
 pub mod preview;
 pub mod search;
 pub mod status_bar;
+pub mod thread_panel;
 
 pub fn truncate<'a>(s: &'a str, max: usize) -> Cow<'a, str> {
     if max == 0 {

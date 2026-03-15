@@ -95,10 +95,9 @@ pub async fn process_inbound_raw(state: &AppState, body: &[u8]) -> Result<Status
         parsed.message_id = Some(format!("synth-{:x}@postblox", hasher.finalize()));
     }
 
-    let mid = parsed
-        .message_id
-        .as_deref()
-        .expect("message_id guaranteed set: either from parsed email or synthetic above");
+    let mid = parsed.message_id.as_deref().ok_or_else(|| {
+        ApiError::Internal("message_id missing after synthetic generation".into())
+    })?;
     if crate::db::messages::exists_by_message_id_header(&state.pool, inbox.id, mid)
         .await
         .map_err(ApiError::from_sqlx)?

@@ -23,6 +23,7 @@ pub struct MessageEntry {
     pub has_thread: bool,
     pub has_attachments: bool,
     pub inbox_label: Option<String>,
+    pub thread_message_count: Option<usize>,
 }
 
 impl MessageList {
@@ -46,6 +47,7 @@ impl MessageList {
                 has_thread: m.thread_id.is_some(),
                 has_attachments: false,
                 inbox_label: None,
+                thread_message_count: None,
             })
             .collect();
         if self.entries.is_empty() {
@@ -114,6 +116,19 @@ impl MessageList {
             if msg.id == message_id {
                 entry.has_attachments = true;
                 break;
+            }
+        }
+    }
+
+    pub fn set_thread_count(
+        &mut self,
+        thread_id: uuid::Uuid,
+        count: usize,
+        messages: &[crate::client::Message],
+    ) {
+        for (entry, msg) in self.entries.iter_mut().zip(messages.iter()) {
+            if msg.thread_id == Some(thread_id) {
+                entry.thread_message_count = Some(count);
             }
         }
     }
@@ -188,7 +203,12 @@ fn render_entry<'a>(entry: &MessageEntry, theme: &Theme) -> ListItem<'a> {
         format!(" {age:>6}"),
         Style::default().fg(theme.muted),
     ));
-    if entry.has_thread {
+    if let Some(count) = entry.thread_message_count {
+        spans.push(Span::styled(
+            format!(" [{count}]"),
+            Style::default().fg(theme.accent),
+        ));
+    } else if entry.has_thread {
         spans.push(Span::styled(" ⤷", Style::default().fg(theme.muted)));
     }
     if entry.has_attachments {

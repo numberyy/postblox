@@ -64,6 +64,17 @@ pub async fn set_verified(pool: &PgPool, id: Uuid) -> Result<Option<Domain>, sql
     .await
 }
 
+pub async fn list_pending(pool: &PgPool) -> Result<Vec<Domain>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, org_id, name, status, stalwart_principal_id, verified_at, created_at \
+         FROM domains WHERE status = 'pending' \
+         AND created_at < NOW() - INTERVAL '10 minutes' \
+         ORDER BY created_at ASC LIMIT 100",
+    )
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn delete(pool: &PgPool, id: Uuid) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM domains WHERE id = $1")
         .bind(id)

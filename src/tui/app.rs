@@ -1,4 +1,3 @@
-use std::fmt::Write as _;
 use std::io;
 use std::time::Duration;
 
@@ -34,7 +33,8 @@ use crate::components::preview::AttachmentInfo;
 use crate::components::preview::Preview;
 use crate::components::search::SearchPanel;
 use crate::components::status_bar::StatusBar;
-use crate::config::TuiConfig;
+use crate::components::thread_panel::{ThreadMessage, ThreadPanel};
+use crate::config::{LayoutConfig, TuiConfig};
 use crate::keys::{self, Action};
 use crate::layout;
 use crate::state::{Mode, Panel};
@@ -140,6 +140,7 @@ pub struct App {
     search: SearchPanel,
     briefing: BriefingPanel,
     status_bar: StatusBar,
+    thread_panel: ThreadPanel,
 
     // UI state
     theme: Theme,
@@ -158,6 +159,7 @@ pub struct App {
     selected_inbox_id: Option<Uuid>,
     show_slop: bool,
     status_text: Option<String>,
+    thread_counts: HashMap<Uuid, usize>,
 
     // Async
     msg_tx: mpsc::Sender<AppMsg>,
@@ -182,6 +184,7 @@ pub struct App {
     // Config
     download_dir: PathBuf,
     keybinding_overrides: crate::config::KeybindingOverrides,
+    layout_config: LayoutConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,6 +211,7 @@ impl App {
             search: SearchPanel::new(),
             briefing: BriefingPanel::new(),
             status_bar: StatusBar::new(config.vim_mode),
+            thread_panel: ThreadPanel::new(),
             theme: Theme::from_name(&config.theme),
             focus: Panel::Sidebar,
             mode: Mode::Normal,
@@ -222,6 +226,7 @@ impl App {
             selected_inbox_id: None,
             show_slop: true,
             status_text: Some("Loading…".into()),
+            thread_counts: HashMap::new(),
             msg_tx,
             msg_rx,
             ws_shutdown,
@@ -234,6 +239,7 @@ impl App {
             editor_requested: false,
             download_dir: config.download_dir.clone(),
             keybinding_overrides: config.keybindings.clone(),
+            layout_config: config.layout,
         }
     }
 
@@ -634,34 +640,28 @@ impl App {
             }
             AppMsg::ThreadLoaded(Ok(messages)) => {
                 let count = messages.len();
-                let mut body = String::new();
-                for (i, msg) in messages.iter().enumerate() {
-                    let _ = writeln!(
-                        body,
-                        "── Message {}/{} ──────────────────────────────",
-                        i + 1,
-                        count
-                    );
-                    let _ = writeln!(body, "From: {}", msg.from_addr);
-                    let _ = writeln!(body, "Date: {}\n", msg.created_at.format("%Y-%m-%d %H:%M"));
-                    let msg_text = msg_body_text(&msg.text_body, &msg.html_body);
-                    body.push_str(&msg_text);
-                    body.push_str("\n\n");
-                }
-                if let Some(first) = messages.first() {
-                    let title = format!(
-                        "{} (Thread: {} messages)",
-                        first.subject.as_deref().unwrap_or("(no subject)"),
-                        count
-                    );
-                    self.preview.set_content(
-                        &first.from_addr,
-                        &title,
-                        &first.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-                        &body,
-                    );
-                }
+                let thread_msgs: Vec<ThreadMessage> = messages
+                    .iter()
+                    .map(|msg| ThreadMessage {
+                        from: msg.from_addr.clone(),
+                        date: msg.created_at.format("%Y-%m-%d %H:%M").to_string(),
+                        body: msg_body_text(&msg.text_body, &msg.html_body),
+                    })
+                    .collect();
+                self.thread_panel.set_messages(thread_msgs);
+                self.mode = Mode::Thread;
                 self.focus = Panel::Preview;
+
+                if let Some(first) = messages.first() {
+                    if let Some(thread_id) = first.thread_id {
+                        self.thread_counts.insert(thread_id, count);
+                        self.message_list.set_thread_count(
+                            thread_id,
+                            count,
+                            &self.displayed_messages,
+                        );
+                    }
+                }
             }
             AppMsg::ThreadLoaded(Err(e)) => {
                 self.status_text = Some(format!("Failed to load thread: {e}"));
@@ -834,6 +834,55 @@ impl App {
     }
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Command> {
+        if self.mode == Mode::Thread {
+            use crossterm::event::KeyCode;
+            if key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('c')
+            {
+                self.running = false;
+                return None;
+            }
+            let action = keys::resolve_with_overrides(
+                key,
+                Mode::Normal,
+                self.focus,
+                self.vim_mode,
+                Some(&self.keybinding_overrides),
+            );
+            if let Some(action) = action {
+                match action {
+                    Action::MoveUp => {
+                        self.thread_panel.select_prev();
+                    }
+                    Action::MoveDown => {
+                        self.thread_panel.select_next();
+                    }
+                    Action::MoveTop => {
+                        self.thread_panel.select_first();
+                    }
+                    Action::MoveBottom => {
+                        self.thread_panel.select_last();
+                    }
+                    Action::Back | Action::Quit => {
+                        self.thread_panel.clear();
+                        self.mode = Mode::Normal;
+                        self.focus = Panel::MessageList;
+                    }
+                    _ => {}
+                }
+            }
+            // Bracket keys for body scroll
+            if let KeyCode::Char('[') = key.code {
+                self.thread_panel.scroll_up();
+            }
+            if let KeyCode::Char(']') = key.code {
+                self.thread_panel.scroll_down();
+            }
+            return None;
+        }
+
         if self.mode == Mode::Compose {
             if let Some(action) = keys::resolve_with_overrides(
                 key,
@@ -1491,61 +1540,72 @@ impl App {
     fn render(&mut self, frame: &mut ratatui::Frame) {
         let theme = &self.theme;
         let area = frame.area();
-        let layout = layout::compute(area);
+        let layout = layout::compute_with_config(area, &self.layout_config);
         self.last_layout = Some(layout);
 
         self.inbox_list
             .render(frame, layout.sidebar, theme, self.focus == Panel::Sidebar);
 
-        match self.sidebar_view {
-            SidebarView::Inboxes => {
-                self.message_list.render(
-                    frame,
-                    layout.message_list,
-                    theme,
-                    self.focus == Panel::MessageList,
-                );
-            }
-            SidebarView::Approvals => {
-                self.approvals.render(
-                    frame,
-                    layout.message_list,
-                    theme,
-                    self.focus == Panel::MessageList,
-                );
-            }
-            SidebarView::Drafts => {
-                self.drafts.render(
-                    frame,
-                    layout.message_list,
-                    theme,
-                    self.focus == Panel::MessageList,
-                );
-            }
-            SidebarView::Briefing => {
-                self.briefing.render(
-                    frame,
-                    layout.message_list,
-                    theme,
-                    self.focus == Panel::MessageList,
-                );
-            }
-            SidebarView::Search => {
-                self.search.render_results(
-                    frame,
-                    layout.message_list,
-                    theme,
-                    self.focus == Panel::MessageList,
-                    self.mode == Mode::Search,
-                );
-            }
-        }
-
         if self.mode == Mode::Compose {
-            self.compose.render(frame, layout.preview, theme);
+            // Compose takes full right panel (message_list + preview area)
+            let compose_area = Rect::new(
+                layout.message_list.x,
+                layout.message_list.y,
+                area.width.saturating_sub(layout.message_list.x),
+                layout.status_bar.y.saturating_sub(layout.message_list.y),
+            );
+            self.compose.render(frame, compose_area, theme);
         } else {
-            self.preview
-                .render(frame, layout.preview, theme, self.focus == Panel::Preview);
+            match self.sidebar_view {
+                SidebarView::Inboxes => {
+                    self.message_list.render(
+                        frame,
+                        layout.message_list,
+                        theme,
+                        self.focus == Panel::MessageList,
+                    );
+                }
+                SidebarView::Approvals => {
+                    self.approvals.render(
+                        frame,
+                        layout.message_list,
+                        theme,
+                        self.focus == Panel::MessageList,
+                    );
+                }
+                SidebarView::Drafts => {
+                    self.drafts.render(
+                        frame,
+                        layout.message_list,
+                        theme,
+                        self.focus == Panel::MessageList,
+                    );
+                }
+                SidebarView::Briefing => {
+                    self.briefing.render(
+                        frame,
+                        layout.message_list,
+                        theme,
+                        self.focus == Panel::MessageList,
+                    );
+                }
+                SidebarView::Search => {
+                    self.search.render_results(
+                        frame,
+                        layout.message_list,
+                        theme,
+                        self.focus == Panel::MessageList,
+                        self.mode == Mode::Search,
+                    );
+                }
+            }
+
+            if self.mode == Mode::Thread {
+                self.thread_panel.render(frame, layout.preview, theme, true);
+            } else {
+                self.preview
+                    .render(frame, layout.preview, theme, self.focus == Panel::Preview);
+            }
         }
 
         self.status_bar
@@ -1559,7 +1619,7 @@ impl App {
 
 fn render_help_overlay(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
     let help_w = 50.min(area.width.saturating_sub(4));
-    let help_h = 28.min(area.height.saturating_sub(4));
+    let help_h = 32.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(help_w)) / 2;
     let y = (area.height.saturating_sub(help_h)) / 2;
     let help_area = Rect::new(x, y, help_w, help_h);
@@ -1581,7 +1641,7 @@ fn render_help_overlay(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
         "  1-9             Quick jump to inbox",
         "",
         "  Actions",
-        "  Enter           Select",
+        "  Enter           Select / open thread",
         "  Esc             Back",
         "  c or Ctrl+N     Compose",
         "  r or Ctrl+R     Reply",
@@ -1594,6 +1654,11 @@ fn render_help_overlay(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
         "  b               Briefing",
         "  a               All Inboxes",
         "  q or Ctrl+C     Quit",
+        "",
+        "  Thread view",
+        "  j/k             Navigate messages",
+        "  [/]             Scroll message body",
+        "  q/Esc           Exit thread view",
         "",
         "  Attachments (preview panel)",
         "  [/]             Prev/next attachment",

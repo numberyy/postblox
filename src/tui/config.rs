@@ -38,6 +38,14 @@ struct RawTui {
     download_dir: Option<String>,
     #[serde(default)]
     keybindings: RawKeybindings,
+    #[serde(default)]
+    layout: RawLayout,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RawLayout {
+    sidebar_width: Option<u16>,
+    preview_height: Option<u16>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -62,6 +70,22 @@ pub struct TuiConfig {
     pub vim_mode: bool,
     pub download_dir: PathBuf,
     pub keybindings: KeybindingOverrides,
+    pub layout: LayoutConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutConfig {
+    pub sidebar_width: u16,
+    pub preview_height: u16,
+}
+
+impl Default for LayoutConfig {
+    fn default() -> Self {
+        Self {
+            sidebar_width: 22,
+            preview_height: 40,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -83,11 +107,9 @@ impl KeybindingOverrides {
             ("briefing", raw.briefing),
         ];
         for (action, val) in pairs {
-            if let Some(s) = val {
+            if let Some(s) = val.filter(|s| s.chars().count() == 1) {
                 if let Some(c) = s.chars().next() {
-                    if s.chars().count() == 1 {
-                        map.insert(action.to_string(), c);
-                    }
+                    map.insert(action.to_string(), c);
                 }
             }
         }
@@ -135,6 +157,10 @@ impl TuiConfig {
             .unwrap_or_else(default_download_dir);
 
         let keybindings = KeybindingOverrides::from_raw(raw.tui.keybindings);
+        let layout = LayoutConfig {
+            sidebar_width: raw.tui.layout.sidebar_width.unwrap_or(22).clamp(10, 60),
+            preview_height: raw.tui.layout.preview_height.unwrap_or(40).clamp(20, 80),
+        };
 
         Ok(Self {
             server_url,
@@ -143,6 +169,7 @@ impl TuiConfig {
             vim_mode: raw.tui.vim_mode.unwrap_or(true),
             download_dir,
             keybindings,
+            layout,
         })
     }
 
@@ -379,5 +406,53 @@ briefing = "B"
         assert_eq!(kb.0.len(), 10);
         assert_eq!(kb.get("quit"), Some('Q'));
         assert_eq!(kb.get("briefing"), Some('B'));
+    }
+
+    #[test]
+    fn test_layout_defaults() {
+        let raw: RawConfig = toml::from_str(
+            r#"
+[server]
+url = "http://localhost:3000"
+api_key = "k"
+"#,
+        )
+        .unwrap();
+        assert!(raw.tui.layout.sidebar_width.is_none());
+        assert!(raw.tui.layout.preview_height.is_none());
+        let cfg = LayoutConfig {
+            sidebar_width: raw.tui.layout.sidebar_width.unwrap_or(22),
+            preview_height: raw.tui.layout.preview_height.unwrap_or(40),
+        };
+        assert_eq!(cfg.sidebar_width, 22);
+        assert_eq!(cfg.preview_height, 40);
+    }
+
+    #[test]
+    fn test_layout_custom() {
+        let raw: RawConfig = toml::from_str(
+            r#"
+[server]
+url = "http://localhost:3000"
+api_key = "k"
+
+[tui.layout]
+sidebar_width = 30
+preview_height = 50
+"#,
+        )
+        .unwrap();
+        assert_eq!(raw.tui.layout.sidebar_width.unwrap(), 30);
+        assert_eq!(raw.tui.layout.preview_height.unwrap(), 50);
+    }
+
+    #[test]
+    fn test_layout_config_clamps() {
+        let cfg = LayoutConfig {
+            sidebar_width: 5_u16.clamp(10, 60),
+            preview_height: 95_u16.clamp(20, 80),
+        };
+        assert_eq!(cfg.sidebar_width, 10);
+        assert_eq!(cfg.preview_height, 80);
     }
 }

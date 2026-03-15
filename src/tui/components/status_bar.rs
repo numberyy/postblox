@@ -57,6 +57,7 @@ fn mode_hints(mode: Mode, vim_mode: bool) -> &'static str {
         Mode::Compose => "Ctrl+Enter: send │ Tab: field │ Esc: cancel",
         Mode::Search => "Enter: select │ Esc: cancel",
         Mode::Help => "Press any key to close",
+        Mode::Thread => "j/k: messages │ [/]: scroll │ q/Esc: back",
         Mode::Normal if vim_mode => "j/k ↑↓ Tab c r / ? q",
         Mode::Normal => "↑↓ Tab Enter Esc Ctrl+N/R/F ?",
     }

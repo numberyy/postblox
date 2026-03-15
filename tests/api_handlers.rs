@@ -2066,3 +2066,206 @@ async fn test_rate_limit_429_includes_retry_after() {
         .unwrap();
     assert!(retry_after >= 1, "Retry-After should be at least 1 second");
 }
+
+// ============================================================================
+// Inbox Delete: admin-only verification
+// ============================================================================
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_delete_inbox_requires_admin_role() {
+    let pool = test_pool().await;
+    let (org_id, non_admin_key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+    let app = test_app(test_state(pool));
+
+    let path = format!("/api/v1/inboxes/{}", inbox.id);
+    let status = delete_req(&app, &path, &non_admin_key).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "non-admin key should not be able to delete inbox"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_delete_inbox_admin_succeeds() {
+    let pool = test_pool().await;
+    let (org_id, admin_key) = setup_admin_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+    let app = test_app(test_state(pool.clone()));
+
+    let path = format!("/api/v1/inboxes/{}", inbox.id);
+    let status = delete_req(&app, &path, &admin_key).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let fetched = postblox::db::inboxes::get_by_id(&pool, inbox.id)
+        .await
+        .unwrap();
+    assert!(fetched.is_none(), "inbox should be deleted from DB");
+}
+
+// ============================================================================
+// Bounce auto-disable: >= 5 hard bounces in 24h disables inbox
+// ============================================================================
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_bounce_auto_disable_after_five_hard_bounces() {
+    let pool = test_pool().await;
+    let (org_id, _key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let state = test_state_with_inbound(pool.clone());
+    let app = test_app(state);
+
+    let mut msg_ids = Vec::new();
+    for i in 0..5 {
+        let cm = create_message_input(inbox.id, &format!("Bounce {i}"), "body");
+        let msg = postblox::db::messages::create(&pool, &cm).await.unwrap();
+        msg_ids.push(msg.id);
+    }
+
+    for (i, &mid) in msg_ids.iter().enumerate() {
+        let body = json!({
+            "message_id": mid,
+            "status": "bounced",
+            "bounce_type": "hard",
+            "details": {"smtp_code": 550}
+        });
+        let req = Request::post("/internal/stalwart/bounce")
+            .header("authorization", "Bearer test-inbound-token")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = ServiceExt::oneshot(app.clone(), req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "bounce {i} should succeed");
+    }
+
+    // Give async disable task a moment
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let refreshed = postblox::db::inboxes::get_by_id(&pool, inbox.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !refreshed.active,
+        "inbox should be auto-disabled after 5 hard bounces"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_bounce_four_hard_bounces_does_not_disable() {
+    let pool = test_pool().await;
+    let (org_id, _key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let state = test_state_with_inbound(pool.clone());
+    let app = test_app(state);
+
+    let mut msg_ids = Vec::new();
+    for i in 0..4 {
+        let cm = create_message_input(inbox.id, &format!("Bounce {i}"), "body");
+        let msg = postblox::db::messages::create(&pool, &cm).await.unwrap();
+        msg_ids.push(msg.id);
+    }
+
+    for &mid in &msg_ids {
+        let body = json!({
+            "message_id": mid,
+            "status": "bounced",
+            "bounce_type": "hard"
+        });
+        let req = Request::post("/internal/stalwart/bounce")
+            .header("authorization", "Bearer test-inbound-token")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        let resp = ServiceExt::oneshot(app.clone(), req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let refreshed = postblox::db::inboxes::get_by_id(&pool, inbox.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        refreshed.active,
+        "inbox should still be active with only 4 hard bounces"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_bounce_soft_bounces_do_not_count_toward_disable() {
+    let pool = test_pool().await;
+    let (org_id, _key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let state = test_state_with_inbound(pool.clone());
+    let app = test_app(state);
+
+    for i in 0..6 {
+        let cm = create_message_input(inbox.id, &format!("Soft {i}"), "body");
+        let msg = postblox::db::messages::create(&pool, &cm).await.unwrap();
+        let body = json!({
+            "message_id": msg.id,
+            "status": "bounced",
+            "bounce_type": "soft"
+        });
+        let req = Request::post("/internal/stalwart/bounce")
+            .header("authorization", "Bearer test-inbound-token")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let refreshed = postblox::db::inboxes::get_by_id(&pool, inbox.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        refreshed.active,
+        "soft bounces should not trigger auto-disable"
+    );
+}
+
+// ============================================================================
+// DNS poller: list_pending query
+// ============================================================================
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_list_pending_domains_returns_only_pending() {
+    let pool = test_pool().await;
+    let (org_id, _) = setup_admin_org(&pool).await;
+
+    let pending_name = format!("{}.pending.test", Uuid::new_v4());
+    let verified_name = format!("{}.verified.test", Uuid::new_v4());
+
+    let pending = postblox::db::domains::create(&pool, org_id, &pending_name)
+        .await
+        .unwrap();
+    let verified_d = postblox::db::domains::create(&pool, org_id, &verified_name)
+        .await
+        .unwrap();
+    postblox::db::domains::set_verified(&pool, verified_d.id)
+        .await
+        .unwrap();
+
+    let pending_list = postblox::db::domains::list_pending(&pool).await.unwrap();
+    let ids: Vec<_> = pending_list.iter().map(|d| d.id).collect();
+    assert!(ids.contains(&pending.id));
+    assert!(
+        !ids.contains(&verified_d.id),
+        "verified domain should not be in pending list"
+    );
+}

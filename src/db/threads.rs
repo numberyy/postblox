@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::models::Thread;
 
-#[allow(dead_code)]
+#[allow(dead_code)] // used by integration tests in tests/
 pub async fn create(
     pool: &PgPool,
     inbox_id: Uuid,

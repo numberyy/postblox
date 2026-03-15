@@ -79,10 +79,20 @@ pub async fn list_by_inbox_unslopified(
         .await
 }
 
-pub async fn list_by_thread(pool: &PgPool, thread_id: Uuid) -> Result<Vec<Message>, sqlx::Error> {
-    let query =
-        format!("SELECT {SELECT_COLS} FROM messages WHERE thread_id = $1 ORDER BY created_at ASC");
-    sqlx::query_as(&query).bind(thread_id).fetch_all(pool).await
+pub async fn list_by_thread(
+    pool: &PgPool,
+    thread_id: Uuid,
+    limit: i64,
+) -> Result<Vec<Message>, sqlx::Error> {
+    let query = format!(
+        "SELECT {SELECT_COLS} FROM messages WHERE thread_id = $1 \
+         ORDER BY created_at ASC LIMIT $2"
+    );
+    sqlx::query_as(&query)
+        .bind(thread_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
 }
 
 /// Fetches (thread_id, message_id_header) pairs for an inbox in a single query.
@@ -318,7 +328,7 @@ mod tests {
         cm2.subject = Some("Second".into());
         let msg2 = create(&pool, &cm2).await.unwrap();
 
-        let msgs = list_by_thread(&pool, thread.id).await.unwrap();
+        let msgs = list_by_thread(&pool, thread.id, 100).await.unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].id, msg1.id);
         assert_eq!(msgs[1].id, msg2.id);

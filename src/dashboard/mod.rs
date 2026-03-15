@@ -101,6 +101,7 @@ pub fn router(templates: Environment<'static>, state: AppState) -> axum::Router 
         .route("/static/htmx.min.js", get(static_htmx))
         .route("/static/ws.js", get(static_ws_js))
         .route("/static/upload.js", get(static_upload_js))
+        .route("/static/compose.js", get(static_compose_js))
         .layer(Extension(tpl))
         .with_state(state)
 }
@@ -438,7 +439,7 @@ async fn thread_view(
 
     let messages = log_err_default(
         "thread messages",
-        crate::db::messages::list_by_thread(&state.pool, thread.id).await,
+        crate::db::messages::list_by_thread(&state.pool, thread.id, 200).await,
     );
 
     let msg_ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
@@ -1246,6 +1247,13 @@ async fn static_upload_js() -> impl IntoResponse {
     )
 }
 
+async fn static_compose_js() -> impl IntoResponse {
+    static_asset(
+        "application/javascript",
+        include_str!("../../static/compose.js"),
+    )
+}
+
 fn messages_to_value(messages: &[crate::models::Message]) -> Vec<minijinja::Value> {
     messages
         .iter()
@@ -1648,5 +1656,11 @@ mod tests {
         let empty: &[crate::models::Attachment] = &[];
         let values = attachments_to_value(empty, Uuid::new_v4(), Uuid::new_v4());
         assert!(values.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_static_compose_js_serves() {
+        let resp = static_compose_js().await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

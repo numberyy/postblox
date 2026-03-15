@@ -55,6 +55,11 @@ clap = { version = "4", features = ["derive", "env"] }
 dialoguer = "0.11"
 hickory-resolver = "0.25"
 html2text = "0.16"
+csv = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "html", "parsing", "regex-onig"] }
 
 [dev-dependencies]
 tempfile = "3"
