@@ -155,6 +155,65 @@ impl StalwartClient {
         Ok(body)
     }
 
+    pub async fn set_settings(&self, settings: &[(&str, &str)]) -> Result<(), StalwartError> {
+        let payload: serde_json::Value = settings
+            .iter()
+            .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+            .collect();
+
+        let resp = self
+            .http
+            .post(format!("{}/api/settings", self.base_url))
+            .basic_auth(&self.admin_user, Some(&self.admin_token))
+            .json(&payload)
+            .send()
+            .await?;
+
+        Self::check_response(resp).await?;
+        Ok(())
+    }
+
+    pub async fn configure_mta_hook(
+        &self,
+        postblox_url: &str,
+        token: &str,
+    ) -> Result<(), StalwartError> {
+        let hook_url = format!("{postblox_url}/internal/stalwart/mta-hook");
+        self.set_settings(&[
+            ("session.hook.postblox.enable", "true"),
+            ("session.hook.postblox.url", &hook_url),
+            ("session.hook.postblox.stages", "[\"data\"]"),
+            ("session.hook.postblox.auth.username", "postblox"),
+            ("session.hook.postblox.auth.secret", token),
+            ("session.hook.postblox.options.tempfail-on-error", "true"),
+        ])
+        .await
+    }
+
+    pub async fn configure_relay(
+        &self,
+        host: &str,
+        port: u16,
+        username: Option<&str>,
+        password: Option<&str>,
+        starttls: bool,
+    ) -> Result<(), StalwartError> {
+        let port_str = port.to_string();
+        let tls_val = if starttls { "starttls" } else { "true" };
+        let mut settings: Vec<(&str, &str)> = vec![
+            ("queue.outbound.relay.host", host),
+            ("queue.outbound.relay.port", &port_str),
+            ("queue.outbound.relay.tls", tls_val),
+        ];
+        if let Some(u) = username {
+            settings.push(("queue.outbound.relay.auth.username", u));
+        }
+        if let Some(p) = password {
+            settings.push(("queue.outbound.relay.auth.secret", p));
+        }
+        self.set_settings(&settings).await
+    }
+
     pub async fn submit_message(
         &self,
         from: &str,
@@ -274,6 +333,14 @@ mod tests {
             None,
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_stalwart_settings_url() {
+        let client =
+            StalwartClient::new("http://localhost:8080", "admin", "token", None, None).unwrap();
+        let url = format!("{}/api/settings", client.base_url);
+        assert_eq!(url, "http://localhost:8080/api/settings");
     }
 
     #[tokio::test]

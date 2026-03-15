@@ -63,17 +63,26 @@ pub async fn run(args: DoctorArgs) -> Result<(), DoctorError> {
             check_migrations(pool, args.fix, &mut results).await;
         }
 
-        // 4. Check Stalwart
-        if let (Some(url), Some(_token)) = (&config.stalwart_url, &config.stalwart_admin_token) {
+        // 4–6. Stalwart checks (connectivity, MTA hook, DNS records)
+        if let (Some(url), Some(token)) = (&config.stalwart_url, &config.stalwart_admin_token) {
             check_stalwart(url, &mut results).await;
+            let user = config.stalwart_admin_user.as_deref().unwrap_or("admin");
+            check_mta_hook(url, user, token, &mut results).await;
+            check_domain_dns(url, user, token, &mut results).await;
         }
 
-        // 5. Check embedding provider
+        // 7. Check embedding provider
         if let Some(url) = &config.embedding_url {
             check_embedding(url, &mut results).await;
         }
 
-        // 6. Check config file permissions
+        // 8. Check relay connectivity
+        if let Some(relay) = &config.relay_host {
+            let port = config.relay_port.unwrap_or(587);
+            check_relay(relay, port, &mut results).await;
+        }
+
+        // 9. Check config file permissions
         #[cfg(unix)]
         check_permissions(&args.config_path, &mut results);
 
@@ -344,6 +353,202 @@ fn check_permissions(path: &PathBuf, results: &mut Vec<CheckResult>) {
                 path.display()
             ),
         ));
+    }
+}
+
+async fn check_mta_hook(
+    stalwart_url: &str,
+    admin_user: &str,
+    admin_token: &str,
+    results: &mut Vec<CheckResult>,
+) {
+    let http = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            results.push(CheckResult::fail("MTA Hook", format!("http client error: {e}")));
+            return;
+        }
+    };
+
+    match http
+        .get(format!("{stalwart_url}/api/settings"))
+        .basic_auth(admin_user, Some(admin_token))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            results.push(CheckResult::ok(
+                "MTA Hook",
+                "Stalwart settings API reachable. Run `postblox init` to configure hook if needed.",
+            ));
+        }
+        Ok(resp) => {
+            results.push(CheckResult::fail(
+                "MTA Hook",
+                format!(
+                    "Stalwart settings API returned HTTP {}. Check admin credentials.",
+                    resp.status().as_u16()
+                ),
+            ));
+        }
+        Err(e) => {
+            results.push(CheckResult::fail(
+                "MTA Hook",
+                format!("could not reach Stalwart settings API: {e}"),
+            ));
+        }
+    }
+}
+
+async fn has_txt_record(
+    resolver: &hickory_resolver::Resolver<hickory_resolver::name_server::TokioConnectionProvider>,
+    domain: &str,
+    needle: &str,
+) -> bool {
+    resolver
+        .txt_lookup(domain)
+        .await
+        .map(|txt| txt.into_iter().any(|r| r.to_string().contains(needle)))
+        .unwrap_or(false)
+}
+
+async fn check_domain_dns(
+    stalwart_url: &str,
+    admin_user: &str,
+    admin_token: &str,
+    results: &mut Vec<CheckResult>,
+) {
+    let http = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            results.push(CheckResult::fail("DNS records", format!("http client error: {e}")));
+            return;
+        }
+    };
+
+    let resp = match http
+        .get(format!("{stalwart_url}/api/principal?type=domain"))
+        .basic_auth(admin_user, Some(admin_token))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            results.push(CheckResult::fail("DNS records", format!("could not list domains: {e}")));
+            return;
+        }
+    };
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(b) => b,
+        Err(e) => {
+            results.push(CheckResult::fail("DNS records", format!("invalid response from Stalwart: {e}")));
+            return;
+        }
+    };
+
+    let domains: Vec<&str> = body["data"]["items"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+
+    if domains.is_empty() {
+        results.push(CheckResult::fail(
+            "DNS records",
+            "no domains configured in Stalwart. Run `postblox init --domain your-domain.com`.",
+        ));
+        return;
+    }
+
+    let resolver = match hickory_resolver::Resolver::builder_tokio().map(|b| b.build()) {
+        Ok(r) => r,
+        Err(e) => {
+            results.push(CheckResult::fail(
+                "DNS records",
+                format!("could not create DNS resolver: {e}"),
+            ));
+            return;
+        }
+    };
+
+    for domain in &domains {
+        let mut checks = Vec::new();
+
+        match resolver.mx_lookup(*domain).await {
+            Ok(mx) => {
+                let records: Vec<_> = mx
+                    .into_iter()
+                    .map(|r| format!("{} {}", r.preference(), r.exchange()))
+                    .collect();
+                checks.push(format!("MX: {}", records.join(", ")));
+            }
+            Err(_) => checks.push("MX: MISSING".into()),
+        }
+
+        let has_spf = has_txt_record(&resolver, domain, "v=spf1").await;
+        checks.push(if has_spf {
+            "SPF: ok".into()
+        } else {
+            "SPF: MISSING".into()
+        });
+
+        let has_dmarc = has_txt_record(&resolver, &format!("_dmarc.{domain}"), "v=DMARC1").await;
+        checks.push(if has_dmarc {
+            "DMARC: ok".into()
+        } else {
+            "DMARC: MISSING".into()
+        });
+
+        let has_dkim = has_txt_record(
+            &resolver,
+            &format!("default._domainkey.{domain}"),
+            "v=DKIM1",
+        )
+        .await;
+        checks.push(if has_dkim {
+            "DKIM: ok".into()
+        } else {
+            "DKIM: MISSING (checked default._domainkey)".into()
+        });
+
+        let all_ok = checks.iter().all(|c| !c.contains("MISSING"));
+        let detail = format!("{domain}: {}", checks.join(", "));
+        if all_ok {
+            results.push(CheckResult::ok("DNS records", detail));
+        } else {
+            results.push(CheckResult::fail("DNS records", detail));
+        }
+    }
+}
+
+async fn check_relay(host: &str, port: u16, results: &mut Vec<CheckResult>) {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(format!("{host}:{port}")),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {
+            results.push(CheckResult::ok("Relay", format!("{host}:{port} reachable")));
+        }
+        Ok(Err(e)) => {
+            results.push(CheckResult::fail(
+                "Relay",
+                format!("{host}:{port} connection failed: {e}"),
+            ));
+        }
+        Err(_) => {
+            results.push(CheckResult::fail(
+                "Relay",
+                format!("{host}:{port} connection timed out"),
+            ));
+        }
     }
 }
 

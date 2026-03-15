@@ -22,7 +22,11 @@ pub async fn receive_inbound(
         }
     }
 
-    let mut parsed = match crate::mail::parser::parse(&body) {
+    process_inbound_raw(&state, &body).await
+}
+
+pub async fn process_inbound_raw(state: &AppState, body: &[u8]) -> Result<StatusCode, ApiError> {
+    let mut parsed = match crate::mail::parser::parse(body) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("failed to parse inbound email: {e}");
@@ -84,11 +88,11 @@ pub async fn receive_inbound(
             Some(t) => crate::mail::ThreadMatch::Existing(t.id),
             None => {
                 // References didn't match — try subject-based with recent threads
-                subject_based_thread_match(&state, inbox.id, &parsed).await?
+                subject_based_thread_match(state, inbox.id, &parsed).await?
             }
         }
     } else {
-        subject_based_thread_match(&state, inbox.id, &parsed).await?
+        subject_based_thread_match(state, inbox.id, &parsed).await?
     };
 
     let thread_id = match thread_match {

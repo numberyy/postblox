@@ -15,6 +15,12 @@ pub struct Config {
     pub stalwart_inbound_token: Option<String>,
     pub stalwart_smtp_host: Option<String>,
     pub stalwart_smtp_port: Option<u16>,
+    pub relay_host: Option<String>,
+    pub relay_port: Option<u16>,
+    pub relay_username: Option<String>,
+    pub relay_password: Option<String>,
+    #[serde(default)]
+    pub relay_starttls: bool,
     pub guard_patterns: Option<Vec<GuardPatternConfig>>,
     pub embedding_url: Option<String>,
     pub embedding_model: Option<String>,
@@ -118,6 +124,11 @@ impl Config {
                 stalwart_inbound_token: std::env::var("STALWART_INBOUND_TOKEN").ok(),
                 stalwart_smtp_host: std::env::var("STALWART_SMTP_HOST").ok(),
                 stalwart_smtp_port: parse_env_opt("STALWART_SMTP_PORT"),
+                relay_host: std::env::var("RELAY_HOST").ok(),
+                relay_port: parse_env_opt("RELAY_PORT"),
+                relay_username: std::env::var("RELAY_USERNAME").ok(),
+                relay_password: std::env::var("RELAY_PASSWORD").ok(),
+                relay_starttls: parse_env_or_default("RELAY_STARTTLS", || false),
                 guard_patterns: None,
                 embedding_url: std::env::var("EMBEDDING_URL").ok(),
                 embedding_model: std::env::var("EMBEDDING_MODEL").ok(),
@@ -269,6 +280,38 @@ mod tests {
             PathBuf::from("data/attachments")
         );
         assert_eq!(config.max_attachment_size_bytes, 25 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_config_relay_defaults() {
+        let toml_str = r#"database_url = "postgres://localhost/postblox""#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.relay_host.is_none());
+        assert!(config.relay_port.is_none());
+        assert!(config.relay_username.is_none());
+        assert!(config.relay_password.is_none());
+        assert!(!config.relay_starttls);
+    }
+
+    #[test]
+    fn test_config_relay_custom() {
+        let toml_str = r#"
+            database_url = "postgres://localhost/postblox"
+            relay_host = "smtp.mailgun.org"
+            relay_port = 587
+            relay_username = "postmaster@mg.example.com"
+            relay_password = "secret"
+            relay_starttls = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.relay_host.as_deref(), Some("smtp.mailgun.org"));
+        assert_eq!(config.relay_port, Some(587));
+        assert_eq!(
+            config.relay_username.as_deref(),
+            Some("postmaster@mg.example.com")
+        );
+        assert_eq!(config.relay_password.as_deref(), Some("secret"));
+        assert!(config.relay_starttls);
     }
 
     #[test]

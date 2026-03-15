@@ -67,6 +67,30 @@ pub struct InitArgs {
     #[arg(long, env = "EMBEDDING_API_KEY")]
     pub embedding_api_key: Option<String>,
 
+    /// Email domain to configure (e.g., example.com)
+    #[arg(long)]
+    pub domain: Option<String>,
+
+    /// SMTP relay host for outbound delivery
+    #[arg(long, env = "RELAY_HOST")]
+    pub relay_host: Option<String>,
+
+    /// SMTP relay port
+    #[arg(long, env = "RELAY_PORT")]
+    pub relay_port: Option<u16>,
+
+    /// SMTP relay username
+    #[arg(long, env = "RELAY_USERNAME")]
+    pub relay_username: Option<String>,
+
+    /// SMTP relay password
+    #[arg(long, env = "RELAY_PASSWORD")]
+    pub relay_password: Option<String>,
+
+    /// Use STARTTLS for relay connection
+    #[arg(long)]
+    pub relay_starttls: bool,
+
     /// Organization name for initial setup
     #[arg(long)]
     pub org_name: Option<String>,
@@ -89,6 +113,12 @@ struct CollectedConfig {
     stalwart_admin_user: Option<String>,
     stalwart_admin_token: Option<String>,
     stalwart_inbound_token: Option<String>,
+    domain: Option<String>,
+    relay_host: Option<String>,
+    relay_port: Option<u16>,
+    relay_username: Option<String>,
+    relay_password: Option<String>,
+    relay_starttls: bool,
     embedding_url: Option<String>,
     embedding_model: Option<String>,
     embedding_api_key: Option<String>,
@@ -121,8 +151,89 @@ pub async fn run(args: InitArgs) -> Result<(), InitError> {
         .map_err(|e| InitError::Database(e.to_string()))?;
     println!("ok");
 
-    // Test Stalwart if configured
-    if let Some(url) = &config.stalwart_url {
+    // Test and configure Stalwart if configured
+    if let (Some(url), Some(token)) = (&config.stalwart_url, &config.stalwart_admin_token) {
+        print!("  Testing Stalwart connection... ");
+        test_stalwart(url).await?;
+        println!("ok");
+
+        let user = config.stalwart_admin_user.as_deref().unwrap_or("admin");
+        let inbound_token = config
+            .stalwart_inbound_token
+            .as_deref()
+            .unwrap_or("postblox-inbound-default");
+
+        let stalwart = crate::stalwart::StalwartClient::new(url, user, token, None, None)
+            .map_err(|e| InitError::Stalwart(e.to_string()))?;
+
+        // Configure MTA Hook for inbound forwarding
+        let postblox_url = format!("http://{}:{}", config.host, config.port);
+        print!("  Configuring Stalwart MTA hook... ");
+        stalwart
+            .configure_mta_hook(&postblox_url, inbound_token)
+            .await
+            .map_err(|e| InitError::Stalwart(format!("MTA hook config failed: {e}")))?;
+        println!("ok");
+
+        // Create domain in Stalwart if specified
+        if let Some(domain) = &config.domain {
+            print!("  Creating domain '{domain}' in Stalwart... ");
+            match stalwart.create_domain(domain).await {
+                Ok(_) => println!("ok"),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("already exists") || msg.contains("409") {
+                        println!("already exists");
+                    } else {
+                        return Err(InitError::Stalwart(format!("domain creation failed: {e}")));
+                    }
+                }
+            }
+
+            // Print DNS records
+            print!("  Fetching DNS records... ");
+            match stalwart.get_dns_records(domain).await {
+                Ok(records) => {
+                    println!("ok\n");
+                    println!("  Add these DNS records for {domain}:\n");
+                    if let Some(data) = records.get("data") {
+                        println!(
+                            "  {}\n",
+                            serde_json::to_string_pretty(data)
+                                .unwrap_or_else(|_| records.to_string())
+                        );
+                    } else {
+                        println!(
+                            "  {}\n",
+                            serde_json::to_string_pretty(&records)
+                                .unwrap_or_else(|_| records.to_string())
+                        );
+                    }
+                }
+                Err(e) => {
+                    println!("skipped ({e})");
+                    println!("  Run `postblox doctor` later to check DNS records.\n");
+                }
+            }
+        }
+
+        // Configure relay in Stalwart if specified
+        if let Some(relay_host) = &config.relay_host {
+            let port = config.relay_port.unwrap_or(587);
+            print!("  Configuring outbound relay ({relay_host}:{port})... ");
+            stalwart
+                .configure_relay(
+                    relay_host,
+                    port,
+                    config.relay_username.as_deref(),
+                    config.relay_password.as_deref(),
+                    config.relay_starttls,
+                )
+                .await
+                .map_err(|e| InitError::Stalwart(format!("relay config failed: {e}")))?;
+            println!("ok");
+        }
+    } else if let Some(url) = &config.stalwart_url {
         print!("  Testing Stalwart connection... ");
         test_stalwart(url).await?;
         println!("ok");
@@ -169,6 +280,12 @@ fn collect_non_interactive(args: &InitArgs) -> Result<CollectedConfig, InitError
         stalwart_admin_user: args.stalwart_admin_user.clone(),
         stalwart_admin_token: args.stalwart_admin_token.clone(),
         stalwart_inbound_token: args.stalwart_inbound_token.clone(),
+        domain: args.domain.clone(),
+        relay_host: args.relay_host.clone(),
+        relay_port: args.relay_port,
+        relay_username: args.relay_username.clone(),
+        relay_password: args.relay_password.clone(),
+        relay_starttls: args.relay_starttls,
         embedding_url: args.embedding_url.clone(),
         embedding_model: args.embedding_model.clone(),
         embedding_api_key: args.embedding_api_key.clone(),
@@ -250,6 +367,62 @@ fn collect_interactive(args: &InitArgs) -> Result<CollectedConfig, InitError> {
             (None, None, None, None)
         };
 
+    let domain = if stalwart_url.is_some() {
+        let d: String = Input::new()
+            .with_prompt("Email domain (e.g., example.com, leave empty to skip)")
+            .default(String::new())
+            .interact_text()?;
+        if d.is_empty() {
+            None
+        } else {
+            Some(d)
+        }
+    } else {
+        None
+    };
+
+    let (relay_host, relay_port, relay_username, relay_password, relay_starttls) = if stalwart_url
+        .is_some()
+        && Confirm::new()
+            .with_prompt("Configure outbound relay (Mailgun/SES/SMTP)?")
+            .default(false)
+            .interact()?
+    {
+        let provider = Select::new()
+            .with_prompt("Relay provider")
+            .items(&["Mailgun", "Amazon SES", "Postmark", "Custom SMTP"])
+            .default(0)
+            .interact()?;
+
+        let (default_host, default_port) = match provider {
+            0 => ("smtp.mailgun.org", 587u16),
+            1 => ("email-smtp.us-east-1.amazonaws.com", 587),
+            2 => ("smtp.postmarkapp.com", 587),
+            _ => ("smtp.example.com", 587),
+        };
+
+        let rh: String = Input::new()
+            .with_prompt("Relay SMTP host")
+            .default(default_host.into())
+            .interact_text()?;
+        let rp: u16 = Input::new()
+            .with_prompt("Relay SMTP port")
+            .default(default_port)
+            .interact()?;
+        let ru: String = Input::new().with_prompt("Relay username").interact_text()?;
+        let rpass: String = Password::new().with_prompt("Relay password").interact()?;
+
+        (
+            Some(rh),
+            Some(rp),
+            Some(ru).filter(|s| !s.is_empty()),
+            Some(rpass).filter(|s| !s.is_empty()),
+            true,
+        )
+    } else {
+        (None, None, None, None, false)
+    };
+
     let (embedding_url, embedding_model, embedding_api_key) = if Confirm::new()
         .with_prompt("Configure semantic search (embeddings)?")
         .default(false)
@@ -302,6 +475,12 @@ fn collect_interactive(args: &InitArgs) -> Result<CollectedConfig, InitError> {
         stalwart_admin_user,
         stalwart_admin_token,
         stalwart_inbound_token,
+        domain,
+        relay_host,
+        relay_port,
+        relay_username,
+        relay_password,
+        relay_starttls,
         embedding_url,
         embedding_model,
         embedding_api_key,
@@ -366,11 +545,9 @@ fn generate_toml(config: &CollectedConfig) -> String {
         out.push_str(&format!("port = {}\n", config.port));
     }
 
-    if config.stalwart_url.is_some() {
+    if let Some(v) = &config.stalwart_url {
         out.push('\n');
-        if let Some(v) = &config.stalwart_url {
-            out.push_str(&format!("stalwart_url = {:?}\n", v));
-        }
+        out.push_str(&format!("stalwart_url = {:?}\n", v));
         if let Some(v) = &config.stalwart_admin_user {
             out.push_str(&format!("stalwart_admin_user = {:?}\n", v));
         }
@@ -382,11 +559,26 @@ fn generate_toml(config: &CollectedConfig) -> String {
         }
     }
 
-    if config.embedding_url.is_some() {
+    if let Some(v) = &config.relay_host {
         out.push('\n');
-        if let Some(v) = &config.embedding_url {
-            out.push_str(&format!("embedding_url = {:?}\n", v));
+        out.push_str(&format!("relay_host = {:?}\n", v));
+        if let Some(v) = config.relay_port {
+            out.push_str(&format!("relay_port = {v}\n"));
         }
+        if let Some(v) = &config.relay_username {
+            out.push_str(&format!("relay_username = {:?}\n", v));
+        }
+        if let Some(v) = &config.relay_password {
+            out.push_str(&format!("relay_password = {:?}\n", v));
+        }
+        if config.relay_starttls {
+            out.push_str("relay_starttls = true\n");
+        }
+    }
+
+    if let Some(v) = &config.embedding_url {
+        out.push('\n');
+        out.push_str(&format!("embedding_url = {:?}\n", v));
         if let Some(v) = &config.embedding_model {
             out.push_str(&format!("embedding_model = {:?}\n", v));
         }
@@ -459,6 +651,12 @@ mod tests {
             stalwart_admin_user: None,
             stalwart_admin_token: None,
             stalwart_inbound_token: None,
+            domain: None,
+            relay_host: None,
+            relay_port: None,
+            relay_username: None,
+            relay_password: None,
+            relay_starttls: false,
             embedding_url: None,
             embedding_model: None,
             embedding_api_key: None,
@@ -482,6 +680,12 @@ mod tests {
             stalwart_admin_user: Some("admin".into()),
             stalwart_admin_token: Some("secret".into()),
             stalwart_inbound_token: Some("tok".into()),
+            domain: None,
+            relay_host: None,
+            relay_port: None,
+            relay_username: None,
+            relay_password: None,
+            relay_starttls: false,
             embedding_url: Some("http://localhost:11434/v1/embeddings".into()),
             embedding_model: Some("nomic-embed-text".into()),
             embedding_api_key: Some("sk-test".into()),
@@ -510,6 +714,12 @@ mod tests {
             stalwart_admin_user: None,
             stalwart_admin_token: None,
             stalwart_inbound_token: None,
+            domain: None,
+            relay_host: None,
+            relay_port: None,
+            relay_username: None,
+            relay_password: None,
+            relay_starttls: false,
             embedding_url: None,
             embedding_model: None,
             embedding_api_key: None,
@@ -529,6 +739,12 @@ mod tests {
             stalwart_admin_user: Some("admin".into()),
             stalwart_admin_token: Some("pass".into()),
             stalwart_inbound_token: None,
+            domain: None,
+            relay_host: None,
+            relay_port: None,
+            relay_username: None,
+            relay_password: None,
+            relay_starttls: false,
             embedding_url: None,
             embedding_model: None,
             embedding_api_key: None,
@@ -549,6 +765,12 @@ mod tests {
             stalwart_admin_user: None,
             stalwart_admin_token: None,
             stalwart_inbound_token: None,
+            domain: None,
+            relay_host: None,
+            relay_port: None,
+            relay_username: None,
+            relay_password: None,
+            relay_starttls: false,
             embedding_url: Some("http://localhost:11434/v1/embeddings".into()),
             embedding_model: Some("nomic".into()),
             embedding_api_key: None,
@@ -570,6 +792,12 @@ mod tests {
             stalwart_admin_user: Some("admin".into()),
             stalwart_admin_token: Some("sec\"ret".into()),
             stalwart_inbound_token: None,
+            domain: None,
+            relay_host: None,
+            relay_port: None,
+            relay_username: None,
+            relay_password: None,
+            relay_starttls: false,
             embedding_url: None,
             embedding_model: None,
             embedding_api_key: None,
@@ -629,6 +857,12 @@ mod tests {
             stalwart_admin_user: None,
             stalwart_admin_token: None,
             stalwart_inbound_token: None,
+            domain: None,
+            relay_host: None,
+            relay_port: None,
+            relay_username: None,
+            relay_password: None,
+            relay_starttls: false,
             embedding_url: None,
             embedding_model: None,
             embedding_api_key: None,
@@ -652,6 +886,12 @@ mod tests {
             stalwart_admin_user: None,
             stalwart_admin_token: None,
             stalwart_inbound_token: None,
+            domain: None,
+            relay_host: None,
+            relay_port: None,
+            relay_username: None,
+            relay_password: None,
+            relay_starttls: false,
             embedding_url: None,
             embedding_model: None,
             embedding_api_key: None,
@@ -678,6 +918,12 @@ mod tests {
             stalwart_admin_user: Some("admin".into()),
             stalwart_admin_token: Some("token".into()),
             stalwart_inbound_token: Some("inbound".into()),
+            domain: Some("example.com".into()),
+            relay_host: Some("smtp.mailgun.org".into()),
+            relay_port: Some(587),
+            relay_username: Some("user".into()),
+            relay_password: Some("pass".into()),
+            relay_starttls: true,
             embedding_url: Some("http://ollama:11434/v1/embeddings".into()),
             embedding_model: Some("nomic".into()),
             embedding_api_key: Some("sk-key".into()),

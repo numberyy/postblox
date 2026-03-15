@@ -27,6 +27,7 @@ pub mod labels;
 pub mod linked_accounts;
 pub mod members;
 pub mod messages;
+pub mod mta_hook;
 pub mod notifications;
 pub mod organizations;
 pub mod permissions;
@@ -313,6 +314,7 @@ pub fn router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/health", get(health))
         .route("/internal/stalwart/inbound", post(inbound::receive_inbound))
+        .route("/internal/stalwart/mta-hook", post(mta_hook::handle))
         .route("/internal/stalwart/bounce", post(bounces::receive_bounce))
         .route("/api/v1/ws", get(ws_upgrade))
         .nest("/api/v1", api_routes)
