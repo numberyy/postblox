@@ -163,7 +163,7 @@ impl StalwartClient {
         let payload = serde_json::json!([{
             "type": "insert",
             "values": values,
-            "assertEmpty": false,
+            "assert_empty": false,
         }]);
 
         let resp = self
@@ -187,7 +187,7 @@ impl StalwartClient {
         self.set_settings(&[
             ("session.hook.postblox.enable", "true"),
             ("session.hook.postblox.url", &hook_url),
-            ("session.hook.postblox.stages", "[\"data\"]"),
+            ("session.hook.postblox.stages.0000", "data"),
             ("session.hook.postblox.auth.username", "postblox"),
             ("session.hook.postblox.auth.secret", token),
             ("session.hook.postblox.options.tempfail-on-error", "true"),
