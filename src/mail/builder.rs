@@ -40,6 +40,7 @@ pub fn build_mime_with_attachments(
     attachments: &[MimeAttachment],
 ) -> Vec<u8> {
     let mut msg = String::new();
+    // write! to String is infallible — fmt::Write for String never returns Err.
     let _ = write!(msg, "From: {}\r\n", sanitize_header(from));
     let _ = write!(msg, "To: {}\r\n", sanitize_header(&to.join(", ")));
     if !cc.is_empty() {

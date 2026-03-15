@@ -34,6 +34,7 @@ struct RawServer {
 struct RawTui {
     theme: Option<String>,
     vim_mode: Option<bool>,
+    download_dir: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,7 @@ pub struct TuiConfig {
     pub api_key: String,
     pub theme: String,
     pub vim_mode: bool,
+    pub download_dir: PathBuf,
 }
 
 impl TuiConfig {
@@ -72,16 +74,31 @@ impl TuiConfig {
             .or_else(|| std::env::var("POSTBLOX_API_KEY").ok())
             .ok_or(ConfigError::MissingApiKey)?;
 
+        let download_dir = raw
+            .tui
+            .download_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(default_download_dir);
+
         Ok(Self {
             server_url,
             api_key,
             theme: raw.tui.theme.unwrap_or_else(|| "nord".into()),
             vim_mode: raw.tui.vim_mode.unwrap_or(true),
+            download_dir,
         })
     }
 
     pub fn config_path() -> PathBuf {
         dirs_next().join("tui.toml")
+    }
+}
+
+fn default_download_dir() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join("Downloads")
+    } else {
+        PathBuf::from(".")
     }
 }
 
@@ -182,5 +199,45 @@ api_key = "k"
         let raw: RawConfig = toml::from_str("").unwrap();
         assert!(raw.server.url.is_none());
         assert!(raw.tui.theme.is_none());
+    }
+
+    #[test]
+    fn test_download_dir_default() {
+        let raw: RawConfig = toml::from_str(
+            r#"
+[server]
+url = "http://localhost:3000"
+api_key = "k"
+"#,
+        )
+        .unwrap();
+        assert!(raw.tui.download_dir.is_none());
+        let dir = raw
+            .tui
+            .download_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(default_download_dir);
+        // Should end with "Downloads" (unless HOME is not set)
+        let dir_str = dir.display().to_string();
+        assert!(
+            dir_str.ends_with("Downloads") || dir_str == ".",
+            "got: {dir_str}"
+        );
+    }
+
+    #[test]
+    fn test_download_dir_custom() {
+        let raw: RawConfig = toml::from_str(
+            r#"
+[server]
+url = "http://localhost:3000"
+api_key = "k"
+
+[tui]
+download_dir = "/tmp/my-downloads"
+"#,
+        )
+        .unwrap();
+        assert_eq!(raw.tui.download_dir.unwrap(), "/tmp/my-downloads");
     }
 }

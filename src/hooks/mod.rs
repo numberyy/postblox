@@ -86,9 +86,10 @@ pub fn run_event_hooks(hooks: &[HookConfig], event_name: &str, data: serde_json:
         return;
     }
 
+    let data = std::sync::Arc::new(data);
     for hook in matching {
         let name = event_name.to_string();
-        let payload = data.clone();
+        let payload = std::sync::Arc::clone(&data);
         tokio::spawn(async move {
             if let Err(e) = run_one(&hook, &name, &payload).await {
                 tracing::warn!(command = %hook.command, event = %name, "event hook failed: {e}");

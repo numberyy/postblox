@@ -8,7 +8,7 @@ use uuid::Uuid;
 use postblox::api;
 use postblox::dashboard;
 use postblox::events::websocket::WebSocketHub;
-use postblox::models::CreateMessage;
+use postblox::models::{CreateMessage, InboxType};
 
 pub async fn test_pool() -> PgPool {
     let url =
@@ -64,7 +64,7 @@ pub async fn setup_org(pool: &PgPool) -> (Uuid, String) {
 
 pub async fn setup_inbox(pool: &PgPool, org_id: Uuid) -> postblox::models::Inbox {
     let email = format!("test-{}@test.example.com", Uuid::new_v4());
-    postblox::db::inboxes::create(pool, org_id, &email, Some("Test Inbox"), "native")
+    postblox::db::inboxes::create(pool, org_id, &email, Some("Test Inbox"), InboxType::Native)
         .await
         .unwrap()
 }

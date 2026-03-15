@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::Domain;
+use crate::models::{Domain, DomainStatus};
 
 pub async fn create(pool: &PgPool, org_id: Uuid, name: &str) -> Result<Domain, sqlx::Error> {
     sqlx::query_as(
@@ -38,7 +38,7 @@ pub async fn list_by_org(pool: &PgPool, org_id: Uuid) -> Result<Vec<Domain>, sql
 pub async fn update_status(
     pool: &PgPool,
     id: Uuid,
-    status: &str,
+    status: DomainStatus,
     stalwart_principal_id: Option<&str>,
 ) -> Result<Option<Domain>, sqlx::Error> {
     sqlx::query_as(
@@ -87,7 +87,7 @@ mod tests {
 
         let domain = create(&pool, org.id, &name).await.unwrap();
         assert_eq!(domain.name, name);
-        assert_eq!(domain.status, "pending");
+        assert_eq!(domain.status, DomainStatus::Pending);
         assert!(domain.stalwart_principal_id.is_none());
         assert!(domain.verified_at.is_none());
 
@@ -181,11 +181,11 @@ mod tests {
         let name = format!("{}.example.com", Uuid::new_v4());
         let domain = create(&pool, org.id, &name).await.unwrap();
 
-        let updated = update_status(&pool, domain.id, "verified", Some("principal-123"))
+        let updated = update_status(&pool, domain.id, DomainStatus::Verified, Some("principal-123"))
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(updated.status, "verified");
+        assert_eq!(updated.status, DomainStatus::Verified);
         assert_eq!(
             updated.stalwart_principal_id.as_deref(),
             Some("principal-123")
@@ -196,7 +196,7 @@ mod tests {
     #[ignore]
     async fn test_domain_update_status_nonexistent_returns_none() {
         let pool = crate::db::test_pool().await;
-        let result = update_status(&pool, Uuid::new_v4(), "verified", None)
+        let result = update_status(&pool, Uuid::new_v4(), DomainStatus::Verified, None)
             .await
             .unwrap();
         assert!(result.is_none());
@@ -211,10 +211,10 @@ mod tests {
             .unwrap();
         let name = format!("{}.example.com", Uuid::new_v4());
         let domain = create(&pool, org.id, &name).await.unwrap();
-        assert_eq!(domain.status, "pending");
+        assert_eq!(domain.status, DomainStatus::Pending);
 
         let verified = set_verified(&pool, domain.id).await.unwrap().unwrap();
-        assert_eq!(verified.status, "verified");
+        assert_eq!(verified.status, DomainStatus::Verified);
         assert!(verified.verified_at.is_some());
     }
 

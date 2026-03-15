@@ -535,41 +535,43 @@ async fn test_embedding(url: &str) -> Result<(), InitError> {
 }
 
 fn generate_toml(config: &CollectedConfig) -> String {
+    use std::fmt::Write;
     let mut out = String::new();
-    out.push_str(&format!("database_url = {:?}\n", config.database_url));
+    // write! to String is infallible — fmt::Write for String never returns Err.
+    let _ = writeln!(out, "database_url = {:?}", config.database_url);
 
     if config.host != "0.0.0.0" {
-        out.push_str(&format!("host = {:?}\n", config.host));
+        let _ = writeln!(out, "host = {:?}", config.host);
     }
     if config.port != 3000 {
-        out.push_str(&format!("port = {}\n", config.port));
+        let _ = writeln!(out, "port = {}", config.port);
     }
 
     if let Some(v) = &config.stalwart_url {
         out.push('\n');
-        out.push_str(&format!("stalwart_url = {:?}\n", v));
+        let _ = writeln!(out, "stalwart_url = {:?}", v);
         if let Some(v) = &config.stalwart_admin_user {
-            out.push_str(&format!("stalwart_admin_user = {:?}\n", v));
+            let _ = writeln!(out, "stalwart_admin_user = {:?}", v);
         }
         if let Some(v) = &config.stalwart_admin_token {
-            out.push_str(&format!("stalwart_admin_token = {:?}\n", v));
+            let _ = writeln!(out, "stalwart_admin_token = {:?}", v);
         }
         if let Some(v) = &config.stalwart_inbound_token {
-            out.push_str(&format!("stalwart_inbound_token = {:?}\n", v));
+            let _ = writeln!(out, "stalwart_inbound_token = {:?}", v);
         }
     }
 
     if let Some(v) = &config.relay_host {
         out.push('\n');
-        out.push_str(&format!("relay_host = {:?}\n", v));
+        let _ = writeln!(out, "relay_host = {:?}", v);
         if let Some(v) = config.relay_port {
-            out.push_str(&format!("relay_port = {v}\n"));
+            let _ = writeln!(out, "relay_port = {v}");
         }
         if let Some(v) = &config.relay_username {
-            out.push_str(&format!("relay_username = {:?}\n", v));
+            let _ = writeln!(out, "relay_username = {:?}", v);
         }
         if let Some(v) = &config.relay_password {
-            out.push_str(&format!("relay_password = {:?}\n", v));
+            let _ = writeln!(out, "relay_password = {:?}", v);
         }
         if config.relay_starttls {
             out.push_str("relay_starttls = true\n");
@@ -578,12 +580,12 @@ fn generate_toml(config: &CollectedConfig) -> String {
 
     if let Some(v) = &config.embedding_url {
         out.push('\n');
-        out.push_str(&format!("embedding_url = {:?}\n", v));
+        let _ = writeln!(out, "embedding_url = {:?}", v);
         if let Some(v) = &config.embedding_model {
-            out.push_str(&format!("embedding_model = {:?}\n", v));
+            let _ = writeln!(out, "embedding_model = {:?}", v);
         }
         if let Some(v) = &config.embedding_api_key {
-            out.push_str(&format!("embedding_api_key = {:?}\n", v));
+            let _ = writeln!(out, "embedding_api_key = {:?}", v);
         }
     }
 

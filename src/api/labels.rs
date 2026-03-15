@@ -9,6 +9,20 @@ use super::error::ApiError;
 use super::{get_inbox_for_org, get_message_for_inbox, AppState};
 use crate::models::Label;
 
+fn is_safe_css_color(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.len() > 30 {
+        return false;
+    }
+    // Allow #hex colors: #rgb, #rrggbb, #rrggbbaa
+    if let Some(hex) = s.strip_prefix('#') {
+        return matches!(hex.len(), 3 | 4 | 6 | 8)
+            && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    // Allow simple alphanumeric named colors (e.g. "red", "steelblue")
+    s.chars().all(|c| c.is_ascii_alphabetic())
+}
+
 #[derive(Deserialize)]
 pub struct CreateLabelRequest {
     pub name: String,
@@ -30,6 +44,12 @@ pub async fn create(
 
     if req.name.trim().is_empty() {
         return Err(ApiError::BadRequest("name is required".into()));
+    }
+
+    if let Some(ref color) = req.color {
+        if !is_safe_css_color(color) {
+            return Err(ApiError::BadRequest("invalid color value".into()));
+        }
     }
 
     let label = crate::db::labels::create(&state.pool, inbox_id, &req.name, req.color.as_deref())

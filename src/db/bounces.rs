@@ -66,7 +66,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("bounce-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
         let msg = crate::db::messages::create(
@@ -117,7 +117,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("bd-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
         let msg = crate::db::messages::create(
@@ -165,7 +165,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("cnt-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 
@@ -240,7 +240,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("empty-ds-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
         let msg = crate::db::messages::create(
@@ -278,10 +278,10 @@ mod tests {
             .unwrap();
         let e1 = format!("iso1-{}@example.com", Uuid::new_v4());
         let e2 = format!("iso2-{}@example.com", Uuid::new_v4());
-        let inbox1 = crate::db::inboxes::create(&pool, org.id, &e1, None, "native")
+        let inbox1 = crate::db::inboxes::create(&pool, org.id, &e1, None, crate::models::InboxType::Native)
             .await
             .unwrap();
-        let inbox2 = crate::db::inboxes::create(&pool, org.id, &e2, None, "native")
+        let inbox2 = crate::db::inboxes::create(&pool, org.id, &e2, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 

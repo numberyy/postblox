@@ -8,6 +8,43 @@
   <div><strong>Send Mode:</strong> <span class="badge badge-blue">{{ send_mode }}</span></div>
 </div>
 
+<div style="margin-bottom:1rem">
+  <button class="btn btn-primary" onclick="document.getElementById('compose-panel').classList.toggle('hidden')">Compose</button>
+</div>
+
+<div id="compose-panel" class="card hidden">
+  <h3>Compose Message</h3>
+  <form hx-post="/dashboard/inboxes/{{ inbox_id }}/compose" hx-target="#compose-result" hx-swap="innerHTML">
+    <div class="compose-fields">
+      <div class="compose-row">
+        <label>To</label>
+        <input type="text" name="to" placeholder="recipient@example.com" required>
+      </div>
+      <div class="compose-row">
+        <label>CC</label>
+        <input type="text" name="cc" placeholder="cc@example.com (optional)">
+      </div>
+      <div class="compose-row">
+        <label>Subject</label>
+        <input type="text" name="subject" placeholder="Subject">
+      </div>
+      <div class="compose-row">
+        <label>Body</label>
+        <textarea name="text_body" rows="6" placeholder="Plain text body"></textarea>
+      </div>
+      <div class="compose-row">
+        <label>HTML Body</label>
+        <textarea name="html_body" rows="6" placeholder="HTML body (optional)"></textarea>
+      </div>
+    </div>
+    <div style="display:flex;gap:.5rem;margin-top:.75rem">
+      <button type="submit" class="btn btn-primary">Send</button>
+      <button type="submit" class="btn btn-approve" hx-post="/dashboard/inboxes/{{ inbox_id }}/compose?draft=1" hx-target="#compose-result" hx-swap="innerHTML">Save Draft</button>
+    </div>
+  </form>
+  <div id="compose-result" style="margin-top:.5rem"></div>
+</div>
+
 {% if labels %}
 <div class="card">
   <h3>Labels</h3>

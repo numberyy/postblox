@@ -1,13 +1,14 @@
 use mail_parser::{Address, HeaderValue, MessageParser, MimeHeaders, PartType};
 
 use crate::mail::error::MailError;
+use crate::models::Disposition;
 
 #[derive(Debug, Clone)]
 pub struct ParsedAttachment {
     pub filename: String,
     pub content_type: String,
     pub data: Vec<u8>,
-    pub disposition: String,
+    pub disposition: Disposition,
 }
 
 #[derive(Debug, Clone)]
@@ -113,13 +114,13 @@ pub fn parse(raw: &[u8]) -> Result<ParsedEmail, MailError> {
                 format!("attachment_{i}.{ext}")
             });
 
-        let disposition = if is_inline { "inline" } else { "attachment" };
+        let disposition = if is_inline { Disposition::Inline } else { Disposition::Attachment };
 
         attachments.push(ParsedAttachment {
             filename,
             content_type,
             data,
-            disposition: disposition.into(),
+            disposition,
         });
     }
 
@@ -370,7 +371,7 @@ mod tests {
         let att = &email.attachments[0];
         assert_eq!(att.filename, "data.bin");
         assert_eq!(att.content_type, "application/octet-stream");
-        assert_eq!(att.disposition, "attachment");
+        assert_eq!(att.disposition, Disposition::Attachment);
         assert_eq!(att.data, b"Hello World");
     }
 
@@ -400,7 +401,7 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
         let email = parse(raw).unwrap();
         assert_eq!(email.attachments.len(), 1);
         assert_eq!(email.attachments[0].filename, "logo.png");
-        assert_eq!(email.attachments[0].disposition, "inline");
+        assert_eq!(email.attachments[0].disposition, Disposition::Inline);
     }
 
     #[test]

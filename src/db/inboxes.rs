@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::models::Inbox;
+use crate::models::{Inbox, InboxType};
 
 const SELECT_COLS: &str = "id, org_id, email, display_name, inbox_type, active, created_at";
 
@@ -10,7 +10,7 @@ pub async fn create(
     org_id: Uuid,
     email: &str,
     display_name: Option<&str>,
-    inbox_type: &str,
+    inbox_type: InboxType,
 ) -> Result<Inbox, sqlx::Error> {
     sqlx::query_as(&format!(
         "INSERT INTO inboxes (org_id, email, display_name, inbox_type) \
@@ -91,12 +91,12 @@ mod tests {
             .unwrap();
         let email = format!("bot-{}@example.com", Uuid::new_v4());
 
-        let inbox = create(&pool, org.id, &email, Some("Bot"), "native")
+        let inbox = create(&pool, org.id, &email, Some("Bot"), InboxType::Native)
             .await
             .unwrap();
         assert_eq!(inbox.email, email);
         assert_eq!(inbox.display_name.as_deref(), Some("Bot"));
-        assert_eq!(inbox.inbox_type, "native");
+        assert_eq!(inbox.inbox_type, InboxType::Native);
 
         let fetched = get_by_id(&pool, inbox.id).await.unwrap().unwrap();
         assert_eq!(fetched.id, inbox.id);
@@ -111,8 +111,8 @@ mod tests {
             .unwrap();
         let email = format!("dup-{}@example.com", Uuid::new_v4());
 
-        create(&pool, org.id, &email, None, "native").await.unwrap();
-        let err = create(&pool, org.id, &email, None, "native").await;
+        create(&pool, org.id, &email, None, InboxType::Native).await.unwrap();
+        let err = create(&pool, org.id, &email, None, InboxType::Native).await;
         assert!(err.is_err());
     }
 
@@ -125,7 +125,7 @@ mod tests {
             .unwrap();
         let email = format!("lookup-{}@example.com", Uuid::new_v4());
 
-        let inbox = create(&pool, org.id, &email, None, "native").await.unwrap();
+        let inbox = create(&pool, org.id, &email, None, InboxType::Native).await.unwrap();
         let found = get_by_email(&pool, &email).await.unwrap().unwrap();
         assert_eq!(found.id, inbox.id);
     }
@@ -148,8 +148,8 @@ mod tests {
 
         let e1 = format!("a-{}@example.com", Uuid::new_v4());
         let e2 = format!("b-{}@example.com", Uuid::new_v4());
-        create(&pool, org.id, &e1, None, "native").await.unwrap();
-        create(&pool, org.id, &e2, None, "relay").await.unwrap();
+        create(&pool, org.id, &e1, None, InboxType::Native).await.unwrap();
+        create(&pool, org.id, &e2, None, InboxType::Relay).await.unwrap();
 
         let inboxes = list_by_org(&pool, org.id).await.unwrap();
         assert_eq!(inboxes.len(), 2);
@@ -174,7 +174,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("del-{}@example.com", Uuid::new_v4());
-        let inbox = create(&pool, org.id, &email, None, "native").await.unwrap();
+        let inbox = create(&pool, org.id, &email, None, InboxType::Native).await.unwrap();
 
         assert!(delete(&pool, inbox.id).await.unwrap());
         assert!(get_by_id(&pool, inbox.id).await.unwrap().is_none());

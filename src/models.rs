@@ -137,7 +137,7 @@ pub struct Inbox {
     pub org_id: Uuid,
     pub email: String,
     pub display_name: Option<String>,
-    pub inbox_type: String,
+    pub inbox_type: InboxType,
     pub active: bool,
     pub created_at: DateTime<Utc>,
 }
@@ -313,7 +313,7 @@ pub struct Domain {
     pub id: Uuid,
     pub org_id: Uuid,
     pub name: String,
-    pub status: String,
+    pub status: DomainStatus,
     pub stalwart_principal_id: Option<String>,
     pub verified_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -390,6 +390,8 @@ pub enum AuditAction {
     WebhookDeleted,
     DomainCreated,
     SyncTriggered,
+    ApiKeyCreated,
+    ApiKeyDeleted,
 }
 
 impl fmt::Display for AuditAction {
@@ -406,6 +408,8 @@ impl fmt::Display for AuditAction {
             Self::WebhookDeleted => "webhook_deleted",
             Self::DomainCreated => "domain_created",
             Self::SyncTriggered => "sync_triggered",
+            Self::ApiKeyCreated => "api_key_created",
+            Self::ApiKeyDeleted => "api_key_deleted",
         })
     }
 }
@@ -426,6 +430,8 @@ impl FromStr for AuditAction {
             "webhook_deleted" => Ok(Self::WebhookDeleted),
             "domain_created" => Ok(Self::DomainCreated),
             "sync_triggered" => Ok(Self::SyncTriggered),
+            "api_key_created" => Ok(Self::ApiKeyCreated),
+            "api_key_deleted" => Ok(Self::ApiKeyDeleted),
             other => Err(format!("unknown audit action: {other}")),
         }
     }
@@ -454,7 +460,24 @@ impl sqlx::Encode<'_, sqlx::Postgres> for AuditAction {
         &self,
         buf: &mut sqlx::postgres::PgArgumentBuffer,
     ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        <String as sqlx::Encode<sqlx::Postgres>>::encode(self.to_string(), buf)
+        <&str as sqlx::Encode<sqlx::Postgres>>::encode(
+            match self {
+                Self::MessageSent => "message_sent",
+                Self::MessageReceived => "message_received",
+                Self::MessageApproved => "message_approved",
+                Self::MessageRejected => "message_rejected",
+                Self::PermissionChanged => "permission_changed",
+                Self::InboxCreated => "inbox_created",
+                Self::InboxDeleted => "inbox_deleted",
+                Self::WebhookCreated => "webhook_created",
+                Self::WebhookDeleted => "webhook_deleted",
+                Self::DomainCreated => "domain_created",
+                Self::SyncTriggered => "sync_triggered",
+                Self::ApiKeyCreated => "api_key_created",
+                Self::ApiKeyDeleted => "api_key_deleted",
+            },
+            buf,
+        )
     }
 }
 
@@ -645,7 +668,15 @@ impl sqlx::Encode<'_, sqlx::Postgres> for NotificationProvider {
         &self,
         buf: &mut sqlx::postgres::PgArgumentBuffer,
     ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        <String as sqlx::Encode<sqlx::Postgres>>::encode(self.to_string(), buf)
+        <&str as sqlx::Encode<sqlx::Postgres>>::encode(
+            match self {
+                Self::Ntfy => "ntfy",
+                Self::Email => "email",
+                Self::Webhook => "webhook",
+                Self::Desktop => "desktop",
+            },
+            buf,
+        )
     }
 }
 
@@ -720,7 +751,14 @@ impl sqlx::Encode<'_, sqlx::Postgres> for DeliveryStatusType {
         &self,
         buf: &mut sqlx::postgres::PgArgumentBuffer,
     ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        <String as sqlx::Encode<sqlx::Postgres>>::encode(self.to_string(), buf)
+        <&str as sqlx::Encode<sqlx::Postgres>>::encode(
+            match self {
+                Self::Delivered => "delivered",
+                Self::Bounced => "bounced",
+                Self::Complained => "complained",
+            },
+            buf,
+        )
     }
 }
 
@@ -775,7 +813,13 @@ impl sqlx::Encode<'_, sqlx::Postgres> for BounceType {
         &self,
         buf: &mut sqlx::postgres::PgArgumentBuffer,
     ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        <String as sqlx::Encode<sqlx::Postgres>>::encode(self.to_string(), buf)
+        <&str as sqlx::Encode<sqlx::Postgres>>::encode(
+            match self {
+                Self::Hard => "hard",
+                Self::Soft => "soft",
+            },
+            buf,
+        )
     }
 }
 
@@ -838,6 +882,177 @@ impl sqlx::Encode<'_, sqlx::Postgres> for Role {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboxType {
+    Native,
+    Relay,
+}
+
+impl fmt::Display for InboxType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Native => "native",
+            Self::Relay => "relay",
+        })
+    }
+}
+
+impl FromStr for InboxType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "native" => Ok(Self::Native),
+            "relay" => Ok(Self::Relay),
+            other => Err(format!("unknown inbox type: {other}")),
+        }
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for InboxType {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for InboxType {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        s.parse::<InboxType>()
+            .map_err(|e| -> sqlx::error::BoxDynError { e.into() })
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for InboxType {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <&str as sqlx::Encode<sqlx::Postgres>>::encode(
+            match self { Self::Native => "native", Self::Relay => "relay" },
+            buf,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Disposition {
+    Attachment,
+    Inline,
+}
+
+impl fmt::Display for Disposition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Attachment => "attachment",
+            Self::Inline => "inline",
+        })
+    }
+}
+
+impl FromStr for Disposition {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "attachment" => Ok(Self::Attachment),
+            "inline" => Ok(Self::Inline),
+            other => Err(format!("unknown disposition: {other}")),
+        }
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for Disposition {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for Disposition {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        s.parse::<Disposition>()
+            .map_err(|e| -> sqlx::error::BoxDynError { e.into() })
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for Disposition {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <&str as sqlx::Encode<sqlx::Postgres>>::encode(
+            match self { Self::Attachment => "attachment", Self::Inline => "inline" },
+            buf,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DomainStatus {
+    Pending,
+    Verified,
+    Failed,
+}
+
+impl fmt::Display for DomainStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Pending => "pending",
+            Self::Verified => "verified",
+            Self::Failed => "failed",
+        })
+    }
+}
+
+impl FromStr for DomainStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "verified" => Ok(Self::Verified),
+            "failed" => Ok(Self::Failed),
+            other => Err(format!("unknown domain status: {other}")),
+        }
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for DomainStatus {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        <String as sqlx::Type<sqlx::Postgres>>::type_info()
+    }
+    fn compatible(ty: &sqlx::postgres::PgTypeInfo) -> bool {
+        <String as sqlx::Type<sqlx::Postgres>>::compatible(ty)
+    }
+}
+
+impl<'r> sqlx::Decode<'r, sqlx::Postgres> for DomainStatus {
+    fn decode(value: sqlx::postgres::PgValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        s.parse::<DomainStatus>()
+            .map_err(|e| -> sqlx::error::BoxDynError { e.into() })
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for DomainStatus {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <&str as sqlx::Encode<sqlx::Postgres>>::encode(
+            match self { Self::Pending => "pending", Self::Verified => "verified", Self::Failed => "failed" },
+            buf,
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct OrgMember {
     pub id: Uuid,
@@ -865,7 +1080,7 @@ pub struct Attachment {
     pub content_type: String,
     pub size_bytes: i64,
     pub storage_key: String,
-    pub disposition: String,
+    pub disposition: Disposition,
     pub created_at: DateTime<Utc>,
 }
 
@@ -876,7 +1091,7 @@ pub struct CreateAttachment {
     pub content_type: String,
     pub size_bytes: i64,
     pub storage_key: String,
-    pub disposition: String,
+    pub disposition: Disposition,
 }
 
 #[cfg(test)]
@@ -1020,7 +1235,7 @@ mod tests {
             org_id: Uuid::new_v4(),
             email: "bot@example.com".into(),
             display_name: Some("Bot".into()),
-            inbox_type: "native".into(),
+            inbox_type: InboxType::Native,
             active: true,
             created_at: Utc::now(),
         };
@@ -1216,7 +1431,7 @@ mod tests {
             id: Uuid::new_v4(),
             org_id: Uuid::new_v4(),
             name: "example.com".into(),
-            status: "pending".into(),
+            status: DomainStatus::Pending,
             stalwart_principal_id: None,
             verified_at: None,
             created_at: Utc::now(),
@@ -1365,6 +1580,8 @@ mod tests {
         assert_eq!(AuditAction::WebhookDeleted.to_string(), "webhook_deleted");
         assert_eq!(AuditAction::DomainCreated.to_string(), "domain_created");
         assert_eq!(AuditAction::SyncTriggered.to_string(), "sync_triggered");
+        assert_eq!(AuditAction::ApiKeyCreated.to_string(), "api_key_created");
+        assert_eq!(AuditAction::ApiKeyDeleted.to_string(), "api_key_deleted");
     }
 
     #[test]
@@ -1381,6 +1598,8 @@ mod tests {
             AuditAction::WebhookDeleted,
             AuditAction::DomainCreated,
             AuditAction::SyncTriggered,
+            AuditAction::ApiKeyCreated,
+            AuditAction::ApiKeyDeleted,
         ];
         for action in actions {
             let s = action.to_string();
@@ -1785,7 +2004,7 @@ mod tests {
             content_type: "application/pdf".into(),
             size_bytes: 1048576,
             storage_key: "msg-123/report.pdf".into(),
-            disposition: "attachment".into(),
+            disposition: Disposition::Attachment,
             created_at: Utc::now(),
         };
         let json = serde_json::to_string(&att).unwrap();
@@ -1801,7 +2020,7 @@ mod tests {
             content_type: "text/csv".into(),
             size_bytes: 512,
             storage_key: "msg-456/data.csv".into(),
-            disposition: "attachment".into(),
+            disposition: Disposition::Attachment,
         };
         let json = serde_json::to_string(&ca).unwrap();
         let back: CreateAttachment = serde_json::from_str(&json).unwrap();
@@ -1817,7 +2036,7 @@ mod tests {
             content_type: "image/png".into(),
             size_bytes: 2048,
             storage_key: "msg-789/logo.png".into(),
-            disposition: "inline".into(),
+            disposition: Disposition::Inline,
             created_at: Utc::now(),
         };
         let json = serde_json::to_value(&att).unwrap();

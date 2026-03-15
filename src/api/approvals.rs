@@ -243,9 +243,9 @@ pub async fn batch(
     let state_clone = state.clone();
     let status = req.status;
     let decided_by = req.decided_by.clone();
-    let decided_clone = decided.clone();
+    let decided_ref = decided.clone();
     tokio::spawn(async move {
-        for d in &decided_clone {
+        for d in &decided_ref {
             if status == ApprovalStatus::Approved {
                 if let Err(e) = execute_approval(&state_clone, org_id, d, &decided_by).await {
                     tracing::error!(

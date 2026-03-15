@@ -49,4 +49,45 @@
   <iframe id="html-frame" class="msg-html-frame" sandbox srcdoc="{{ message.html_body|e }}"></iframe>
 </div>
 {% endif %}
+
+{% if attachments %}
+<div class="card">
+  <h3>Attachments</h3>
+  {% for att in attachments %}
+  {% if att.is_image %}
+  <div class="att-inline">
+    <img src="{{ att.url }}" alt="{{ att.filename }}" class="att-img" onclick="openLightbox(this.src, this.alt)">
+  </div>
+  {% endif %}
+  {% endfor %}
+  <ul class="att-list">
+    {% for att in attachments %}
+    <li>
+      <a href="{{ att.url }}" download>{{ att.filename }}</a>
+      <span class="att-size">({{ att.size }})</span>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<div id="lightbox" class="lightbox hidden" onclick="closeLightbox(event)">
+  <button class="lightbox-close" onclick="closeLightbox(event)">&times;</button>
+  <img id="lightbox-img" src="" alt="">
+</div>
+<script>
+function openLightbox(src, alt) {
+  var lb = document.getElementById('lightbox');
+  var img = document.getElementById('lightbox-img');
+  img.src = src; img.alt = alt;
+  lb.classList.remove('hidden');
+}
+function closeLightbox(e) {
+  if (e.target.id === 'lightbox' || e.target.classList.contains('lightbox-close'))
+    document.getElementById('lightbox').classList.add('hidden');
+}
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') document.getElementById('lightbox').classList.add('hidden');
+});
+</script>
 {% endblock %}

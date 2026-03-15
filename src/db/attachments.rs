@@ -17,7 +17,7 @@ pub async fn create(
     .bind(&attachment.content_type)
     .bind(attachment.size_bytes)
     .bind(&attachment.storage_key)
-    .bind(&attachment.disposition)
+    .bind(attachment.disposition)
     .fetch_one(pool)
     .await
 }
@@ -31,6 +31,22 @@ pub async fn list_by_message(
          FROM attachments WHERE message_id = $1 ORDER BY created_at",
     )
     .bind(message_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn list_by_message_ids(
+    pool: &PgPool,
+    message_ids: &[Uuid],
+) -> Result<Vec<Attachment>, sqlx::Error> {
+    if message_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(
+        "SELECT id, message_id, filename, content_type, size_bytes, storage_key, disposition, created_at \
+         FROM attachments WHERE message_id = ANY($1) ORDER BY created_at",
+    )
+    .bind(message_ids)
     .fetch_all(pool)
     .await
 }
@@ -63,7 +79,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("attach-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
         let msg = crate::db::messages::create(
@@ -104,7 +120,7 @@ mod tests {
                 content_type: "application/pdf".into(),
                 size_bytes: 1024,
                 storage_key: format!("{}/report.pdf", msg.id),
-                disposition: "attachment".into(),
+                disposition: crate::models::Disposition::Attachment,
             },
         )
         .await
@@ -134,7 +150,7 @@ mod tests {
                 content_type: "text/plain".into(),
                 size_bytes: 100,
                 storage_key: format!("{}/a.txt", msg.id),
-                disposition: "attachment".into(),
+                disposition: crate::models::Disposition::Attachment,
             },
         )
         .await
@@ -148,7 +164,7 @@ mod tests {
                 content_type: "image/png".into(),
                 size_bytes: 2048,
                 storage_key: format!("{}/b.png", msg.id),
-                disposition: "inline".into(),
+                disposition: crate::models::Disposition::Inline,
             },
         )
         .await
@@ -181,7 +197,7 @@ mod tests {
                 content_type: "text/plain".into(),
                 size_bytes: 50,
                 storage_key: format!("{}/del.txt", msg.id),
-                disposition: "attachment".into(),
+                disposition: crate::models::Disposition::Attachment,
             },
         )
         .await
@@ -212,7 +228,7 @@ mod tests {
                 content_type: "text/plain".into(),
                 size_bytes: 10,
                 storage_key: format!("{}/cascade.txt", msg.id),
-                disposition: "attachment".into(),
+                disposition: crate::models::Disposition::Attachment,
             },
         )
         .await

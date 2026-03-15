@@ -180,7 +180,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 
@@ -218,7 +218,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-nomsg-{}@example.com", Uuid::new_v4());
-        crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 
@@ -238,7 +238,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-s-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 
@@ -280,7 +280,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-out-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 
@@ -315,7 +315,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-t-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 
@@ -350,7 +350,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-org-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 
@@ -388,7 +388,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-ns-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 

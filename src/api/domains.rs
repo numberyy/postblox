@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::auth::{AdminOrg, AuthOrg};
 use super::error::ApiError;
 use super::AppState;
-use crate::models::Domain;
+use crate::models::{Domain, DomainStatus};
 
 #[derive(Deserialize)]
 pub struct CreateDomainRequest {
@@ -64,7 +64,7 @@ pub async fn create(
                 match crate::db::domains::update_status(
                     &state.pool,
                     domain.id,
-                    "pending",
+                    DomainStatus::Pending,
                     Some(&principal_id),
                 )
                 .await
@@ -85,6 +85,21 @@ pub async fn create(
             }
         }
     }
+
+    let pool = state.pool.clone();
+    let domain_name = domain.name.clone();
+    let domain_id = domain.id;
+    tokio::spawn(async move {
+        crate::events::audit(
+            &pool,
+            org_id,
+            None,
+            crate::models::AuditAction::DomainCreated,
+            "api",
+            serde_json::json!({"domain_id": domain_id.to_string(), "name": domain_name}),
+        )
+        .await;
+    });
 
     Ok((StatusCode::CREATED, Json(domain)))
 }
@@ -143,7 +158,7 @@ pub async fn verify(
     let dns = stalwart
         .get_dns_records(&domain.name)
         .await
-        .map_err(|e| ApiError::Internal(format!("DNS lookup failed: {e}")))?;
+        .map_err(|e| ApiError::Internal(format!("dns lookup failed: {e}")))?;
 
     let records = dns["data"].as_array();
     let verified = records.is_some_and(|r| !r.is_empty());
@@ -151,7 +166,7 @@ pub async fn verify(
     let updated = if verified {
         crate::db::domains::set_verified(&state.pool, domain.id).await
     } else {
-        crate::db::domains::update_status(&state.pool, domain.id, "failed", None).await
+        crate::db::domains::update_status(&state.pool, domain.id, DomainStatus::Failed, None).await
     }
     .map_err(ApiError::from_sqlx)?
     .ok_or(ApiError::NotFound)?;
@@ -297,7 +312,7 @@ mod tests {
             id: Uuid::new_v4(),
             org_id: Uuid::new_v4(),
             name: "example.com".into(),
-            status: "pending".into(),
+            status: DomainStatus::Pending,
             stalwart_principal_id: None,
             verified_at: None,
             created_at: chrono::Utc::now(),
@@ -316,7 +331,7 @@ mod tests {
             id: Uuid::new_v4(),
             org_id: Uuid::new_v4(),
             name: "example.com".into(),
-            status: "verified".into(),
+            status: DomainStatus::Verified,
             stalwart_principal_id: Some("p-123".into()),
             verified_at: Some(chrono::Utc::now()),
             created_at: chrono::Utc::now(),

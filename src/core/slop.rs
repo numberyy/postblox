@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+#[derive(Debug)]
 pub struct ClassifierInput<'a> {
     pub from_addr: &'a str,
     pub subject: Option<&'a str>,
@@ -8,6 +9,7 @@ pub struct ClassifierInput<'a> {
     pub sender_slop_ratio: Option<f32>,
 }
 
+#[derive(Debug, Clone)]
 pub struct SlopResult {
     pub score: f32,
     pub signals: Vec<&'static str>,
@@ -33,7 +35,7 @@ impl TriageAction {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TriageAction {
     Inbox,
     Archive,

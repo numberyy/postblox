@@ -221,7 +221,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("msg-{}@example.com", Uuid::new_v4());
-        crate::db::inboxes::create(pool, org.id, &email, None, "native")
+        crate::db::inboxes::create(pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap()
     }

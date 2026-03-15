@@ -86,6 +86,18 @@ pub struct SubjectCount {
     pub count: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: Uuid,
+    pub message_id: Uuid,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub storage_key: String,
+    pub disposition: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("http error: {0}")]
@@ -247,6 +259,43 @@ impl PostbloxClient {
         .await
     }
 
+    pub async fn list_attachments(
+        &self,
+        inbox_id: Uuid,
+        message_id: Uuid,
+    ) -> Result<Vec<Attachment>, ClientError> {
+        self.get_json(&format!(
+            "/inboxes/{inbox_id}/messages/{message_id}/attachments"
+        ))
+        .await
+    }
+
+    pub async fn get_attachment(
+        &self,
+        inbox_id: Uuid,
+        message_id: Uuid,
+        attachment_id: Uuid,
+    ) -> Result<Vec<u8>, ClientError> {
+        let resp = self
+            .http
+            .get(self.url(&format!(
+                "/inboxes/{inbox_id}/messages/{message_id}/attachments/{attachment_id}"
+            )))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await?;
+        let status = resp.status();
+        if status.is_success() {
+            Ok(resp.bytes().await?.to_vec())
+        } else {
+            let body = resp.text().await?;
+            Err(ClientError::Api {
+                status: status.as_u16(),
+                body,
+            })
+        }
+    }
+
     pub fn ws_url(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
         let ws_base = if base.starts_with("https://") {
@@ -334,5 +383,53 @@ mod tests {
             )),
             expected
         );
+    }
+
+    #[test]
+    fn test_attachment_list_url() {
+        let c = test_client();
+        let inbox_id = "550e8400-e29b-41d4-a716-446655440000";
+        let message_id = "660e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(
+            c.url(&format!(
+                "/inboxes/{inbox_id}/messages/{message_id}/attachments"
+            )),
+            format!(
+                "http://localhost:3000/api/v1/inboxes/{inbox_id}/messages/{message_id}/attachments"
+            )
+        );
+    }
+
+    #[test]
+    fn test_attachment_download_url() {
+        let c = test_client();
+        let inbox_id = "550e8400-e29b-41d4-a716-446655440000";
+        let message_id = "660e8400-e29b-41d4-a716-446655440000";
+        let att_id = "770e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(
+            c.url(&format!(
+                "/inboxes/{inbox_id}/messages/{message_id}/attachments/{att_id}"
+            )),
+            format!("http://localhost:3000/api/v1/inboxes/{inbox_id}/messages/{message_id}/attachments/{att_id}")
+        );
+    }
+
+    #[test]
+    fn test_attachment_struct_deserialize() {
+        let json = r#"{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "message_id": "660e8400-e29b-41d4-a716-446655440000",
+            "filename": "report.pdf",
+            "content_type": "application/pdf",
+            "size_bytes": 12345,
+            "storage_key": "abc/def.pdf",
+            "disposition": "attachment",
+            "created_at": "2026-03-15T10:00:00Z"
+        }"#;
+        let att: Attachment = serde_json::from_str(json).unwrap();
+        assert_eq!(att.filename, "report.pdf");
+        assert_eq!(att.content_type, "application/pdf");
+        assert_eq!(att.size_bytes, 12345);
+        assert_eq!(att.disposition, "attachment");
     }
 }

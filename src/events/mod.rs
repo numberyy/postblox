@@ -14,6 +14,7 @@ pub const KNOWN_EVENTS: &[&str] = &[
     "trust.changed",
 ];
 
+#[derive(Debug, Clone)]
 pub enum PostbloxEvent {
     MessageReceived {
         message_id: Uuid,

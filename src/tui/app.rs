@@ -19,13 +19,17 @@ use ratatui::Terminal;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
-use crate::client::{Approval, Briefing, Draft, Inbox, Message, PostbloxClient};
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use crate::client::{Approval, Attachment, Briefing, Draft, Inbox, Message, PostbloxClient};
 use crate::components::approvals::ApprovalPanel;
 use crate::components::briefing::BriefingPanel;
 use crate::components::compose::Compose;
 use crate::components::drafts::DraftPanel;
 use crate::components::inbox_list::InboxList;
 use crate::components::message_list::MessageList;
+use crate::components::preview::AttachmentInfo;
 use crate::components::preview::Preview;
 use crate::components::search::SearchPanel;
 use crate::components::status_bar::StatusBar;
@@ -63,6 +67,7 @@ impl Drop for TerminalGuard {
 enum AppMsg {
     InboxesLoaded(Result<Vec<Inbox>, String>),
     MessagesLoaded(Result<Vec<Message>, String>),
+    AllInboxMessagesLoaded(Result<Vec<Message>, String>),
     ApprovalsLoaded(Result<Vec<Approval>, String>),
     DraftsLoaded(Result<Vec<Draft>, String>),
     BriefingLoaded(Result<Briefing, String>),
@@ -75,12 +80,20 @@ enum AppMsg {
     },
     ThreadLoaded(Result<Vec<Message>, String>),
     ApprovalMessageLoaded(Result<Message, String>),
+    AttachmentsLoaded {
+        message_id: Uuid,
+        result: Result<Vec<Attachment>, String>,
+    },
+    AttachmentDownloaded(Result<String, String>),
     Ws(WsEvent),
 }
 
 enum Command {
     LoadInboxes,
     LoadMessages(Uuid),
+    LoadAllInboxMessages {
+        inbox_ids: Vec<Uuid>,
+    },
     LoadApprovals,
     LoadDrafts(Uuid),
     LoadBriefing,
@@ -100,6 +113,17 @@ enum Command {
     LoadApprovalMessage {
         inbox_id: Uuid,
         message_id: Uuid,
+    },
+    LoadAttachments {
+        inbox_id: Uuid,
+        message_id: Uuid,
+    },
+    DownloadAttachment {
+        inbox_id: Uuid,
+        message_id: Uuid,
+        attachment_id: Uuid,
+        filename: String,
+        dest: PathBuf,
     },
 }
 
@@ -144,6 +168,17 @@ pub struct App {
 
     // Layout cache for mouse handling
     last_layout: Option<layout::AppLayout>,
+
+    // Attachments
+    current_message_id: Option<Uuid>,
+    current_attachments: Vec<Attachment>,
+    known_attachment_messages: std::collections::HashSet<Uuid>,
+
+    // Editor
+    editor_requested: bool,
+
+    // Config
+    download_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +225,11 @@ impl App {
             search_deadline: None,
             pending_select_message: None,
             last_layout: None,
+            current_message_id: None,
+            current_attachments: Vec::new(),
+            known_attachment_messages: std::collections::HashSet::new(),
+            editor_requested: false,
+            download_dir: config.download_dir.clone(),
         }
     }
 
@@ -257,6 +297,11 @@ impl App {
                 }
                 Tick::Msg(msg) => self.handle_msg(*msg),
                 Tick::Timeout => {}
+            }
+
+            if self.editor_requested {
+                self.editor_requested = false;
+                self.spawn_editor(&mut terminal)?;
             }
         }
 
@@ -384,6 +429,71 @@ impl App {
                         .await
                         .map_err(|e| e.to_string());
                     let _ = tx.send(AppMsg::ThreadLoaded(result)).await;
+                }
+                Command::LoadAllInboxMessages { inbox_ids } => {
+                    let futs = inbox_ids.into_iter().map(|id| {
+                        let c = client.clone();
+                        async move { c.list_messages(id, 50, 0).await }
+                    });
+                    let results = futures::future::join_all(futs).await;
+                    let mut all: Vec<Message> = Vec::new();
+                    let mut failed = 0usize;
+                    for result in results {
+                        match result {
+                            Ok(msgs) => all.extend(msgs),
+                            Err(e) => {
+                                tracing::warn!("failed to load inbox messages: {e}");
+                                failed += 1;
+                            }
+                        }
+                    }
+                    if failed > 0 && all.is_empty() {
+                        let _ = tx.send(AppMsg::AllInboxMessagesLoaded(
+                            Err(format!("failed to load messages from {failed} inbox(es)"))
+                        )).await;
+                    } else {
+                        all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                        let _ = tx.send(AppMsg::AllInboxMessagesLoaded(Ok(all))).await;
+                    }
+                }
+                Command::LoadAttachments {
+                    inbox_id,
+                    message_id,
+                } => {
+                    let result = client
+                        .list_attachments(inbox_id, message_id)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx
+                        .send(AppMsg::AttachmentsLoaded { message_id, result })
+                        .await;
+                }
+                Command::DownloadAttachment {
+                    inbox_id,
+                    message_id,
+                    attachment_id,
+                    filename,
+                    dest,
+                } => {
+                    let result = async {
+                        let data = client
+                            .get_attachment(inbox_id, message_id, attachment_id)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        tokio::fs::create_dir_all(&dest)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let safe_name = std::path::Path::new(&filename)
+                            .file_name()
+                            .ok_or_else(|| "invalid filename".to_string())?;
+                        let path = dest.join(safe_name);
+                        tokio::fs::write(&path, &data)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        Ok(path.display().to_string())
+                    }
+                    .await;
+                    let _ = tx.send(AppMsg::AttachmentDownloaded(result)).await;
                 }
             }
         });
@@ -540,6 +650,56 @@ impl App {
                 self.status_text = Some(format!("Failed to load thread: {e}"));
                 self.update_status_bar();
             }
+            AppMsg::AllInboxMessagesLoaded(Ok(messages)) => {
+                self.messages = messages;
+                self.refresh_message_display();
+                let inbox_map: HashMap<Uuid, String> = self
+                    .inboxes
+                    .iter()
+                    .map(|i| (i.id, i.email.clone()))
+                    .collect();
+                self.message_list
+                    .set_inbox_labels_from_messages(&self.displayed_messages, &inbox_map);
+                self.status_text = None;
+                self.update_status_bar();
+            }
+            AppMsg::AllInboxMessagesLoaded(Err(e)) => {
+                self.status_text = Some(format!("Failed to load messages: {e}"));
+                self.update_status_bar();
+            }
+            AppMsg::AttachmentsLoaded { message_id, result } => match result {
+                Ok(attachments) => {
+                    if !attachments.is_empty() {
+                        self.known_attachment_messages.insert(message_id);
+                        self.message_list
+                            .mark_has_attachments(message_id, &self.displayed_messages);
+                    }
+                    if self.current_message_id == Some(message_id) {
+                        self.current_attachments = attachments.clone();
+                        let infos = attachments
+                            .into_iter()
+                            .map(|a| AttachmentInfo {
+                                id: a.id,
+                                filename: a.filename,
+                                content_type: a.content_type,
+                                size_bytes: a.size_bytes,
+                            })
+                            .collect();
+                        self.preview.set_attachments(infos);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("failed to load attachments: {e}");
+                }
+            },
+            AppMsg::AttachmentDownloaded(Ok(path)) => {
+                self.status_text = Some(format!("Saved to {path}"));
+                self.update_status_bar();
+            }
+            AppMsg::AttachmentDownloaded(Err(e)) => {
+                self.status_text = Some(format!("Download failed: {e}"));
+                self.update_status_bar();
+            }
             AppMsg::Ws(WsEvent::Connected) => {
                 self.status_bar.connected = true;
             }
@@ -586,9 +746,15 @@ impl App {
                         &msg.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
                         &body,
                     );
+                    self.current_message_id = Some(msg.id);
+                    self.dispatch(Command::LoadAttachments {
+                        inbox_id: msg.inbox_id,
+                        message_id: msg.id,
+                    });
                 } else {
                     self.preview
                         .set_content("", "", "", "Select an inbox to view messages");
+                    self.current_message_id = None;
                 }
             }
             SidebarView::Approvals => {
@@ -600,14 +766,16 @@ impl App {
                         &approval.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
                         "Press y to approve, n to reject",
                     );
-                    // Load full message body
+                    self.current_message_id = Some(approval.message_id);
                     self.dispatch(Command::LoadApprovalMessage {
                         inbox_id: approval.inbox_id,
                         message_id: approval.message_id,
                     });
                 }
             }
-            _ => {}
+            _ => {
+                self.current_message_id = None;
+            }
         }
     }
 
@@ -665,6 +833,9 @@ impl App {
                             self.update_status_bar();
                         }
                         return cmd;
+                    }
+                    Action::OpenEditor => {
+                        self.editor_requested = true;
                     }
                     Action::Quit => self.running = false,
                     _ => {}
@@ -798,14 +969,7 @@ impl App {
                 return Some(Command::LoadBriefing);
             }
             Action::ShowAllInboxes => {
-                self.sidebar_view = SidebarView::Inboxes;
-                self.selected_inbox_id = None;
-                self.inbox_list.select_first();
-                self.messages.clear();
-                self.refresh_message_display();
-                self.status_text = None;
-                self.update_status_bar();
-                self.focus = Panel::Sidebar;
+                return self.load_all_inboxes();
             }
             Action::SlopToggle => {
                 self.show_slop = !self.show_slop;
@@ -820,6 +984,19 @@ impl App {
                 if self.focus == Panel::Sidebar {
                     return self.handle_select();
                 }
+            }
+            Action::OpenEditor => {}
+            Action::DownloadAttachment => {
+                return self.handle_download_attachment(false);
+            }
+            Action::OpenAttachment => {
+                return self.handle_download_attachment(true);
+            }
+            Action::NextAttachment => {
+                self.preview.select_next_attachment();
+            }
+            Action::PrevAttachment => {
+                self.preview.select_prev_attachment();
             }
         }
 
@@ -860,6 +1037,131 @@ impl App {
         Some(Command::Reject(approval.id))
     }
 
+    fn load_all_inboxes(&mut self) -> Option<Command> {
+        self.sidebar_view = SidebarView::Inboxes;
+        self.selected_inbox_id = None;
+        self.inbox_list.select_first();
+        self.focus = Panel::MessageList;
+        if self.inboxes.is_empty() {
+            self.messages.clear();
+            self.refresh_message_display();
+            self.status_text = None;
+            self.update_status_bar();
+            return None;
+        }
+        self.status_text = Some("Loading all inboxes…".into());
+        self.update_status_bar();
+        let inbox_ids: Vec<Uuid> = self.inboxes.iter().map(|i| i.id).collect();
+        Some(Command::LoadAllInboxMessages { inbox_ids })
+    }
+
+    fn handle_download_attachment(&mut self, open_after: bool) -> Option<Command> {
+        let att = self.preview.selected_attachment()?;
+        let inbox_id = self.current_message_id.and_then(|mid| {
+            self.displayed_messages
+                .iter()
+                .find(|m| m.id == mid)
+                .map(|m| m.inbox_id)
+        })?;
+        let message_id = self.current_message_id?;
+        let attachment_id = att.id;
+        let filename = att.filename.clone();
+        let dest = self.download_dir.clone();
+        self.status_text = Some(format!(
+            "{}…",
+            if open_after { "Opening" } else { "Downloading" }
+        ));
+        self.update_status_bar();
+        if open_after {
+            let client = self.client.clone();
+            let tx = self.msg_tx.clone();
+            tokio::spawn(async move {
+                let result = async {
+                    let data = client
+                        .get_attachment(inbox_id, message_id, attachment_id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    tokio::fs::create_dir_all(&dest)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let path = dest.join(&filename);
+                    tokio::fs::write(&path, &data)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let opener = if cfg!(target_os = "macos") {
+                        "open"
+                    } else if cfg!(target_os = "windows") {
+                        "start"
+                    } else {
+                        "xdg-open"
+                    };
+                    tokio::process::Command::new(opener)
+                        .arg(&path)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .map_err(|e| format!("failed to open with {opener}: {e}"))?;
+                    Ok(path.display().to_string())
+                }
+                .await;
+                let _ = tx.send(AppMsg::AttachmentDownloaded(result)).await;
+            });
+            return None;
+        }
+        Some(Command::DownloadAttachment {
+            inbox_id,
+            message_id,
+            attachment_id,
+            filename,
+            dest,
+        })
+    }
+
+    fn spawn_editor(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) -> anyhow::Result<()> {
+        let body = self.compose.body_text();
+        let tmp_dir = std::env::temp_dir();
+        let tmp_path = tmp_dir.join(format!("postblox-compose-{}.txt", std::process::id()));
+
+        std::fs::write(&tmp_path, &body)?;
+
+        // Suspend TUI
+        disable_raw_mode()?;
+        execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
+
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+        let status = std::process::Command::new(&editor).arg(&tmp_path).status();
+
+        // Resume TUI regardless of editor result
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+        terminal.clear()?;
+
+        match status {
+            Ok(s) if s.success() => match std::fs::read_to_string(&tmp_path) {
+                Ok(content) => {
+                    self.compose.set_body_text(&content);
+                    self.status_text = Some("Editor content loaded".into());
+                }
+                Err(e) => {
+                    self.status_text = Some(format!("Failed to read editor output: {e}"));
+                }
+            },
+            Ok(_) => {
+                self.status_text = Some("Editor exited with error".into());
+            }
+            Err(e) => {
+                self.status_text = Some(format!("Failed to launch editor: {e}"));
+            }
+        }
+        self.update_status_bar();
+        // Best-effort cleanup — temp file will be cleaned by OS eventually.
+        let _ = std::fs::remove_file(&tmp_path);
+        Ok(())
+    }
+
     fn handle_refresh(&mut self) -> Option<Command> {
         self.status_text = Some("Refreshing…".into());
         self.update_status_bar();
@@ -868,6 +1170,9 @@ impl App {
                 self.dispatch(Command::LoadInboxes);
                 if let Some(id) = self.selected_inbox_id {
                     return Some(Command::LoadMessages(id));
+                } else if !self.inboxes.is_empty() {
+                    let inbox_ids: Vec<Uuid> = self.inboxes.iter().map(|i| i.id).collect();
+                    return Some(Command::LoadAllInboxMessages { inbox_ids });
                 }
             }
             SidebarView::Approvals => return Some(Command::LoadApprovals),
@@ -962,10 +1267,7 @@ impl App {
             let inboxes_count = self.inbox_list.inbox_count();
             if idx < inboxes_count {
                 if idx == 0 {
-                    self.selected_inbox_id = None;
-                    self.messages.clear();
-                    self.refresh_message_display();
-                    self.update_status_bar();
+                    return self.load_all_inboxes();
                 } else {
                     let inbox_id = self.inboxes.get(idx - 1).map(|i| i.id);
                     if let Some(id) = inbox_id {
@@ -1215,7 +1517,7 @@ impl App {
 
 fn render_help_overlay(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
     let help_w = 50.min(area.width.saturating_sub(4));
-    let help_h = 22.min(area.height.saturating_sub(4));
+    let help_h = 28.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(help_w)) / 2;
     let y = (area.height.saturating_sub(help_h)) / 2;
     let help_area = Rect::new(x, y, help_w, help_h);
@@ -1243,12 +1545,18 @@ fn render_help_overlay(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
         "  r or Ctrl+R     Reply",
         "  / or Ctrl+F     Search",
         "  Ctrl+Enter      Send message",
+        "  Ctrl+E          Open $EDITOR (compose)",
         "  y/n             Approve/reject",
         "  R               Refresh",
         "  s               Toggle slop filter",
         "  b               Briefing",
         "  a               All Inboxes",
         "  q or Ctrl+C     Quit",
+        "",
+        "  Attachments (preview panel)",
+        "  [/]             Prev/next attachment",
+        "  d               Download attachment",
+        "  o               Open attachment",
     ];
 
     let lines: Vec<Line> = text

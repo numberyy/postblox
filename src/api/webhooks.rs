@@ -106,6 +106,21 @@ pub async fn create(
         .await
         .map_err(ApiError::from_sqlx)?;
 
+    let pool = state.pool.clone();
+    let wh_id = wh.id;
+    let wh_url = wh.url.clone();
+    tokio::spawn(async move {
+        crate::events::audit(
+            &pool,
+            org_id,
+            None,
+            crate::models::AuditAction::WebhookCreated,
+            "api",
+            serde_json::json!({"webhook_id": wh_id.to_string(), "url": wh_url}),
+        )
+        .await;
+    });
+
     Ok((
         StatusCode::CREATED,
         Json(CreateWebhookResponse {
@@ -148,10 +163,24 @@ pub async fn delete(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let wh = get_webhook_for_org(&state.pool, id, org_id).await?;
+    let wh_url = wh.url.clone();
 
     crate::db::webhooks::delete(&state.pool, wh.id)
         .await
         .map_err(ApiError::from_sqlx)?;
+
+    let pool = state.pool.clone();
+    tokio::spawn(async move {
+        crate::events::audit(
+            &pool,
+            org_id,
+            None,
+            crate::models::AuditAction::WebhookDeleted,
+            "api",
+            serde_json::json!({"webhook_id": id.to_string(), "url": wh_url}),
+        )
+        .await;
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }

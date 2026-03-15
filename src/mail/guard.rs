@@ -6,6 +6,7 @@ pub struct GuardPattern {
     pub regex: Regex,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct GuardViolation {
     pub pattern_name: String,
     pub field: String,
@@ -46,7 +47,7 @@ pub fn scan(
         ("html_body", html_body),
     ];
 
-    let mut violations = Vec::new();
+    let mut violations = Vec::with_capacity(patterns.len());
 
     for &(field_name, field_value) in fields {
         if let Some(text) = field_value {

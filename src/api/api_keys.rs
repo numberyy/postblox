@@ -94,6 +94,22 @@ pub async fn create(
 
     tx.commit().await.map_err(ApiError::from_sqlx)?;
 
+    let pool = state.pool.clone();
+    let key_id = key.id;
+    let key_prefix = key.prefix.clone();
+    let key_name = key.name.clone();
+    tokio::spawn(async move {
+        crate::events::audit(
+            &pool,
+            org_id,
+            None,
+            crate::models::AuditAction::ApiKeyCreated,
+            "api",
+            serde_json::json!({"key_id": key_id.to_string(), "prefix": key_prefix, "name": key_name}),
+        )
+        .await;
+    });
+
     Ok((
         StatusCode::CREATED,
         Json(CreateKeyResponse {
@@ -159,6 +175,20 @@ pub async fn delete(
     }
 
     tx.commit().await.map_err(ApiError::from_sqlx)?;
+
+    let pool = state.pool.clone();
+    tokio::spawn(async move {
+        crate::events::audit(
+            &pool,
+            org_id,
+            None,
+            crate::models::AuditAction::ApiKeyDeleted,
+            "api",
+            serde_json::json!({"key_id": id.to_string()}),
+        )
+        .await;
+    });
+
     Ok(StatusCode::NO_CONTENT)
 }
 

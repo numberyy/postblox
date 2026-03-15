@@ -29,49 +29,51 @@ pub struct ListMessagesParams {
     pub unslopify: Option<bool>,
 }
 
-pub async fn send(
-    State(state): State<AppState>,
-    AuthOrg { org_id, .. }: AuthOrg,
-    Path(inbox_id): Path<Uuid>,
-    Json(req): Json<SendMessageRequest>,
-) -> Result<(StatusCode, Json<Message>), ApiError> {
-    let inbox = get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
+pub struct SendParams {
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: Option<String>,
+    pub text_body: Option<String>,
+    pub html_body: Option<String>,
+}
 
-    if req.to.is_empty() {
-        return Err(ApiError::BadRequest(
-            "at least one recipient required".into(),
-        ));
-    }
-
+pub async fn send_message_inner(
+    state: &AppState,
+    org_id: Uuid,
+    inbox: &crate::models::Inbox,
+    params: &SendParams,
+    actor: &str,
+) -> Result<(StatusCode, Message), ApiError> {
     let send_mode = check_send_allowed(
-        &state,
-        inbox_id,
+        state,
+        inbox.id,
         &SendCheck {
-            to: &req.to,
-            subject: req.subject.as_deref(),
-            text_body: req.text_body.as_deref(),
-            html_body: req.html_body.as_deref(),
+            to: &params.to,
+            subject: params.subject.as_deref(),
+            text_body: params.text_body.as_deref(),
+            html_body: params.html_body.as_deref(),
             from_addr: &inbox.email,
         },
     )
     .await?;
 
-    // Store without angle brackets for consistent threading with inbound (parser strips them).
     let message_id = super::new_message_id();
-
-    // DB write first so the message is tracked even if delivery fails.
     let cm = crate::models::CreateMessage {
-        inbox_id,
+        inbox_id: inbox.id,
         thread_id: None,
         message_id_header: Some(message_id.clone()),
         in_reply_to: None,
         references_header: None,
         from_addr: inbox.email.clone(),
-        to_addrs: serde_json::json!(&req.to),
-        cc_addrs: req.cc.as_ref().map(|cc| serde_json::json!(cc)),
-        subject: req.subject.clone(),
-        text_body: req.text_body.clone(),
-        html_body: req.html_body.clone(),
+        to_addrs: serde_json::json!(&params.to),
+        cc_addrs: if params.cc.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!(&params.cc))
+        },
+        subject: params.subject.clone(),
+        text_body: params.text_body.clone(),
+        html_body: params.html_body.clone(),
         extracted_text: None,
         direction: crate::models::Direction::Outbound,
         raw_headers: None,
@@ -86,37 +88,84 @@ pub async fn send(
             &state.pool,
             &crate::models::CreateApproval {
                 org_id,
-                inbox_id,
+                inbox_id: inbox.id,
                 message_id: msg.id,
             },
         )
         .await
         .map_err(ApiError::from_sqlx)?;
 
-        spawn_approval_event(&state, org_id, inbox_id, msg.id, approval.id);
-        return Ok((StatusCode::ACCEPTED, Json(msg)));
+        spawn_approval_event(state, org_id, inbox.id, msg.id, approval.id);
+        return Ok((StatusCode::ACCEPTED, msg));
     }
 
-    let cc = req.cc.as_deref().unwrap_or(&[]);
     super::deliver::deliver_message(
-        &state,
+        state,
         org_id,
-        &inbox,
+        inbox,
         msg.id,
         &super::deliver::DeliveryParams {
             from: &inbox.email,
-            to: &req.to,
-            cc,
-            subject: req.subject.as_deref().unwrap_or(""),
-            text_body: req.text_body.as_deref(),
-            html_body: req.html_body.as_deref(),
+            to: &params.to,
+            cc: &params.cc,
+            subject: params.subject.as_deref().unwrap_or(""),
+            text_body: params.text_body.as_deref(),
+            html_body: params.html_body.as_deref(),
             message_id_header: &message_id,
             attachments: &[],
         },
     )
     .await?;
 
-    Ok((StatusCode::CREATED, Json(msg)))
+    let pool = state.pool.clone();
+    let msg_id = msg.id;
+    let actor = actor.to_string();
+    let iid = inbox.id;
+    tokio::spawn(async move {
+        crate::events::audit(
+            &pool,
+            org_id,
+            Some(iid),
+            crate::models::AuditAction::MessageSent,
+            &actor,
+            serde_json::json!({"message_id": msg_id.to_string()}),
+        )
+        .await;
+    });
+
+    Ok((StatusCode::CREATED, msg))
+}
+
+pub async fn send(
+    State(state): State<AppState>,
+    AuthOrg { org_id, .. }: AuthOrg,
+    Path(inbox_id): Path<Uuid>,
+    Json(req): Json<SendMessageRequest>,
+) -> Result<(StatusCode, Json<Message>), ApiError> {
+    let inbox = get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
+
+    if req.to.is_empty() {
+        return Err(ApiError::BadRequest(
+            "at least one recipient required".into(),
+        ));
+    }
+
+    let (status, msg) = send_message_inner(
+        &state,
+        org_id,
+        &inbox,
+        &SendParams {
+            to: req.to,
+            cc: req.cc.unwrap_or_default(),
+            subject: req.subject,
+            text_body: req.text_body,
+            html_body: req.html_body,
+        },
+        "api",
+    )
+    .await?;
+
+    Ok((status, Json(msg)))
 }
 
 pub async fn list(
@@ -338,7 +387,7 @@ pub async fn send_with_attachments(
                 content_type: file.content_type.clone(),
                 size_bytes: file.data.len() as i64,
                 storage_key,
-                disposition: "attachment".into(),
+                disposition: crate::models::Disposition::Attachment,
             },
         )
         .await
@@ -396,6 +445,20 @@ pub async fn send_with_attachments(
         );
         return Err(e);
     }
+
+    let pool = state.pool.clone();
+    let msg_id = msg.id;
+    tokio::spawn(async move {
+        crate::events::audit(
+            &pool,
+            org_id,
+            Some(inbox_id),
+            crate::models::AuditAction::MessageSent,
+            "api",
+            serde_json::json!({"message_id": msg_id.to_string()}),
+        )
+        .await;
+    });
 
     Ok((StatusCode::CREATED, Json(msg)))
 }

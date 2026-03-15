@@ -2,6 +2,7 @@ pub mod ws;
 
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::{header, request::Parts, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -57,7 +58,8 @@ pub fn build_templates() -> Environment<'static> {
         ),
     ];
     for (name, source) in TEMPLATES {
-        env.add_template(name, source).unwrap();
+        env.add_template(name, source)
+            .unwrap_or_else(|e| panic!("template '{name}' failed to load: {e}"));
     }
     env
 }
@@ -88,11 +90,17 @@ pub fn router(templates: Environment<'static>, state: AppState) -> axum::Router 
             "/settings/notifications/{id}/delete",
             post(settings_delete_notification),
         )
+        .route("/inboxes/{id}/compose", post(compose_send))
         .route("/analytics", get(analytics_page))
+        .route(
+            "/inboxes/{inbox_id}/messages/{msg_id}/attachments/{att_id}",
+            get(attachment_proxy),
+        )
         .route("/ws", get(ws::ws_upgrade))
         .route("/static/style.css", get(static_css))
         .route("/static/htmx.min.js", get(static_htmx))
         .route("/static/ws.js", get(static_ws_js))
+        .route("/static/upload.js", get(static_upload_js))
         .layer(Extension(tpl))
         .with_state(state)
 }
@@ -351,10 +359,15 @@ async fn message_detail(
         _ => return not_found(),
     }
 
-    let labels = log_err_default(
-        "message labels",
-        crate::db::labels::list_for_message(&state.pool, message.id).await,
+    let inbox_id = message.inbox_id;
+
+    let (labels_result, attachments_result) = tokio::join!(
+        crate::db::labels::list_for_message(&state.pool, message.id),
+        crate::db::attachments::list_by_message(&state.pool, message.id),
     );
+    let labels = log_err_default("message labels", labels_result);
+    let attachments = log_err_default("message attachments", attachments_result);
+
     let label_data: Vec<_> = labels
         .iter()
         .map(|l| {
@@ -364,6 +377,8 @@ async fn message_detail(
             }
         })
         .collect();
+
+    let attachment_data = attachments_to_value(&attachments, inbox_id, message.id);
 
     let to_addrs = message
         .to_addrs
@@ -382,6 +397,7 @@ async fn message_detail(
         minijinja::context! {
             message => minijinja::context! {
                 id => message.id.to_string(),
+                inbox_id => inbox_id.to_string(),
                 from_addr => message.from_addr,
                 subject => message.subject,
                 text_body => message.text_body,
@@ -393,6 +409,7 @@ async fn message_detail(
             },
             to_addrs => to_addrs,
             labels => label_data,
+            attachments => attachment_data,
         },
     )
 }
@@ -418,7 +435,41 @@ async fn thread_view(
         "thread messages",
         crate::db::messages::list_by_thread(&state.pool, thread.id).await,
     );
-    let msg_data = messages_to_value(&messages);
+
+    let msg_ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
+    let all_attachments = log_err_default(
+        "thread attachments",
+        crate::db::attachments::list_by_message_ids(&state.pool, &msg_ids).await,
+    );
+    let att_by_msg: std::collections::HashMap<Uuid, Vec<&crate::models::Attachment>> =
+        all_attachments
+            .iter()
+            .fold(std::collections::HashMap::new(), |mut map, att| {
+                map.entry(att.message_id).or_default().push(att);
+                map
+            });
+
+    let msg_data: Vec<minijinja::Value> = messages
+        .iter()
+        .map(|m| {
+            let atts = att_by_msg
+                .get(&m.id)
+                .map(|v| attachments_to_value_refs(v, m.inbox_id, m.id))
+                .unwrap_or_default();
+            minijinja::context! {
+                id => m.id.to_string(),
+                inbox_id => m.inbox_id.to_string(),
+                from_addr => m.from_addr,
+                subject => m.subject,
+                text_body => m.text_body,
+                html_body => m.html_body,
+                direction => m.direction,
+                slop_score => m.slop_score,
+                created_at => m.created_at.format("%Y-%m-%d %H:%M").to_string(),
+                attachments => atts,
+            }
+        })
+        .collect();
 
     render(
         &tpl,
@@ -971,6 +1022,116 @@ async fn analytics_page(
     )
 }
 
+#[derive(Deserialize)]
+struct ComposeForm {
+    to: String,
+    cc: Option<String>,
+    subject: Option<String>,
+    text_body: Option<String>,
+    html_body: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ComposeQuery {
+    draft: Option<String>,
+}
+
+fn parse_addresses(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+        .collect()
+}
+
+async fn compose_send(
+    State(state): State<AppState>,
+    DashboardOrg(org_id): DashboardOrg,
+    HtmxRequest: HtmxRequest,
+    Path(id): Path<Uuid>,
+    Query(query): Query<ComposeQuery>,
+    Form(form): Form<ComposeForm>,
+) -> Response {
+    let inbox = match crate::db::inboxes::get_by_id(&state.pool, id).await {
+        Ok(Some(i)) if i.org_id == org_id => i,
+        Ok(_) => return bad_request("inbox not found"),
+        Err(e) => {
+            tracing::error!("compose inbox lookup: {e}");
+            return error_response("database error");
+        }
+    };
+
+    let to = parse_addresses(&form.to);
+    let cc = form.cc.as_deref().map(parse_addresses).unwrap_or_default();
+    let text_body = form.text_body.filter(|s| !s.is_empty());
+    let html_body = form.html_body.filter(|s| !s.is_empty());
+
+    if query.draft.is_some() {
+        let cd = crate::models::CreateDraft {
+            inbox_id: inbox.id,
+            to_addrs: serde_json::json!(&to),
+            cc_addrs: if cc.is_empty() {
+                None
+            } else {
+                Some(serde_json::json!(&cc))
+            },
+            subject: form.subject.clone(),
+            text_body: text_body.clone(),
+            html_body: html_body.clone(),
+            in_reply_to_message_id: None,
+        };
+
+        return match crate::db::drafts::create(&state.pool, &cd).await {
+            Ok(d) => compose_feedback("var(--green)", &format!("Draft saved ({})", d.id)),
+            Err(e) => compose_feedback(
+                "var(--red)",
+                &format!("Error: {}", escape_html(&e.to_string())),
+            ),
+        };
+    }
+
+    if to.is_empty() {
+        return compose_feedback("var(--red)", "At least one recipient required");
+    }
+
+    match crate::api::messages::send_message_inner(
+        &state,
+        org_id,
+        &inbox,
+        &crate::api::messages::SendParams {
+            to,
+            cc,
+            subject: form.subject.clone(),
+            text_body,
+            html_body,
+        },
+        "dashboard",
+    )
+    .await
+    {
+        Ok((status, _msg)) => {
+            if status == axum::http::StatusCode::ACCEPTED {
+                compose_feedback("var(--yellow)", "Message queued for approval")
+            } else {
+                compose_feedback("var(--green)", "Message sent")
+            }
+        }
+        Err(e) => {
+            tracing::error!(inbox_id = %inbox.id, "dashboard compose failed: {e:?}");
+            compose_feedback(
+                "var(--red)",
+                &format!("Send failed: {}", escape_html(&format!("{e:?}"))),
+            )
+        }
+    }
+}
+
+fn compose_feedback(color: &str, msg: &str) -> Response {
+    Html(format!(
+        "<div style=\"color:{color};font-weight:500;font-size:.9rem\">{msg}</div>"
+    ))
+    .into_response()
+}
+
 fn static_asset(
     content_type: &'static str,
     body: &'static str,
@@ -989,6 +1150,70 @@ fn static_asset(
     )
 }
 
+async fn attachment_proxy(
+    State(state): State<AppState>,
+    DashboardOrg(org_id): DashboardOrg,
+    Path((inbox_id, message_id, attachment_id)): Path<(Uuid, Uuid, Uuid)>,
+) -> Response {
+    let inbox = match crate::db::inboxes::get_by_id(&state.pool, inbox_id).await {
+        Ok(Some(i)) if i.org_id == org_id => i,
+        Ok(_) => return not_found(),
+        Err(e) => {
+            tracing::error!("attachment proxy inbox lookup: {e}");
+            return error_response("database error");
+        }
+    };
+
+    let message = match crate::db::messages::get_by_id(&state.pool, message_id).await {
+        Ok(Some(m)) if m.inbox_id == inbox.id => m,
+        Ok(_) => return not_found(),
+        Err(e) => {
+            tracing::error!("attachment proxy message lookup: {e}");
+            return error_response("database error");
+        }
+    };
+
+    let attachment = match crate::db::attachments::get_by_id(&state.pool, attachment_id).await {
+        Ok(Some(a)) if a.message_id == message.id => a,
+        Ok(_) => return not_found(),
+        Err(e) => {
+            tracing::error!("attachment proxy attachment lookup: {e}");
+            return error_response("database error");
+        }
+    };
+
+    let data = match crate::storage::read_attachment(
+        &state.attachment_storage_path,
+        &attachment.storage_key,
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!(attachment_id = %attachment_id, "dashboard attachment read: {e}");
+            return error_response("failed to read attachment");
+        }
+    };
+
+    let disposition = format!(
+        "{}; filename=\"{}\"",
+        attachment.disposition,
+        attachment.filename.replace('"', "\\\"")
+    );
+
+    match Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, &attachment.content_type)
+        .header(header::CONTENT_DISPOSITION, disposition)
+        .header(header::CONTENT_LENGTH, data.len())
+        .header(header::CACHE_CONTROL, "private, max-age=3600")
+        .body(Body::from(data))
+    {
+        Ok(r) => r,
+        Err(e) => error_response(&e.to_string()),
+    }
+}
+
 async fn static_css() -> impl IntoResponse {
     static_asset("text/css", include_str!("../../static/style.css"))
 }
@@ -1004,6 +1229,13 @@ async fn static_ws_js() -> impl IntoResponse {
     static_asset("application/javascript", include_str!("../../static/ws.js"))
 }
 
+async fn static_upload_js() -> impl IntoResponse {
+    static_asset(
+        "application/javascript",
+        include_str!("../../static/upload.js"),
+    )
+}
+
 fn messages_to_value(messages: &[crate::models::Message]) -> Vec<minijinja::Value> {
     messages
         .iter()
@@ -1017,6 +1249,66 @@ fn messages_to_value(messages: &[crate::models::Message]) -> Vec<minijinja::Valu
                 direction => m.direction,
                 slop_score => m.slop_score,
                 created_at => m.created_at.format("%Y-%m-%d %H:%M").to_string(),
+            }
+        })
+        .collect()
+}
+
+fn format_size(bytes: i64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn attachments_to_value(
+    attachments: &[crate::models::Attachment],
+    inbox_id: Uuid,
+    message_id: Uuid,
+) -> Vec<minijinja::Value> {
+    attachments
+        .iter()
+        .map(|a| {
+            let url = format!(
+                "/dashboard/inboxes/{}/messages/{}/attachments/{}",
+                inbox_id, message_id, a.id
+            );
+            let is_image = a.content_type.starts_with("image/");
+            minijinja::context! {
+                id => a.id.to_string(),
+                filename => a.filename,
+                content_type => a.content_type,
+                size => format_size(a.size_bytes),
+                url => url,
+                is_image => is_image,
+            }
+        })
+        .collect()
+}
+
+fn attachments_to_value_refs(
+    attachments: &[&crate::models::Attachment],
+    inbox_id: Uuid,
+    message_id: Uuid,
+) -> Vec<minijinja::Value> {
+    attachments
+        .iter()
+        .map(|a| {
+            let url = format!(
+                "/dashboard/inboxes/{}/messages/{}/attachments/{}",
+                inbox_id, message_id, a.id
+            );
+            let is_image = a.content_type.starts_with("image/");
+            minijinja::context! {
+                id => a.id.to_string(),
+                filename => a.filename,
+                content_type => a.content_type,
+                size => format_size(a.size_bytes),
+                url => url,
+                is_image => is_image,
             }
         })
         .collect()
@@ -1211,5 +1503,140 @@ mod tests {
             domains: vec!["evil.com".into()],
         };
         assert_eq!(format_rule(&rule), "DomainBlocklist: evil.com");
+    }
+
+    #[test]
+    fn test_parse_addresses_single() {
+        assert_eq!(parse_addresses("a@b.com"), vec!["a@b.com"]);
+    }
+
+    #[test]
+    fn test_parse_addresses_multiple() {
+        assert_eq!(
+            parse_addresses("a@b.com, c@d.com, e@f.com"),
+            vec!["a@b.com", "c@d.com", "e@f.com"]
+        );
+    }
+
+    #[test]
+    fn test_parse_addresses_empty() {
+        let result: Vec<String> = parse_addresses("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_addresses_whitespace_only() {
+        let result: Vec<String> = parse_addresses("  ,  , ");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_addresses_trims_whitespace() {
+        assert_eq!(
+            parse_addresses("  a@b.com , c@d.com  "),
+            vec!["a@b.com", "c@d.com"]
+        );
+    }
+
+    #[test]
+    fn test_compose_feedback_contains_message() {
+        let resp = compose_feedback("var(--green)", "Message sent");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_compose_feedback_escapes_color() {
+        let resp = compose_feedback("var(--red)", "Error occurred");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_format_size_bytes() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn test_format_size_kilobytes() {
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1536), "1.5 KB");
+        assert_eq!(format_size(10240), "10.0 KB");
+    }
+
+    #[test]
+    fn test_format_size_megabytes() {
+        assert_eq!(format_size(1048576), "1.0 MB");
+        assert_eq!(format_size(5242880), "5.0 MB");
+    }
+
+    #[test]
+    fn test_attachments_to_value_image_detection() {
+        use chrono::Utc;
+
+        let inbox_id = Uuid::new_v4();
+        let msg_id = Uuid::new_v4();
+        let att_id = Uuid::new_v4();
+
+        let attachments = vec![crate::models::Attachment {
+            id: att_id,
+            message_id: msg_id,
+            filename: "photo.png".into(),
+            content_type: "image/png".into(),
+            size_bytes: 2048,
+            storage_key: format!("{msg_id}/photo.png"),
+            disposition: crate::models::Disposition::Inline,
+            created_at: Utc::now(),
+        }];
+
+        let values = attachments_to_value(&attachments, inbox_id, msg_id);
+        assert_eq!(values.len(), 1);
+
+        let v = &values[0];
+        assert_eq!(
+            v.get_attr("is_image").unwrap(),
+            minijinja::Value::from(true)
+        );
+        assert_eq!(
+            v.get_attr("filename").unwrap(),
+            minijinja::Value::from("photo.png")
+        );
+        let url = v.get_attr("url").unwrap().to_string();
+        assert!(url.contains(&att_id.to_string()));
+    }
+
+    #[test]
+    fn test_attachments_to_value_non_image() {
+        use chrono::Utc;
+
+        let inbox_id = Uuid::new_v4();
+        let msg_id = Uuid::new_v4();
+
+        let attachments = vec![crate::models::Attachment {
+            id: Uuid::new_v4(),
+            message_id: msg_id,
+            filename: "report.pdf".into(),
+            content_type: "application/pdf".into(),
+            size_bytes: 1048576,
+            storage_key: format!("{msg_id}/report.pdf"),
+            disposition: crate::models::Disposition::Attachment,
+            created_at: Utc::now(),
+        }];
+
+        let values = attachments_to_value(&attachments, inbox_id, msg_id);
+        assert_eq!(
+            values[0].get_attr("is_image").unwrap(),
+            minijinja::Value::from(false)
+        );
+        assert_eq!(
+            values[0].get_attr("size").unwrap(),
+            minijinja::Value::from("1.0 MB")
+        );
+    }
+
+    #[test]
+    fn test_attachments_to_value_empty() {
+        let values = attachments_to_value(&[], Uuid::new_v4(), Uuid::new_v4());
+        assert!(values.is_empty());
     }
 }

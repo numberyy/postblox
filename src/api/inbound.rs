@@ -58,7 +58,10 @@ pub async fn process_inbound_raw(state: &AppState, body: &[u8]) -> Result<Status
         parsed.message_id = Some(format!("synth-{:x}@postblox", hasher.finalize()));
     }
 
-    let mid = parsed.message_id.as_deref().unwrap();
+    let mid = parsed
+        .message_id
+        .as_deref()
+        .expect("message_id guaranteed set: either from parsed email or synthetic above");
     if crate::db::messages::exists_by_message_id_header(&state.pool, inbox.id, mid)
         .await
         .map_err(ApiError::from_sqlx)?
@@ -143,7 +146,7 @@ pub async fn process_inbound_raw(state: &AppState, body: &[u8]) -> Result<Status
                     content_type: att.content_type.clone(),
                     size_bytes: att.data.len() as i64,
                     storage_key: storage_key.clone(),
-                    disposition: att.disposition.clone(),
+                    disposition: att.disposition,
                 };
                 if let Err(e) = crate::db::attachments::create(&state.pool, &create_att).await {
                     tracing::error!(message_id = %msg.id, filename = %att.filename, "failed to store attachment metadata: {e}");
@@ -215,6 +218,7 @@ pub async fn process_inbound_raw(state: &AppState, body: &[u8]) -> Result<Status
     let org_id = inbox.org_id;
     let inbox_id = inbox.id;
     let msg_id = msg.id;
+    let from_addr = parsed.from.clone();
     tokio::spawn(async move {
         tokio::join!(
             crate::events::dispatch(
@@ -239,14 +243,21 @@ pub async fn process_inbound_raw(state: &AppState, body: &[u8]) -> Result<Status
                 &hooks,
                 &ws_hub,
             ),
+            crate::events::audit(
+                &pool,
+                org_id,
+                Some(inbox_id),
+                crate::models::AuditAction::MessageReceived,
+                "inbound",
+                serde_json::json!({"message_id": msg_id.to_string(), "from": from_addr}),
+            ),
         );
     });
 
     if let Some(ref provider) = state.embedding_provider {
         let text = cm
             .extracted_text
-            .clone()
-            .or_else(|| cm.text_body.clone())
+            .or(cm.text_body)
             .unwrap_or_default();
         if !text.is_empty() {
             let pool = state.pool.clone();

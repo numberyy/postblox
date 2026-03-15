@@ -2,11 +2,11 @@ pub mod imap;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
-    #[error("IMAP connection failed: {0}")]
+    #[error("imap connection failed: {0}")]
     Connection(String),
-    #[error("IMAP authentication failed")]
+    #[error("imap authentication failed")]
     Auth,
-    #[error("IMAP protocol error: {0}")]
+    #[error("imap protocol error: {0}")]
     Protocol(String),
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -90,19 +90,19 @@ mod tests {
     #[test]
     fn test_sync_error_display_connection() {
         let err = SyncError::Connection("timeout".into());
-        assert_eq!(err.to_string(), "IMAP connection failed: timeout");
+        assert_eq!(err.to_string(), "imap connection failed: timeout");
     }
 
     #[test]
     fn test_sync_error_display_auth() {
         let err = SyncError::Auth;
-        assert_eq!(err.to_string(), "IMAP authentication failed");
+        assert_eq!(err.to_string(), "imap authentication failed");
     }
 
     #[test]
     fn test_sync_error_display_protocol() {
         let err = SyncError::Protocol("bad response".into());
-        assert_eq!(err.to_string(), "IMAP protocol error: bad response");
+        assert_eq!(err.to_string(), "imap protocol error: bad response");
     }
 
     #[test]

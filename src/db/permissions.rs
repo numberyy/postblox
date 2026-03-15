@@ -60,7 +60,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("perm-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 
@@ -80,7 +80,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("perm-up-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 
@@ -108,7 +108,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("perm-get-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 
@@ -136,7 +136,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("perm-cas-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 
@@ -162,7 +162,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("perm-uniq-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 
@@ -198,7 +198,7 @@ mod tests {
             SendMode::Autonomous,
         ] {
             let email = format!("mode-{}-{}@example.com", mode, Uuid::new_v4());
-            let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, "native")
+            let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
                 .await
                 .unwrap();
 

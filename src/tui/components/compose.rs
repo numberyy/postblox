@@ -62,6 +62,16 @@ impl Compose {
         self.textarea.lines().join("\n")
     }
 
+    pub fn set_body_text(&mut self, text: &str) {
+        let lines: Vec<String> = if text.is_empty() {
+            vec![String::new()]
+        } else {
+            text.lines().map(String::from).collect()
+        };
+        self.textarea = TextArea::new(lines);
+        self.textarea.set_cursor_line_style(Style::default());
+    }
+
     pub fn next_field(&mut self) {
         self.field = match self.field {
             ComposeField::To => ComposeField::Subject,
@@ -154,7 +164,7 @@ impl Compose {
         frame.render_widget(&self.textarea, chunks[2]);
 
         let hint = Paragraph::new(Line::from(vec![Span::styled(
-            "  Ctrl+Enter: send │ Tab: next field │ Esc: cancel",
+            "  Ctrl+Enter: send │ Ctrl+E: editor │ Tab: field │ Esc: cancel",
             Style::default().fg(theme.muted),
         )]));
         frame.render_widget(hint, chunks[3]);
@@ -238,5 +248,34 @@ mod tests {
         assert!(c.to.is_empty());
         assert!(c.subject.is_empty());
         assert_eq!(c.field, ComposeField::To);
+    }
+
+    #[test]
+    fn test_set_body_text() {
+        let mut c = Compose::new();
+        c.set_body_text("Hello\nWorld\nFoo");
+        assert_eq!(c.body_text(), "Hello\nWorld\nFoo");
+    }
+
+    #[test]
+    fn test_set_body_text_empty() {
+        let mut c = Compose::new();
+        c.set_body_text("some content");
+        c.set_body_text("");
+        assert!(c.body_text().is_empty());
+    }
+
+    #[test]
+    fn test_set_body_text_single_line() {
+        let mut c = Compose::new();
+        c.set_body_text("Just one line");
+        assert_eq!(c.body_text(), "Just one line");
+    }
+
+    #[test]
+    fn test_set_body_text_preserves_unicode() {
+        let mut c = Compose::new();
+        c.set_body_text("café ☕ 日本語");
+        assert_eq!(c.body_text(), "café ☕ 日本語");
     }
 }

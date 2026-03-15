@@ -17,10 +17,49 @@
     <iframe class="msg-html-frame" sandbox srcdoc="{{ msg.html_body|e }}"></iframe>
   </details>
   {% endif %}
+  {% if msg.attachments %}
+  <div class="thread-att">
+    {% for att in msg.attachments %}
+    {% if att.is_image %}
+    <div class="att-inline">
+      <img src="{{ att.url }}" alt="{{ att.filename }}" class="att-img" onclick="openLightbox(this.src, this.alt)">
+    </div>
+    {% endif %}
+    {% endfor %}
+    <ul class="att-list">
+      {% for att in msg.attachments %}
+      <li>
+        <a href="{{ att.url }}" download>{{ att.filename }}</a>
+        <span class="att-size">({{ att.size }})</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
 </div>
 {% endfor %}
 
 {% if messages is defined and messages|length == 0 %}
 <div class="card"><p>No messages in this thread.</p></div>
 {% endif %}
+
+<div id="lightbox" class="lightbox hidden" onclick="closeLightbox(event)">
+  <button class="lightbox-close" onclick="closeLightbox(event)">&times;</button>
+  <img id="lightbox-img" src="" alt="">
+</div>
+<script>
+function openLightbox(src, alt) {
+  var lb = document.getElementById('lightbox');
+  var img = document.getElementById('lightbox-img');
+  img.src = src; img.alt = alt;
+  lb.classList.remove('hidden');
+}
+function closeLightbox(e) {
+  if (e.target.id === 'lightbox' || e.target.classList.contains('lightbox-close'))
+    document.getElementById('lightbox').classList.add('hidden');
+}
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') document.getElementById('lightbox').classList.add('hidden');
+});
+</script>
 {% endblock %}

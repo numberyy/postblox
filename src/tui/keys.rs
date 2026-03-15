@@ -27,6 +27,11 @@ pub enum Action {
     RejectSelected,
     Refresh,
     QuickJump(u8),
+    OpenEditor,
+    DownloadAttachment,
+    OpenAttachment,
+    NextAttachment,
+    PrevAttachment,
 }
 
 pub fn resolve(key: KeyEvent, mode: Mode, focus: Panel, vim_mode: bool) -> Option<Action> {
@@ -37,6 +42,7 @@ pub fn resolve(key: KeyEvent, mode: Mode, focus: Panel, vim_mode: bool) -> Optio
             KeyCode::Char('n') if mode == Mode::Normal => Some(Action::Compose),
             KeyCode::Char('r') if mode == Mode::Normal => Some(Action::Reply),
             KeyCode::Char('f') if mode == Mode::Normal => Some(Action::StartSearch),
+            KeyCode::Char('e') if mode == Mode::Compose => Some(Action::OpenEditor),
             KeyCode::Enter if mode == Mode::Compose => Some(Action::Send),
             _ => None,
         };
@@ -77,6 +83,8 @@ pub fn resolve(key: KeyEvent, mode: Mode, focus: Panel, vim_mode: bool) -> Optio
         KeyCode::Enter => Some(Action::Select),
         KeyCode::Esc => Some(Action::Back),
         KeyCode::Char('?') => Some(Action::ShowHelp),
+        KeyCode::Char('[') if focus == Panel::Preview => Some(Action::PrevAttachment),
+        KeyCode::Char(']') if focus == Panel::Preview => Some(Action::NextAttachment),
         _ => None,
     };
 
@@ -106,6 +114,8 @@ pub fn resolve(key: KeyEvent, mode: Mode, focus: Panel, vim_mode: bool) -> Optio
         KeyCode::Char('R') => Some(Action::Refresh),
         KeyCode::Char('y') if focus == Panel::MessageList => Some(Action::ApproveSelected),
         KeyCode::Char('n') if focus == Panel::MessageList => Some(Action::RejectSelected),
+        KeyCode::Char('d') if focus == Panel::Preview => Some(Action::DownloadAttachment),
+        KeyCode::Char('o') if focus == Panel::Preview => Some(Action::OpenAttachment),
         KeyCode::Char(c @ '1'..='9') => Some(Action::QuickJump(c as u8 - b'0')),
         _ => None,
     }
@@ -471,6 +481,110 @@ mod tests {
                 false
             ),
             Some(Action::StartSearch)
+        );
+    }
+
+    #[test]
+    fn test_ctrl_e_opens_editor_in_compose() {
+        assert_eq!(
+            resolve(
+                ctrl(KeyCode::Char('e')),
+                Mode::Compose,
+                Panel::Preview,
+                false
+            ),
+            Some(Action::OpenEditor)
+        );
+    }
+
+    #[test]
+    fn test_ctrl_e_not_in_normal() {
+        assert_eq!(
+            resolve(
+                ctrl(KeyCode::Char('e')),
+                Mode::Normal,
+                Panel::Sidebar,
+                false
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_bracket_attachment_nav_in_preview() {
+        assert_eq!(
+            resolve(key(KeyCode::Char('[')), Mode::Normal, Panel::Preview, false),
+            Some(Action::PrevAttachment)
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char(']')), Mode::Normal, Panel::Preview, false),
+            Some(Action::NextAttachment)
+        );
+    }
+
+    #[test]
+    fn test_bracket_not_in_other_panels() {
+        assert_eq!(
+            resolve(key(KeyCode::Char('[')), Mode::Normal, Panel::Sidebar, false),
+            None
+        );
+        assert_eq!(
+            resolve(
+                key(KeyCode::Char(']')),
+                Mode::Normal,
+                Panel::MessageList,
+                false
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_vim_d_download_in_preview() {
+        assert_eq!(
+            resolve(key(KeyCode::Char('d')), Mode::Normal, Panel::Preview, true),
+            Some(Action::DownloadAttachment)
+        );
+    }
+
+    #[test]
+    fn test_vim_o_open_in_preview() {
+        assert_eq!(
+            resolve(key(KeyCode::Char('o')), Mode::Normal, Panel::Preview, true),
+            Some(Action::OpenAttachment)
+        );
+    }
+
+    #[test]
+    fn test_vim_d_not_in_sidebar() {
+        assert_eq!(
+            resolve(key(KeyCode::Char('d')), Mode::Normal, Panel::Sidebar, true),
+            None
+        );
+    }
+
+    #[test]
+    fn test_vim_o_not_in_message_list() {
+        assert_eq!(
+            resolve(
+                key(KeyCode::Char('o')),
+                Mode::Normal,
+                Panel::MessageList,
+                true
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_d_o_not_active_without_vim() {
+        assert_eq!(
+            resolve(key(KeyCode::Char('d')), Mode::Normal, Panel::Preview, false),
+            None
+        );
+        assert_eq!(
+            resolve(key(KeyCode::Char('o')), Mode::Normal, Panel::Preview, false),
+            None
         );
     }
 }

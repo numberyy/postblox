@@ -64,6 +64,7 @@ impl WebSocketHub {
                     "event": event,
                     "data": data,
                 });
+                // No receivers means no clients connected — safe to discard.
                 let _ = tx.send(msg.to_string());
             }
         }

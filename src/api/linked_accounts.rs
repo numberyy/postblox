@@ -104,6 +104,20 @@ pub async fn sync(
     .await
     .map_err(ApiError::from_sqlx)?;
 
+    let pool_audit = state.pool.clone();
+    let account_id = account.id;
+    tokio::spawn(async move {
+        crate::events::audit(
+            &pool_audit,
+            org_id,
+            Some(inbox.id),
+            crate::models::AuditAction::SyncTriggered,
+            "api",
+            serde_json::json!({"account_id": account_id.to_string()}),
+        )
+        .await;
+    });
+
     match crate::sync::imap::one_shot_sync(&state.pool, &account, &inbox).await {
         Ok(result) => {
             if let Err(e) = crate::db::linked_accounts::set_sync_status(

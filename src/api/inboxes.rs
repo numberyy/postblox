@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::auth::{AdminOrg, AuthOrg};
 use super::error::ApiError;
 use super::{get_inbox_for_org, AppState};
-use crate::models::Inbox;
+use crate::models::{Inbox, InboxType};
 
 #[derive(Deserialize)]
 pub struct CreateInboxRequest {
@@ -25,7 +25,12 @@ pub async fn create(
         return Err(ApiError::BadRequest("email is required".into()));
     }
 
-    let inbox_type = req.inbox_type.as_deref().unwrap_or("native");
+    let inbox_type = req
+        .inbox_type
+        .as_deref()
+        .unwrap_or("native")
+        .parse::<InboxType>()
+        .map_err(ApiError::BadRequest)?;
 
     let inbox = crate::db::inboxes::create(
         &state.pool,
@@ -49,6 +54,21 @@ pub async fn create(
             )));
         }
     }
+
+    let pool = state.pool.clone();
+    let inbox_id = inbox.id;
+    let email = inbox.email.clone();
+    tokio::spawn(async move {
+        crate::events::audit(
+            &pool,
+            org_id,
+            Some(inbox_id),
+            crate::models::AuditAction::InboxCreated,
+            "api",
+            serde_json::json!({"email": email}),
+        )
+        .await;
+    });
 
     Ok((StatusCode::CREATED, Json(inbox)))
 }
@@ -89,9 +109,24 @@ pub async fn delete(
         }
     }
 
+    let email = inbox.email.clone();
+
     crate::db::inboxes::delete(&state.pool, id)
         .await
         .map_err(ApiError::from_sqlx)?;
+
+    let pool = state.pool.clone();
+    tokio::spawn(async move {
+        crate::events::audit(
+            &pool,
+            org_id,
+            Some(id),
+            crate::models::AuditAction::InboxDeleted,
+            "api",
+            serde_json::json!({"email": email}),
+        )
+        .await;
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -95,7 +95,7 @@ mod tests {
             .await
             .unwrap();
         let email = format!("audit-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(pool, org.id, &email, None, "native")
+        let inbox = crate::db::inboxes::create(pool, org.id, &email, None, crate::models::InboxType::Native)
             .await
             .unwrap();
         (org.id, inbox.id)
@@ -227,7 +227,7 @@ mod tests {
         let pool = crate::db::test_pool().await;
         let (org_id, inbox_id) = setup_org(&pool).await;
         let email2 = format!("audit2-{}@example.com", Uuid::new_v4());
-        let inbox2 = crate::db::inboxes::create(&pool, org_id, &email2, None, "native")
+        let inbox2 = crate::db::inboxes::create(&pool, org_id, &email2, None, crate::models::InboxType::Native)
             .await
             .unwrap();
 

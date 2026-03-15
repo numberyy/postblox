@@ -712,7 +712,7 @@ async fn test_attachment_cross_org_isolation() {
             content_type: "text/plain".into(),
             size_bytes: 5,
             storage_key: "fake-key".into(),
-            disposition: "attachment".into(),
+            disposition: postblox::models::Disposition::Attachment,
         },
     )
     .await
@@ -736,4 +736,534 @@ async fn test_attachment_cross_org_isolation() {
     );
     let (status, _) = get_json(&app, &path, &key_b).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ============================================================================
+// 6. Search
+// ============================================================================
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_search_empty_query_returns_400() {
+    let pool = test_pool().await;
+    let (_org_id, key) = setup_org(&pool).await;
+    let app = test_app(test_state(pool));
+
+    let (status, _) = get_json(&app, "/api/v1/search?q=", &key).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_search_whitespace_only_returns_400() {
+    let pool = test_pool().await;
+    let (_org_id, key) = setup_org(&pool).await;
+    let app = test_app(test_state(pool));
+
+    let (status, _) = get_json(&app, "/api/v1/search?q=%20%20%20", &key).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_search_text_returns_matching_messages() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    postblox::db::messages::create(
+        &pool,
+        &create_message_input(inbox.id, "Unique alpha subject", "body"),
+    )
+    .await
+    .unwrap();
+    postblox::db::messages::create(
+        &pool,
+        &create_message_input(inbox.id, "Unrelated", "nothing here"),
+    )
+    .await
+    .unwrap();
+
+    let app = test_app(test_state(pool));
+    let (status, json) = get_json(&app, "/api/v1/search?q=alpha", &key).await;
+    assert_eq!(status, StatusCode::OK);
+    let results = json.as_array().unwrap();
+    assert!(
+        results.iter().all(|m| {
+            let subject = m["subject"].as_str().unwrap_or("");
+            let body = m["text_body"].as_str().unwrap_or("");
+            subject.contains("alpha") || body.contains("alpha")
+        }),
+        "all results should match query"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_search_field_from() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let mut cm = create_message_input(inbox.id, "Field search", "body");
+    cm.from_addr = "specialsender@example.com".into();
+    postblox::db::messages::create(&pool, &cm).await.unwrap();
+
+    postblox::db::messages::create(&pool, &create_message_input(inbox.id, "Other msg", "body"))
+        .await
+        .unwrap();
+
+    let app = test_app(test_state(pool));
+    let (status, json) = get_json(
+        &app,
+        "/api/v1/search?q=@from:specialsender@example.com",
+        &key,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let results = json.as_array().unwrap();
+    assert!(
+        !results.is_empty(),
+        "field search should find the message from specialsender"
+    );
+    assert!(results
+        .iter()
+        .all(|m| m["from_addr"] == "specialsender@example.com"));
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_search_semantic_without_provider_returns_400() {
+    let pool = test_pool().await;
+    let (_org_id, key) = setup_org(&pool).await;
+    let app = test_app(test_state(pool));
+
+    let (status, _) = get_json(&app, "/api/v1/search?q=hello&semantic=true", &key).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_search_cross_org_isolation() {
+    let pool = test_pool().await;
+    let (org_a, _key_a) = setup_org(&pool).await;
+    let inbox_a = setup_inbox(&pool, org_a).await;
+
+    postblox::db::messages::create(
+        &pool,
+        &create_message_input(inbox_a.id, "Secret org A data", "confidential"),
+    )
+    .await
+    .unwrap();
+
+    let (_org_b, key_b) = setup_org(&pool).await;
+    let app = test_app(test_state(pool));
+
+    let (status, json) = get_json(&app, "/api/v1/search?q=confidential", &key_b).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        json.as_array().unwrap().is_empty(),
+        "org B should not see org A's messages"
+    );
+}
+
+// ============================================================================
+// 7. Labels
+// ============================================================================
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_create_label() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+    let app = test_app(test_state(pool));
+
+    let path = format!("/api/v1/inboxes/{}/labels", inbox.id);
+    let body = json!({"name": "Important", "color": "#ff0000"});
+    let (status, json) = post_json(&app, &path, &key, &body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(json["name"], "Important");
+    assert_eq!(json["color"], "#ff0000");
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_add_label_to_message_and_list() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let label = postblox::db::labels::create(&pool, inbox.id, "urgent", Some("#ff0000"))
+        .await
+        .unwrap();
+    let msg = postblox::db::messages::create(
+        &pool,
+        &create_message_input(inbox.id, "Labeled msg", "body"),
+    )
+    .await
+    .unwrap();
+
+    let app = test_app(test_state(pool));
+    let add_path = format!("/api/v1/inboxes/{}/messages/{}/labels", inbox.id, msg.id);
+    let (status, _) = post_json(&app, &add_path, &key, &json!({"label_id": label.id})).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // List labels for message
+    let (status, json) = get_json(&app, &add_path, &key).await;
+    assert_eq!(status, StatusCode::OK);
+    let labels = json.as_array().unwrap();
+    assert_eq!(labels.len(), 1);
+    assert_eq!(labels[0]["name"], "urgent");
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_remove_label_from_message() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let label = postblox::db::labels::create(&pool, inbox.id, "temp", None)
+        .await
+        .unwrap();
+    let msg = postblox::db::messages::create(
+        &pool,
+        &create_message_input(inbox.id, "Remove label test", "body"),
+    )
+    .await
+    .unwrap();
+    postblox::db::labels::add_to_message(&pool, msg.id, label.id)
+        .await
+        .unwrap();
+
+    let app = test_app(test_state(pool));
+    let remove_path = format!(
+        "/api/v1/inboxes/{}/messages/{}/labels/{}",
+        inbox.id, msg.id, label.id
+    );
+    let status = delete_req(&app, &remove_path, &key).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Verify label was removed
+    let list_path = format!("/api/v1/inboxes/{}/messages/{}/labels", inbox.id, msg.id);
+    let (status, json) = get_json(&app, &list_path, &key).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(json.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_label_cross_inbox_isolation() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox_a = setup_inbox(&pool, org_id).await;
+    let inbox_b = setup_inbox(&pool, org_id).await;
+
+    // Create label in inbox A
+    let label_a = postblox::db::labels::create(&pool, inbox_a.id, "shared-name", None)
+        .await
+        .unwrap();
+
+    // Create message in inbox B
+    let msg_b = postblox::db::messages::create(
+        &pool,
+        &create_message_input(inbox_b.id, "Inbox B msg", "body"),
+    )
+    .await
+    .unwrap();
+
+    let app = test_app(test_state(pool));
+
+    // Try to add inbox A's label to inbox B's message — should fail
+    let path = format!(
+        "/api/v1/inboxes/{}/messages/{}/labels",
+        inbox_b.id, msg_b.id
+    );
+    let (status, _) = post_json(&app, &path, &key, &json!({"label_id": label_a.id})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_create_label_empty_name_returns_400() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+    let app = test_app(test_state(pool));
+
+    let path = format!("/api/v1/inboxes/{}/labels", inbox.id);
+    let body = json!({"name": "  "});
+    let (status, _) = post_json(&app, &path, &key, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ============================================================================
+// 8. Multi-tenancy Isolation
+// ============================================================================
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_multi_tenancy_full_isolation() {
+    let pool = test_pool().await;
+
+    // Set up two completely independent orgs
+    let (org_a, key_a) = setup_org(&pool).await;
+    let inbox_a = setup_inbox(&pool, org_a).await;
+    postblox::db::messages::create(
+        &pool,
+        &create_message_input(inbox_a.id, "Org A secret message", "classified A"),
+    )
+    .await
+    .unwrap();
+
+    let (org_b, key_b) = setup_org(&pool).await;
+    let inbox_b = setup_inbox(&pool, org_b).await;
+    postblox::db::messages::create(
+        &pool,
+        &create_message_input(inbox_b.id, "Org B secret message", "classified B"),
+    )
+    .await
+    .unwrap();
+
+    let app = test_app(test_state(pool));
+
+    // Org A cannot see Org B's inboxes
+    let (status, json) = get_json(&app, "/api/v1/inboxes", &key_a).await;
+    assert_eq!(status, StatusCode::OK);
+    let inbox_ids: Vec<&str> = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !inbox_ids.contains(&inbox_b.id.to_string().as_str()),
+        "org A should not see org B's inbox"
+    );
+
+    // Org B cannot see Org A's inboxes
+    let (status, json) = get_json(&app, "/api/v1/inboxes", &key_b).await;
+    assert_eq!(status, StatusCode::OK);
+    let inbox_ids: Vec<&str> = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !inbox_ids.contains(&inbox_a.id.to_string().as_str()),
+        "org B should not see org A's inbox"
+    );
+
+    // Org A cannot access Org B's inbox directly
+    let path = format!("/api/v1/inboxes/{}", inbox_b.id);
+    let (status, _) = get_json(&app, &path, &key_a).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Org A cannot list Org B's messages
+    let path = format!("/api/v1/inboxes/{}/messages", inbox_b.id);
+    let (status, _) = get_json(&app, &path, &key_a).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Org B cannot list Org A's messages
+    let path = format!("/api/v1/inboxes/{}/messages", inbox_a.id);
+    let (status, _) = get_json(&app, &path, &key_b).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Search is org-scoped — Org A's search does not return Org B's messages
+    let (status, json) = get_json(&app, "/api/v1/search?q=classified", &key_a).await;
+    assert_eq!(status, StatusCode::OK);
+    for msg in json.as_array().unwrap() {
+        assert_ne!(
+            msg["text_body"].as_str().unwrap_or(""),
+            "classified B",
+            "org A should not see org B's messages in search"
+        );
+    }
+}
+
+// ============================================================================
+// 9. Audit Log Integration
+// ============================================================================
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_audit_inbox_created_on_create() {
+    let pool = test_pool().await;
+    let (_org_id, key) = setup_org(&pool).await;
+    let app = test_app(test_state(pool.clone()));
+
+    let email = format!("audit-test-{}@test.example.com", Uuid::new_v4());
+    let body = json!({"email": email});
+    let (status, resp) = post_json(&app, "/api/v1/inboxes", &key, &body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let org_id: Uuid = resp["org_id"].as_str().unwrap().parse().unwrap();
+
+    // Give the spawned audit task a moment to complete
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let entries = postblox::db::audit::list_entries(
+        &pool,
+        org_id,
+        0,
+        10,
+        None,
+        Some("inbox_created"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !entries.is_empty(),
+        "inbox creation should produce an audit entry"
+    );
+    assert_eq!(
+        entries[0].action,
+        postblox::models::AuditAction::InboxCreated
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_audit_inbox_deleted_on_delete() {
+    let pool = test_pool().await;
+    let (org_id, admin_key) = setup_admin_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+    let app = test_app(test_state(pool.clone()));
+
+    let path = format!("/api/v1/inboxes/{}", inbox.id);
+    let status = delete_req(&app, &path, &admin_key).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let entries = postblox::db::audit::list_entries(
+        &pool,
+        org_id,
+        0,
+        10,
+        None,
+        Some("inbox_deleted"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !entries.is_empty(),
+        "inbox deletion should produce an audit entry"
+    );
+    assert_eq!(
+        entries[0].action,
+        postblox::models::AuditAction::InboxDeleted
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_audit_message_received_on_inbound() {
+    let pool = test_pool().await;
+    let (org_id, _) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let state = test_state_with_inbound(pool.clone());
+    let app = test_app(state);
+
+    let mime = raw_mime(
+        &inbox.email,
+        "Audit inbound test",
+        Some("audit-inbound-1@example.com"),
+    );
+    let req = Request::post("/internal/stalwart/inbound")
+        .header("authorization", "Bearer test-inbound-token")
+        .body(Body::from(mime))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let entries = postblox::db::audit::list_entries(
+        &pool,
+        org_id,
+        0,
+        10,
+        None,
+        Some("message_received"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !entries.is_empty(),
+        "inbound message should produce a message_received audit entry"
+    );
+    assert_eq!(
+        entries[0].action,
+        postblox::models::AuditAction::MessageReceived
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_audit_webhook_created_on_create() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let app = test_app(test_state(pool.clone()));
+
+    let body = json!({
+        "url": "https://hooks.example.com/webhook",
+        "events": ["message.received"]
+    });
+    let (status, _) = post_json(&app, "/api/v1/webhooks", &key, &body).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let entries = postblox::db::audit::list_entries(
+        &pool,
+        org_id,
+        0,
+        10,
+        None,
+        Some("webhook_created"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        !entries.is_empty(),
+        "webhook creation should produce an audit entry"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_audit_log_respects_org_boundary() {
+    let pool = test_pool().await;
+    let (org_a, key_a) = setup_org(&pool).await;
+    let app = test_app(test_state(pool.clone()));
+
+    // Create inbox for org A (triggers InboxCreated audit)
+    let email = format!("audit-boundary-{}@test.example.com", Uuid::new_v4());
+    let body = json!({"email": email});
+    let (status, _) = post_json(&app, "/api/v1/inboxes", &key_a, &body).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Org B should see no audit entries
+    let (org_b, _) = setup_org(&pool).await;
+    let entries = postblox::db::audit::list_entries(&pool, org_b, 0, 100, None, None, None, None)
+        .await
+        .unwrap();
+    let org_a_leaks: Vec<_> = entries.iter().filter(|e| e.org_id == org_a).collect();
+    assert!(
+        org_a_leaks.is_empty(),
+        "org B should never see org A's audit entries"
+    );
 }

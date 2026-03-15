@@ -87,6 +87,7 @@ pub const ICON_SEARCH: &str = "\u{f002}"; //
 pub const ICON_BRIEFING: &str = "\u{f0f76}"; // 󰽶
 pub const ICON_SLOP: &str = "\u{f071}"; //
 pub const ICON_DRAFTS: &str = "\u{f01c1}"; // 󰇁
+pub const ICON_ATTACHMENT: &str = "\u{f0341}"; // 󰍁
 pub const ICON_CONNECTED: &str = "\u{f0219}"; // 󰈙
 pub const ICON_DISCONNECTED: &str = "\u{f0378}"; // 󰍸
 

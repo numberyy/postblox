@@ -79,6 +79,35 @@ input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 
 .auth-page h1{font-size:1.5rem;margin-bottom:.5rem}
 .auth-page p{color:var(--muted)}
 
+/* Compose */
+textarea{padding:.5rem .75rem;border:1px solid var(--border);border-radius:var(--radius);font-size:.9rem;width:100%;font-family:inherit;resize:vertical}
+textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px rgba(37,99,235,.15)}
+.compose-fields{display:flex;flex-direction:column;gap:.5rem}
+.compose-row label{display:block;font-size:.8rem;color:var(--muted);margin-bottom:.15rem}
+
+/* Attachments */
+.att-list{list-style:none;padding:0;margin:.5rem 0 0;font-size:.85rem}
+.att-list li{padding:.25rem 0}
+.att-size{color:var(--muted);font-size:.8rem}
+.att-inline{margin:.5rem 0}
+.att-img{max-width:400px;max-height:300px;border-radius:var(--radius);border:1px solid var(--border);cursor:pointer;transition:opacity .15s}
+.att-img:hover{opacity:.85}
+.thread-att{margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--border)}
+
+/* Lightbox */
+.lightbox{position:fixed;inset:0;background:rgba(0,0,0,.8);display:flex;align-items:center;justify-content:center;z-index:1000}
+.lightbox img{max-width:90vw;max-height:90vh;border-radius:var(--radius)}
+.lightbox-close{position:absolute;top:1rem;right:1.5rem;background:none;border:none;color:#fff;font-size:2rem;cursor:pointer;line-height:1}
+
+/* Upload drop zone */
+.drop-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:1.5rem;text-align:center;color:var(--muted);transition:border-color .15s,background .15s}
+.drop-zone.drop-active{border-color:var(--accent);background:rgba(37,99,235,.05)}
+.drop-zone label{cursor:pointer;color:var(--accent);font-weight:500}
+.drop-zone input[type="file"]{display:none}
+.upload-status{margin-top:.5rem;font-size:.85rem}
+.upload-ok{color:var(--green)}
+.upload-err{color:var(--red)}
+
 /* Responsive */
 @media(max-width:768px){
   nav{flex-direction:column;align-items:flex-start;gap:.5rem}
@@ -87,4 +116,5 @@ input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 
   .stats-grid{grid-template-columns:1fr 1fr}
   table{font-size:.8rem}
   th,td{padding:.4rem .5rem}
+  .att-img{max-width:100%}
 }

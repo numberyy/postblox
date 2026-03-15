@@ -84,6 +84,7 @@ fn extract_bearer_token(parts: &Parts) -> Result<String, ApiError> {
     Ok(token.to_string())
 }
 
+#[derive(Debug)]
 pub enum AuthError {
     Invalid,
     DatabaseError,

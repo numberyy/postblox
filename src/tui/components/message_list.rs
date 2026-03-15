@@ -6,7 +6,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::components::{themed_block, truncate};
-use crate::theme::{Theme, ICON_MESSAGE, ICON_SLOP};
+use crate::theme::{Theme, ICON_ATTACHMENT, ICON_MESSAGE, ICON_SLOP};
 
 pub struct MessageList {
     pub entries: Vec<MessageEntry>,
@@ -21,6 +21,8 @@ pub struct MessageEntry {
     pub direction: String,
     pub category: Option<String>,
     pub has_thread: bool,
+    pub has_attachments: bool,
+    pub inbox_label: Option<String>,
 }
 
 impl MessageList {
@@ -42,6 +44,8 @@ impl MessageList {
                 direction: m.direction.clone(),
                 category: m.category.clone(),
                 has_thread: m.thread_id.is_some(),
+                has_attachments: false,
+                inbox_label: None,
             })
             .collect();
         if self.entries.is_empty() {
@@ -91,6 +95,29 @@ impl MessageList {
         }
     }
 
+    pub fn set_inbox_labels_from_messages(
+        &mut self,
+        messages: &[crate::client::Message],
+        inbox_map: &std::collections::HashMap<uuid::Uuid, String>,
+    ) {
+        for (entry, msg) in self.entries.iter_mut().zip(messages.iter()) {
+            entry.inbox_label = inbox_map.get(&msg.inbox_id).cloned();
+        }
+    }
+
+    pub fn mark_has_attachments(
+        &mut self,
+        message_id: uuid::Uuid,
+        messages: &[crate::client::Message],
+    ) {
+        for (entry, msg) in self.entries.iter_mut().zip(messages.iter()) {
+            if msg.id == message_id {
+                entry.has_attachments = true;
+                break;
+            }
+        }
+    }
+
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme, focused: bool) {
         let block = themed_block(format!(" {ICON_MESSAGE} Messages "), theme, focused);
 
@@ -127,25 +154,48 @@ fn render_entry<'a>(entry: &MessageEntry, theme: &Theme) -> ListItem<'a> {
     } else {
         "←"
     };
+
+    let mut spans = vec![Span::styled(
+        format!(" {dir}"),
+        Style::default().fg(if entry.direction == "outbound" {
+            theme.accent
+        } else {
+            theme.muted
+        }),
+    )];
+
+    if let Some(ref label) = entry.inbox_label {
+        let short = truncate(label, 10);
+        spans.push(Span::styled(
+            format!(" [{short}]"),
+            Style::default().fg(theme.accent),
+        ));
+    }
+
     let from = truncate(&entry.from, 15);
     let subject = truncate(&entry.subject, 26);
     let age = format_age(entry.date);
 
-    let mut spans = vec![
-        Span::styled(
-            format!(" {dir}"),
-            Style::default().fg(if entry.direction == "outbound" {
-                theme.accent
-            } else {
-                theme.muted
-            }),
-        ),
-        Span::styled(format!(" {from:<15}"), Style::default().fg(theme.fg)),
-        Span::styled(format!(" {subject:<26}"), Style::default().fg(theme.muted)),
-        Span::styled(format!(" {age:>6}"), Style::default().fg(theme.muted)),
-    ];
+    spans.push(Span::styled(
+        format!(" {from:<15}"),
+        Style::default().fg(theme.fg),
+    ));
+    spans.push(Span::styled(
+        format!(" {subject:<26}"),
+        Style::default().fg(theme.muted),
+    ));
+    spans.push(Span::styled(
+        format!(" {age:>6}"),
+        Style::default().fg(theme.muted),
+    ));
     if entry.has_thread {
         spans.push(Span::styled(" ⤷", Style::default().fg(theme.muted)));
+    }
+    if entry.has_attachments {
+        spans.push(Span::styled(
+            format!(" {ICON_ATTACHMENT}"),
+            Style::default().fg(theme.accent),
+        ));
     }
     if entry.is_slop {
         spans.push(Span::styled(
@@ -347,5 +397,60 @@ mod tests {
         let date = Utc::now() + chrono::Duration::hours(1);
         let age = format_age(date);
         assert_eq!(age, "0s ago");
+    }
+
+    #[test]
+    fn test_set_entries_defaults_no_attachments() {
+        let list = populated_list();
+        assert!(!list.entries[0].has_attachments);
+        assert!(list.entries[0].inbox_label.is_none());
+    }
+
+    #[test]
+    fn test_mark_has_attachments() {
+        let mut list = MessageList::new();
+        let msgs = vec![
+            make_message("alice@co.com", "A", false),
+            make_message("bob@co.com", "B", false),
+        ];
+        list.set_entries(&msgs);
+        assert!(!list.entries[0].has_attachments);
+        assert!(!list.entries[1].has_attachments);
+        list.mark_has_attachments(msgs[1].id, &msgs);
+        assert!(!list.entries[0].has_attachments);
+        assert!(list.entries[1].has_attachments);
+    }
+
+    #[test]
+    fn test_mark_has_attachments_unknown_id() {
+        let mut list = MessageList::new();
+        let msgs = vec![make_message("alice@co.com", "A", false)];
+        list.set_entries(&msgs);
+        list.mark_has_attachments(Uuid::new_v4(), &msgs);
+        assert!(!list.entries[0].has_attachments);
+    }
+
+    #[test]
+    fn test_set_inbox_labels_from_messages() {
+        let mut list = MessageList::new();
+        let inbox_id1 = Uuid::new_v4();
+        let inbox_id2 = Uuid::new_v4();
+        let mut msg1 = make_message("alice@co.com", "A", false);
+        let mut msg2 = make_message("bob@co.com", "B", false);
+        msg1.inbox_id = inbox_id1;
+        msg2.inbox_id = inbox_id2;
+        let msgs = vec![msg1, msg2];
+        list.set_entries(&msgs);
+
+        let mut inbox_map = std::collections::HashMap::new();
+        inbox_map.insert(inbox_id1, "hello@pb.dev".to_string());
+        inbox_map.insert(inbox_id2, "support@pb.dev".to_string());
+
+        list.set_inbox_labels_from_messages(&msgs, &inbox_map);
+        assert_eq!(list.entries[0].inbox_label.as_deref(), Some("hello@pb.dev"));
+        assert_eq!(
+            list.entries[1].inbox_label.as_deref(),
+            Some("support@pb.dev")
+        );
     }
 }
