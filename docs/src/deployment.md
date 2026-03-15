@@ -15,9 +15,15 @@ The `docker-compose.yml` starts PostgreSQL (pgvector), Stalwart Mail Server, and
 | Service | Image | Ports |
 |---------|-------|-------|
 | postgres | pgvector/pgvector:pg17 | 5432 |
-| stalwart | stalwartlabs/stalwart:latest | 8080, 25, 993 |
+| stalwart | stalwartlabs/stalwart:latest | 8080, 25, 587, 465, 993 |
 | postblox | built from Dockerfile | 3000 |
 | ollama | ollama/ollama:latest | 11434 (optional, `--profile gpu`) |
+
+### Volumes
+
+- `postgres_data` — PostgreSQL data
+- `stalwart_data` — Stalwart mail server data
+- `postblox_data` — attachment storage (mounted at `/data`)
 
 ### Environment variables
 
@@ -29,8 +35,10 @@ environment:
   STALWART_URL: http://stalwart:8080
   STALWART_ADMIN_USER: admin
   STALWART_ADMIN_TOKEN: changeme
+  STALWART_INBOUND_TOKEN: ${STALWART_INBOUND_TOKEN:-your-secret-token}
   POSTBLOX_HOST: 0.0.0.0
   POSTBLOX_PORT: "3000"
+  ATTACHMENT_STORAGE_PATH: /data/attachments
 ```
 
 ### Building the image
@@ -117,27 +125,55 @@ sudo systemctl enable --now postblox
 
 ## Stalwart Mail Server setup
 
-postblox uses Stalwart for SMTP send/receive and account management.
+postblox uses Stalwart for SMTP send/receive and account management. `postblox init` auto-configures Stalwart via its REST API — no manual Stalwart configuration is needed.
 
 ### Inbound email flow
 
-1. Stalwart receives email via SMTP
-2. Stalwart forwards to postblox via HTTP webhook: `POST /internal/stalwart/inbound`
+1. Stalwart receives email via SMTP (port 25)
+2. Stalwart's MTA Hook forwards the message to postblox: `POST /internal/stalwart/mta-hook`
 3. postblox parses, deduplicates, threads, classifies, and stores the message
-4. Events dispatched to webhooks, WebSocket, hooks, and notifications
+4. postblox responds with `{"set":[{"path":"/action","value":"discard"}]}` — Stalwart drops its copy
+5. Events dispatched to webhooks, WebSocket, hooks, and notifications
 
-Configure Stalwart to forward inbound mail to:
-```
-http://postblox:3000/internal/stalwart/inbound
-```
+The MTA Hook is auto-configured by `postblox init`. It can also be configured manually via Stalwart's settings API or the raw inbound endpoint:
 
-If `stalwart_inbound_token` is set, include it as a Bearer token in the forwarding webhook.
+| Endpoint | Auth | Format | Use |
+|----------|------|--------|-----|
+| `/internal/stalwart/mta-hook` | Basic auth (inbound_token) | MTA Hook JSON | Auto-configured by init |
+| `/internal/stalwart/inbound` | Bearer token (inbound_token) | Raw MIME | Manual/IMAP sync |
 
 ### Outbound email flow
 
 postblox sends outbound email via Stalwart's SMTP:
 - `stalwart_smtp_host` — SMTP hostname
 - `stalwart_smtp_port` — SMTP port (typically 25 for local Stalwart)
+
+### Outbound relay (recommended for new deployments)
+
+Fresh server IPs have no email reputation — outbound mail will land in spam. Use an SMTP relay to send through warm IPs:
+
+```toml
+relay_host = "smtp.mailgun.org"
+relay_port = 587
+relay_username = "postmaster@mg.example.com"
+relay_password = "your-relay-password"
+relay_starttls = true
+```
+
+`postblox init` can configure the relay in both postblox and Stalwart. Supported providers: Mailgun, Amazon SES, Postmark, or any SMTP relay.
+
+### Domain DNS setup
+
+After running `postblox init --domain example.com`, add the DNS records it prints:
+
+| Record | Name | Value |
+|--------|------|-------|
+| MX | `example.com` | Your server IP / hostname |
+| TXT | `example.com` | `v=spf1 mx ~all` |
+| TXT | `default._domainkey.example.com` | DKIM key (from Stalwart) |
+| TXT | `_dmarc.example.com` | `v=DMARC1; p=quarantine; rua=mailto:...` |
+
+Verify with `postblox doctor` — it checks MX, SPF, DKIM, and DMARC records.
 
 ## PostgreSQL requirements
 

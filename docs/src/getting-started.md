@@ -12,41 +12,53 @@ docker compose up -d
 
 This starts:
 - **PostgreSQL** (pgvector/pgvector:pg17) on port 5432
-- **Stalwart Mail Server** on ports 8080 (HTTP), 25 (SMTP), 993 (IMAP)
+- **Stalwart Mail Server** on ports 8080 (HTTP), 25/587/465 (SMTP), 993 (IMAP)
 - **postblox** on port 3000
 
 Wait for healthy status:
 
 ```bash
-docker compose ps  # postgres and stalwart should show "healthy"; postblox shows "running"
+docker compose ps  # all services should show "healthy"
 curl http://localhost:3000/health
 # {"status":"ok","database":true}
 ```
 
-## Bootstrap an organization
+## Setup with `postblox init`
 
-Create your first organization and API key:
+The init wizard creates your config, runs migrations, configures Stalwart, and generates your first API key:
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/organizations \
-  -H "Content-Type: application/json" \
-  -d '{"name": "my-org"}'
+# Interactive mode
+postblox init
+
+# Non-interactive mode (CI/Docker)
+postblox init --non-interactive \
+  --database-url "postgres://postblox:postblox@localhost:5432/postblox" \
+  --stalwart-url "http://localhost:8080" \
+  --stalwart-admin-user admin \
+  --stalwart-admin-token "your-admin-password" \
+  --stalwart-inbound-token "your-secret-token" \
+  --domain "example.com" \
+  --org-name "my-org"
 ```
 
-Response:
+The wizard will:
+1. Test database connectivity and run migrations
+2. Connect to Stalwart and auto-configure the MTA Hook (inbound email forwarding)
+3. Create your domain in Stalwart and print the DNS records you need to add
+4. Optionally configure an outbound SMTP relay (Mailgun, SES, Postmark)
+5. Generate `postblox.toml` with secure permissions (0600)
+6. Create your organization and API key
 
-```json
-{
-  "organization": {
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "name": "my-org",
-    "created_at": "2026-03-13T00:00:00Z"
-  },
-  "api_key": "pb_abc12.deadbeefdeadbeefdeadbeef..."
-}
+Save the API key — it's shown only once. All subsequent API calls require it as a Bearer token.
+
+## Verify with `postblox doctor`
+
+```bash
+postblox doctor
 ```
 
-Save the `api_key` — it's shown only once. All subsequent API calls require it as a Bearer token.
+Checks: config file, database, migrations, Stalwart connectivity, MTA Hook configuration, DNS records (MX, SPF, DKIM, DMARC), embedding provider, relay connectivity, and file permissions.
 
 ## Create an inbox
 

@@ -19,6 +19,13 @@ stalwart_inbound_token = "webhook-secret"
 stalwart_smtp_host = "localhost"
 stalwart_smtp_port = 25
 
+# Outbound SMTP relay (Mailgun, SES, Postmark, or custom)
+# relay_host = "smtp.mailgun.org"
+# relay_port = 587
+# relay_username = "postmaster@mg.example.com"
+# relay_password = "secret"
+# relay_starttls = true
+
 # Outbound guard patterns (block messages matching these regexes)
 [[guard_patterns]]
 name = "ssn"
@@ -74,6 +81,23 @@ timeout_secs = 10
 | `stalwart_inbound_token` | `STALWART_INBOUND_TOKEN` | *(none)* | Shared secret for inbound webhook from Stalwart |
 | `stalwart_smtp_host` | `STALWART_SMTP_HOST` | *(none)* | SMTP host for outbound delivery |
 | `stalwart_smtp_port` | `STALWART_SMTP_PORT` | *(none)* | SMTP port |
+
+### Relay
+
+| Field | Env var | Default | Description |
+|-------|---------|---------|-------------|
+| `relay_host` | `RELAY_HOST` | *(none)* | SMTP relay hostname. If set, outbound mail is routed through this relay. |
+| `relay_port` | `RELAY_PORT` | *(none)* | SMTP relay port (typically 587) |
+| `relay_username` | `RELAY_USERNAME` | *(none)* | Relay authentication username |
+| `relay_password` | `RELAY_PASSWORD` | *(none)* | Relay authentication password |
+| `relay_starttls` | `RELAY_STARTTLS` | `false` | Use STARTTLS for relay connection |
+
+### Attachments
+
+| Field | Env var | Default | Description |
+|-------|---------|---------|-------------|
+| `attachment_storage_path` | `ATTACHMENT_STORAGE_PATH` | `data/attachments` | Directory for attachment file storage |
+| `max_attachment_size_bytes` | `MAX_ATTACHMENT_SIZE_BYTES` | `26214400` (25 MB) | Maximum attachment size |
 
 ### Embeddings
 
