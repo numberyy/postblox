@@ -105,7 +105,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "postblox_send_email",
-            "description": "Send an email from an inbox.",
+            "description": "Send a plain text/HTML email from an inbox. For sending with attachments, use the POST /api/v1/inboxes/{inbox_id}/messages/upload multipart endpoint directly.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -172,7 +172,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "postblox_search",
-            "description": "Search across messages. Supports full-text and semantic (vector similarity) search.",
+            "description": "Search across messages. Supports full-text, semantic (vector similarity), and field search. Use @from:, @to:, @subject:, @in:, @has:attachment prefixes in the query for field filtering (e.g. '@from:alice invoice').",
             "inputSchema": {
                 "type": "object",
                 "properties": {

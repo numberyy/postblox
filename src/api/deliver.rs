@@ -12,6 +12,7 @@ pub struct DeliveryParams<'a> {
     pub text_body: Option<&'a str>,
     pub html_body: Option<&'a str>,
     pub message_id_header: &'a str,
+    pub attachments: &'a [crate::mail::builder::MimeAttachment],
 }
 
 pub async fn deliver_message(
@@ -34,7 +35,7 @@ pub async fn deliver_message(
         format!("<{}>", params.message_id_header)
     };
 
-    let raw_mime = crate::mail::builder::build_mime(
+    let raw_mime = crate::mail::builder::build_mime_with_attachments(
         params.from,
         params.to,
         params.cc,
@@ -42,6 +43,7 @@ pub async fn deliver_message(
         params.text_body,
         params.html_body,
         &mime_message_id,
+        params.attachments,
     );
 
     if let Some(ref stalwart) = state.stalwart {

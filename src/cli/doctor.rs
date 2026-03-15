@@ -368,7 +368,10 @@ async fn check_mta_hook(
     {
         Ok(c) => c,
         Err(e) => {
-            results.push(CheckResult::fail("MTA Hook", format!("http client error: {e}")));
+            results.push(CheckResult::fail(
+                "MTA Hook",
+                format!("http client error: {e}"),
+            ));
             return;
         }
     };
@@ -427,7 +430,10 @@ async fn check_domain_dns(
     {
         Ok(c) => c,
         Err(e) => {
-            results.push(CheckResult::fail("DNS records", format!("http client error: {e}")));
+            results.push(CheckResult::fail(
+                "DNS records",
+                format!("http client error: {e}"),
+            ));
             return;
         }
     };
@@ -440,7 +446,10 @@ async fn check_domain_dns(
     {
         Ok(r) => r,
         Err(e) => {
-            results.push(CheckResult::fail("DNS records", format!("could not list domains: {e}")));
+            results.push(CheckResult::fail(
+                "DNS records",
+                format!("could not list domains: {e}"),
+            ));
             return;
         }
     };
@@ -448,7 +457,10 @@ async fn check_domain_dns(
     let body: serde_json::Value = match resp.json().await {
         Ok(b) => b,
         Err(e) => {
-            results.push(CheckResult::fail("DNS records", format!("invalid response from Stalwart: {e}")));
+            results.push(CheckResult::fail(
+                "DNS records",
+                format!("invalid response from Stalwart: {e}"),
+            ));
             return;
         }
     };

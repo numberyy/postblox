@@ -36,6 +36,20 @@ use crate::state::{Mode, Panel};
 use crate::theme::Theme;
 use crate::ws::{self, WsEvent};
 
+fn msg_body_text(text_body: &Option<String>, html_body: &Option<String>) -> String {
+    text_body
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            html_body
+                .as_deref()
+                .filter(|h| !h.is_empty())
+                .map(crate::components::preview::html_to_plaintext)
+        })
+        .unwrap_or_default()
+}
+
 struct TerminalGuard;
 
 impl Drop for TerminalGuard {
@@ -476,11 +490,12 @@ impl App {
             }
             AppMsg::ApprovalMessageLoaded(Ok(msg)) => {
                 if self.sidebar_view == SidebarView::Approvals {
+                    let body = msg_body_text(&msg.text_body, &msg.html_body);
                     self.preview.set_content(
                         &msg.from_addr,
                         msg.subject.as_deref().unwrap_or("(no subject)"),
                         &msg.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-                        msg.text_body.as_deref().unwrap_or(""),
+                        &body,
                     );
                 }
             }
@@ -502,9 +517,8 @@ impl App {
                         "Date: {}\n\n",
                         msg.created_at.format("%Y-%m-%d %H:%M")
                     ));
-                    if let Some(ref text) = msg.text_body {
-                        body.push_str(text);
-                    }
+                    let msg_text = msg_body_text(&msg.text_body, &msg.html_body);
+                    body.push_str(&msg_text);
                     body.push_str("\n\n");
                 }
                 if let Some(first) = messages.first() {
@@ -565,11 +579,12 @@ impl App {
             SidebarView::Inboxes => {
                 let idx = self.message_list.selected();
                 if let Some(msg) = self.displayed_messages.get(idx) {
+                    let body = msg_body_text(&msg.text_body, &msg.html_body);
                     self.preview.set_content(
                         &msg.from_addr,
                         msg.subject.as_deref().unwrap_or("(no subject)"),
                         &msg.created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-                        msg.text_body.as_deref().unwrap_or(""),
+                        &body,
                     );
                 } else {
                     self.preview

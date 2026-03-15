@@ -292,6 +292,7 @@ pub async fn send_draft(
             text_body: msg.text_body.as_deref(),
             html_body: msg.html_body.as_deref(),
             message_id_header: &message_id,
+            attachments: &[],
         },
     )
     .await?;

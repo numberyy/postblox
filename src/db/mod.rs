@@ -17,6 +17,7 @@ pub mod messages;
 pub mod notifications;
 pub mod organizations;
 pub mod permissions;
+pub mod search;
 pub mod slop;
 pub mod slop_feedback;
 pub mod threads;

@@ -11,6 +11,12 @@
     <a href="/dashboard/messages/{{ msg.id }}" style="margin-left:.5rem;font-size:.8rem">detail</a>
   </div>
   <pre class="msg-body">{{ msg.text_body|default("(empty)", true) }}</pre>
+  {% if msg.html_body %}
+  <details class="thread-html-toggle">
+    <summary class="btn btn-small">Show HTML</summary>
+    <iframe class="msg-html-frame" sandbox srcdoc="{{ msg.html_body|e }}"></iframe>
+  </details>
+  {% endif %}
 </div>
 {% endfor %}
 

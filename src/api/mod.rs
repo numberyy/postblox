@@ -86,6 +86,21 @@ pub async fn get_inbox_for_org(
     Ok(inbox)
 }
 
+pub async fn get_message_for_inbox(
+    pool: &PgPool,
+    message_id: Uuid,
+    inbox_id: Uuid,
+) -> Result<crate::models::Message, error::ApiError> {
+    let msg = crate::db::messages::get_by_id(pool, message_id)
+        .await
+        .map_err(error::ApiError::from_sqlx)?
+        .ok_or(error::ApiError::NotFound)?;
+    if msg.inbox_id != inbox_id {
+        return Err(error::ApiError::NotFound);
+    }
+    Ok(msg)
+}
+
 pub fn new_message_id() -> String {
     format!("{}@postblox", Uuid::new_v4())
 }
@@ -221,6 +236,11 @@ pub fn router(state: AppState) -> axum::Router {
             get(messages::list).post(messages::send),
         )
         .route(
+            "/inboxes/{inbox_id}/messages/upload",
+            post(messages::send_with_attachments)
+                .layer(axum::extract::DefaultBodyLimit::max(26 * 1024 * 1024)),
+        )
+        .route(
             "/inboxes/{inbox_id}/messages/{message_id}",
             get(messages::get),
         )
@@ -234,7 +254,7 @@ pub fn router(state: AppState) -> axum::Router {
         )
         .route(
             "/inboxes/{inbox_id}/messages/{message_id}/attachments/{attachment_id}",
-            get(attachments::download),
+            get(attachments::download).delete(attachments::delete),
         )
         .route(
             "/inboxes/{inbox_id}/labels",

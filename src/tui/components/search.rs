@@ -39,7 +39,17 @@ impl SearchPanel {
                 inbox_id: m.inbox_id,
                 from: m.from_addr.clone(),
                 subject: m.subject.clone().unwrap_or_default(),
-                snippet: m.text_body.clone().unwrap_or_default(),
+                snippet: m
+                    .text_body
+                    .as_deref()
+                    .filter(|t| !t.is_empty())
+                    .map(String::from)
+                    .or_else(|| {
+                        m.html_body
+                            .as_deref()
+                            .map(super::preview::html_to_plaintext)
+                    })
+                    .unwrap_or_default(),
             })
             .collect();
         if self.results.is_empty() {
@@ -130,7 +140,7 @@ impl SearchPanel {
             let inner = block.inner(area);
             frame.render_widget(block, area);
             let empty = if self.query.is_empty() {
-                "Type to search…"
+                "Type to search\u{2026} @from: @to: @subject: @in: @has:attachment"
             } else {
                 "No results"
             };

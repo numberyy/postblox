@@ -28,6 +28,21 @@ pub async fn search(
 
     let (limit, offset) = super::clamp_pagination_raw(params.limit, params.offset);
 
+    let parsed = crate::db::search::parse_search_query(&params.q);
+    if parsed.has_fields() {
+        let results = crate::db::search::field_search(
+            &state.pool,
+            org_id,
+            &parsed,
+            params.inbox_id,
+            limit,
+            offset,
+        )
+        .await
+        .map_err(ApiError::from_sqlx)?;
+        return Ok(Json(results));
+    }
+
     if params.semantic.unwrap_or(false) {
         let provider = state
             .embedding_provider

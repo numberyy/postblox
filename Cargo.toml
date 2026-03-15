@@ -19,7 +19,7 @@ name = "postblox-tui"
 path = "src/tui/main.rs"
 
 [dependencies]
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio", "chrono", "uuid", "json", "migrate"] }
 serde = { version = "1", features = ["derive"] }
@@ -54,6 +54,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 dialoguer = "0.11"
 hickory-resolver = "0.25"
+html2text = "0.16"
 
 [dev-dependencies]
 tempfile = "3"

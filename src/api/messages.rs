@@ -1,4 +1,4 @@
-use axum::extract::{Path, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
@@ -6,7 +6,10 @@ use uuid::Uuid;
 
 use super::auth::AuthOrg;
 use super::error::ApiError;
-use super::{check_send_allowed, get_inbox_for_org, spawn_approval_event, AppState, SendCheck};
+use super::{
+    check_send_allowed, get_inbox_for_org, get_message_for_inbox, spawn_approval_event, AppState,
+    SendCheck,
+};
 use crate::models::{Message, SendMode};
 
 #[derive(Deserialize)]
@@ -108,6 +111,7 @@ pub async fn send(
             text_body: req.text_body.as_deref(),
             html_body: req.html_body.as_deref(),
             message_id_header: &message_id,
+            attachments: &[],
         },
     )
     .await?;
@@ -152,15 +156,246 @@ pub async fn get(
     Path((inbox_id, id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Message>, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
+    let msg = get_message_for_inbox(&state.pool, id, inbox_id).await?;
+    Ok(Json(msg))
+}
 
-    let msg = crate::db::messages::get_by_id(&state.pool, id)
+struct UploadedFile {
+    filename: String,
+    content_type: String,
+    data: Vec<u8>,
+}
+
+async fn cleanup_stored(storage_path: &std::path::Path, keys: &[String]) {
+    for key in keys {
+        if let Err(e) = crate::storage::delete_attachment(storage_path, key).await {
+            tracing::warn!(storage_key = %key, "failed to clean up attachment after error: {e}");
+        }
+    }
+}
+
+pub async fn send_with_attachments(
+    State(state): State<AppState>,
+    AuthOrg { org_id, .. }: AuthOrg,
+    Path(inbox_id): Path<Uuid>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<Message>), ApiError> {
+    let inbox = get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
+
+    let mut metadata: Option<SendMessageRequest> = None;
+    let mut files: Vec<UploadedFile> = Vec::new();
+    let max_size = state.max_attachment_size_bytes as usize;
+    const MAX_ATTACHMENTS: usize = 20;
+
+    while let Some(field) = multipart
+        .next_field()
         .await
-        .map_err(ApiError::from_sqlx)?
-        .ok_or(ApiError::NotFound)?;
-
-    if msg.inbox_id != inbox_id {
-        return Err(ApiError::NotFound);
+        .map_err(|e| ApiError::BadRequest(format!("multipart error: {e}")))?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "metadata" => {
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| ApiError::BadRequest(format!("failed to read metadata: {e}")))?;
+                metadata =
+                    Some(serde_json::from_slice(&bytes).map_err(|e| {
+                        ApiError::BadRequest(format!("invalid metadata JSON: {e}"))
+                    })?);
+            }
+            "file" => {
+                if files.len() >= MAX_ATTACHMENTS {
+                    return Err(ApiError::BadRequest(format!(
+                        "too many attachments (max {MAX_ATTACHMENTS})"
+                    )));
+                }
+                let filename = field.file_name().unwrap_or("attachment").to_string();
+                let content_type = field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|e| ApiError::BadRequest(format!("failed to read file: {e}")))?;
+                if data.len() > max_size {
+                    return Err(ApiError::BadRequest(format!(
+                        "attachment '{}' exceeds max size of {} bytes",
+                        filename, max_size
+                    )));
+                }
+                files.push(UploadedFile {
+                    filename,
+                    content_type,
+                    data: data.to_vec(),
+                });
+            }
+            other => {
+                return Err(ApiError::BadRequest(format!(
+                    "unexpected multipart field '{other}'; expected 'metadata' or 'file'"
+                )));
+            }
+        }
     }
 
-    Ok(Json(msg))
+    let req = metadata.ok_or_else(|| ApiError::BadRequest("missing 'metadata' field".into()))?;
+
+    if req.to.is_empty() {
+        return Err(ApiError::BadRequest(
+            "at least one recipient required".into(),
+        ));
+    }
+
+    let send_mode = check_send_allowed(
+        &state,
+        inbox_id,
+        &SendCheck {
+            to: &req.to,
+            subject: req.subject.as_deref(),
+            text_body: req.text_body.as_deref(),
+            html_body: req.html_body.as_deref(),
+            from_addr: &inbox.email,
+        },
+    )
+    .await?;
+
+    let message_id = super::new_message_id();
+
+    let cm = crate::models::CreateMessage {
+        inbox_id,
+        thread_id: None,
+        message_id_header: Some(message_id.clone()),
+        in_reply_to: None,
+        references_header: None,
+        from_addr: inbox.email.clone(),
+        to_addrs: serde_json::json!(&req.to),
+        cc_addrs: req.cc.as_ref().map(|cc| serde_json::json!(cc)),
+        subject: req.subject.clone(),
+        text_body: req.text_body.clone(),
+        html_body: req.html_body.clone(),
+        extracted_text: None,
+        direction: crate::models::Direction::Outbound,
+        raw_headers: None,
+    };
+
+    let msg = crate::db::messages::create(&state.pool, &cm)
+        .await
+        .map_err(ApiError::from_sqlx)?;
+
+    let mut stored_keys: Vec<String> = Vec::new();
+    let mut mime_attachments: Vec<crate::mail::builder::MimeAttachment> = Vec::new();
+    let msg_id_str = msg.id.to_string();
+    let storage_path = &state.attachment_storage_path;
+    let mut seen_names = std::collections::HashSet::new();
+
+    for file in files {
+        let filename = if !seen_names.insert(file.filename.clone()) {
+            let (stem, ext) = file
+                .filename
+                .rsplit_once('.')
+                .map(|(s, e)| (s, Some(e)))
+                .unwrap_or((&file.filename, None));
+            let mut n = 1u32;
+            loop {
+                let candidate = match ext {
+                    Some(e) => format!("{stem}_{n}.{e}"),
+                    None => format!("{stem}_{n}"),
+                };
+                if seen_names.insert(candidate.clone()) {
+                    break candidate;
+                }
+                n += 1;
+            }
+        } else {
+            file.filename.clone()
+        };
+
+        let storage_key = match crate::storage::store_attachment(
+            storage_path,
+            &msg_id_str,
+            &filename,
+            &file.data,
+            max_size as u64,
+        )
+        .await
+        {
+            Ok(key) => key,
+            Err(e) => {
+                cleanup_stored(storage_path, &stored_keys).await;
+                return Err(ApiError::Internal(format!(
+                    "failed to store attachment: {e}"
+                )));
+            }
+        };
+        stored_keys.push(storage_key.clone());
+
+        if let Err(e) = crate::db::attachments::create(
+            &state.pool,
+            &crate::models::CreateAttachment {
+                message_id: msg.id,
+                filename: filename.clone(),
+                content_type: file.content_type.clone(),
+                size_bytes: file.data.len() as i64,
+                storage_key,
+                disposition: "attachment".into(),
+            },
+        )
+        .await
+        {
+            cleanup_stored(storage_path, &stored_keys).await;
+            return Err(ApiError::from_sqlx(e));
+        }
+
+        mime_attachments.push(crate::mail::builder::MimeAttachment {
+            filename,
+            content_type: file.content_type,
+            data: file.data,
+        });
+    }
+
+    if send_mode == SendMode::Approval {
+        let approval = crate::db::approvals::create(
+            &state.pool,
+            &crate::models::CreateApproval {
+                org_id,
+                inbox_id,
+                message_id: msg.id,
+            },
+        )
+        .await
+        .map_err(ApiError::from_sqlx)?;
+
+        spawn_approval_event(&state, org_id, inbox_id, msg.id, approval.id);
+        return Ok((StatusCode::ACCEPTED, Json(msg)));
+    }
+
+    let cc = req.cc.as_deref().unwrap_or(&[]);
+    if let Err(e) = super::deliver::deliver_message(
+        &state,
+        org_id,
+        &inbox,
+        msg.id,
+        &super::deliver::DeliveryParams {
+            from: &inbox.email,
+            to: &req.to,
+            cc,
+            subject: req.subject.as_deref().unwrap_or(""),
+            text_body: req.text_body.as_deref(),
+            html_body: req.html_body.as_deref(),
+            message_id_header: &message_id,
+            attachments: &mime_attachments,
+        },
+    )
+    .await
+    {
+        tracing::warn!(
+            message_id = %msg.id,
+            attachment_count = stored_keys.len(),
+            "delivery failed after attachments stored; files retained on disk"
+        );
+        return Err(e);
+    }
+
+    Ok((StatusCode::CREATED, Json(msg)))
 }

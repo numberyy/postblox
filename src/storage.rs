@@ -48,23 +48,24 @@ pub async fn store_attachment(
     Ok(format!("{message_id}/{filename}"))
 }
 
-pub async fn read_attachment(base_path: &Path, storage_key: &str) -> Result<Vec<u8>, StorageError> {
+fn validate_storage_key(storage_key: &str) -> Result<(), StorageError> {
     let parts: Vec<&str> = storage_key.splitn(2, '/').collect();
     if parts.len() != 2 {
         return Err(StorageError::InvalidKey(storage_key.to_string()));
     }
+    validate_filename(parts[0])?;
     validate_filename(parts[1])?;
+    Ok(())
+}
 
+pub async fn read_attachment(base_path: &Path, storage_key: &str) -> Result<Vec<u8>, StorageError> {
+    validate_storage_key(storage_key)?;
     let path = base_path.join(storage_key);
     Ok(fs::read(&path).await?)
 }
 
 pub async fn delete_attachment(base_path: &Path, storage_key: &str) -> Result<(), StorageError> {
-    let parts: Vec<&str> = storage_key.splitn(2, '/').collect();
-    if parts.len() != 2 {
-        return Err(StorageError::InvalidKey(storage_key.to_string()));
-    }
-    validate_filename(parts[1])?;
+    validate_storage_key(storage_key)?;
 
     let path = base_path.join(storage_key);
     match fs::remove_file(&path).await {

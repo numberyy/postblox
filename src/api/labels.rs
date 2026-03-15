@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::auth::AuthOrg;
 use super::error::ApiError;
-use super::{get_inbox_for_org, AppState};
+use super::{get_inbox_for_org, get_message_for_inbox, AppState};
 use crate::models::Label;
 
 #[derive(Deserialize)]
@@ -83,14 +83,7 @@ pub async fn add_to_message(
     Json(req): Json<AddLabelRequest>,
 ) -> Result<StatusCode, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
-
-    let msg = crate::db::messages::get_by_id(&state.pool, message_id)
-        .await
-        .map_err(ApiError::from_sqlx)?
-        .ok_or(ApiError::NotFound)?;
-    if msg.inbox_id != inbox_id {
-        return Err(ApiError::NotFound);
-    }
+    get_message_for_inbox(&state.pool, message_id, inbox_id).await?;
 
     let label = crate::db::labels::get_by_id(&state.pool, req.label_id)
         .await
@@ -113,14 +106,7 @@ pub async fn remove_from_message(
     Path((inbox_id, message_id, label_id)): Path<(Uuid, Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
-
-    let msg = crate::db::messages::get_by_id(&state.pool, message_id)
-        .await
-        .map_err(ApiError::from_sqlx)?
-        .ok_or(ApiError::NotFound)?;
-    if msg.inbox_id != inbox_id {
-        return Err(ApiError::NotFound);
-    }
+    get_message_for_inbox(&state.pool, message_id, inbox_id).await?;
 
     let label = crate::db::labels::get_by_id(&state.pool, label_id)
         .await
@@ -143,14 +129,7 @@ pub async fn list_for_message(
     Path((inbox_id, message_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Vec<Label>>, ApiError> {
     get_inbox_for_org(&state.pool, inbox_id, org_id).await?;
-
-    let msg = crate::db::messages::get_by_id(&state.pool, message_id)
-        .await
-        .map_err(ApiError::from_sqlx)?
-        .ok_or(ApiError::NotFound)?;
-    if msg.inbox_id != inbox_id {
-        return Err(ApiError::NotFound);
-    }
+    get_message_for_inbox(&state.pool, message_id, inbox_id).await?;
 
     let labels = crate::db::labels::list_for_message(&state.pool, message_id)
         .await

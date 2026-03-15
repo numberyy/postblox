@@ -6,6 +6,16 @@ use ratatui::Frame;
 
 use crate::theme::Theme;
 
+pub fn html_to_plaintext(html: &str) -> String {
+    match html2text::from_read(html.as_bytes(), 80) {
+        Ok(text) => text,
+        Err(e) => {
+            tracing::debug!("html-to-text conversion failed: {e}");
+            String::new()
+        }
+    }
+}
+
 pub struct Preview {
     pub from: String,
     pub subject: String,
@@ -143,5 +153,30 @@ mod tests {
         assert_eq!(p.from, "bob@ex.com");
         assert_eq!(p.subject, "New subject");
         assert_eq!(p.body, "Body");
+    }
+
+    #[test]
+    fn test_html_to_plaintext_basic() {
+        let result = html_to_plaintext("<p>Hello</p>");
+        assert!(result.contains("Hello"));
+    }
+
+    #[test]
+    fn test_html_to_plaintext_links() {
+        let result = html_to_plaintext(r#"<a href="https://example.com">click</a>"#);
+        assert!(result.contains("click"));
+    }
+
+    #[test]
+    fn test_html_to_plaintext_empty() {
+        assert_eq!(html_to_plaintext(""), "");
+    }
+
+    #[test]
+    fn test_html_to_plaintext_entities() {
+        let result = html_to_plaintext("<p>&amp; &lt; &gt;</p>");
+        assert!(result.contains('&'));
+        assert!(result.contains('<'));
+        assert!(result.contains('>'));
     }
 }

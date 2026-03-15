@@ -42,4 +42,11 @@
   <h3>Body</h3>
   <pre class="msg-body">{{ message.text_body|default("(empty)", true) }}</pre>
 </div>
+
+{% if message.html_body %}
+<div class="card">
+  <h3>HTML Body <button onclick="document.getElementById('html-frame').classList.toggle('hidden')" class="btn btn-small">Toggle</button></h3>
+  <iframe id="html-frame" class="msg-html-frame" sandbox srcdoc="{{ message.html_body|e }}"></iframe>
+</div>
+{% endif %}
 {% endblock %}

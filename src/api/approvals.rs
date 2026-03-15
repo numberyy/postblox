@@ -95,6 +95,7 @@ pub async fn execute_approval(
                 .message_id_header
                 .clone()
                 .unwrap_or_else(super::new_message_id),
+            attachments: &[],
         },
     )
     .await?;
