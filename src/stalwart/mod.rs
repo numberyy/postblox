@@ -156,10 +156,15 @@ impl StalwartClient {
     }
 
     pub async fn set_settings(&self, settings: &[(&str, &str)]) -> Result<(), StalwartError> {
-        let payload: serde_json::Value = settings
+        let values: Vec<(String, String)> = settings
             .iter()
-            .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
+        let payload = serde_json::json!([{
+            "type": "insert",
+            "values": values,
+            "assertEmpty": false,
+        }]);
 
         let resp = self
             .http
