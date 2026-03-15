@@ -50,9 +50,15 @@ pub async fn create(
         password: req.password,
     };
 
-    let account = crate::db::linked_accounts::create(&state.pool, &input)
-        .await
-        .map_err(ApiError::from_sqlx)?;
+    let account =
+        crate::db::linked_accounts::create(&state.pool, &input, state.encryption_key.as_ref())
+            .await
+            .map_err(|e| match e {
+                crate::db::linked_accounts::LinkedAccountError::Database(db_err) => {
+                    ApiError::from_sqlx(db_err)
+                }
+                other => ApiError::Internal(other.to_string()),
+            })?;
 
     Ok((StatusCode::CREATED, Json(account)))
 }
@@ -118,7 +124,14 @@ pub async fn sync(
         .await;
     });
 
-    match crate::sync::imap::one_shot_sync(&state.pool, &account, &inbox).await {
+    match crate::sync::imap::one_shot_sync(
+        &state.pool,
+        &account,
+        &inbox,
+        state.encryption_key.as_ref(),
+    )
+    .await
+    {
         Ok(result) => {
             if let Err(e) = crate::db::linked_accounts::set_sync_status(
                 &state.pool,

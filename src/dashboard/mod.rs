@@ -845,6 +845,7 @@ fn format_rule(rule: &crate::core::rules::Rule) -> String {
         }
         Rule::SlopThreshold { threshold } => format!("SlopThreshold: {threshold}"),
         Rule::DollarAmount { max_amount } => format!("DollarAmount: max ${max_amount}"),
+        Rule::ContactList { contacts } => format!("ContactList: {}", contacts.join(", ")),
     }
 }
 

@@ -319,7 +319,7 @@ pub struct Domain {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct LinkedAccount {
     pub id: Uuid,
     pub inbox_id: Uuid,
@@ -330,13 +330,27 @@ pub struct LinkedAccount {
     pub username: String,
     #[serde(skip_serializing)]
     pub password: String,
+    #[serde(skip_serializing, default)]
+    pub password_nonce: Option<String>,
     pub last_sync_at: Option<DateTime<Utc>>,
     pub sync_status: crate::sync::SyncStatus,
     pub message_count: i32,
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl std::fmt::Debug for LinkedAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkedAccount")
+            .field("id", &self.id)
+            .field("inbox_id", &self.inbox_id)
+            .field("imap_host", &self.imap_host)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateLinkedAccount {
     pub inbox_id: Uuid,
     pub org_id: Uuid,
@@ -344,6 +358,17 @@ pub struct CreateLinkedAccount {
     pub imap_port: Option<i32>,
     pub username: String,
     pub password: String,
+}
+
+impl std::fmt::Debug for CreateLinkedAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateLinkedAccount")
+            .field("inbox_id", &self.inbox_id)
+            .field("imap_host", &self.imap_host)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
@@ -1483,6 +1508,7 @@ mod tests {
             imap_port: 993,
             username: "user@gmail.com".into(),
             password: "enc_secret".into(),
+            password_nonce: None,
             last_sync_at: Some(Utc::now()),
             sync_status: crate::sync::SyncStatus::Idle,
             message_count: 42,

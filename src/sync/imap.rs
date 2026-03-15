@@ -15,6 +15,7 @@ pub async fn one_shot_sync(
     pool: &sqlx::PgPool,
     account: &LinkedAccount,
     inbox: &crate::models::Inbox,
+    encryption_key: Option<&[u8; 32]>,
 ) -> Result<SyncResult, SyncError> {
     let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -41,9 +42,26 @@ pub async fn one_shot_sync(
         .await
         .map_err(|e| SyncError::Connection(e.to_string()))?;
 
+    let password = match (&account.password_nonce, encryption_key) {
+        (Some(nonce), Some(key)) => {
+            crate::db::linked_accounts::decrypt_password(key, &account.password, nonce).map_err(
+                |e| SyncError::Connection(format!("failed to decrypt IMAP password: {e}")),
+            )?
+        }
+        (Some(_), None) => {
+            return Err(SyncError::Connection(
+                "IMAP password is encrypted but no encryption key configured".into(),
+            ));
+        }
+        (None, _) => {
+            tracing::warn!(account_id = %account.id, "IMAP password stored without encryption (pre-migration account)");
+            account.password.clone()
+        }
+    };
+
     let client = async_imap::Client::new(tls_stream);
     let mut session = client
-        .login(&account.username, &account.password)
+        .login(&account.username, &password)
         .await
         .map_err(|e| {
             if e.0.to_string().contains("Authentication") {

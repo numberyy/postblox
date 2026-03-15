@@ -36,6 +36,7 @@ pub mod search;
 pub mod threads;
 pub mod trust;
 pub mod webhooks;
+pub mod ws_token;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -54,6 +55,8 @@ pub struct AppState {
     pub max_attachment_size_bytes: i64,
     pub content_filter: crate::core::content_filter::ContentFilter,
     pub syntect: Arc<SyntectResources>,
+    pub encryption_key: Option<[u8; 32]>,
+    pub ws_token_store: Arc<ws_token::WsTokenStore>,
 }
 
 pub struct SyntectResources {
@@ -341,6 +344,7 @@ pub fn router(state: AppState) -> axum::Router {
             "/notifications/{id}",
             axum::routing::delete(notifications::delete),
         )
+        .route("/ws/token", post(ws_token::create_token))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rate_limit::middleware,
@@ -375,7 +379,8 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::
 
 #[derive(Deserialize)]
 struct WsParams {
-    key: String,
+    key: Option<String>,
+    token: Option<String>,
 }
 
 async fn ws_upgrade(
@@ -383,16 +388,24 @@ async fn ws_upgrade(
     Query(params): Query<WsParams>,
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let stored = match auth::validate_api_key(&state.pool, &params.key).await {
-        Ok(k) => k,
-        Err(auth::AuthError::DatabaseError) => {
-            return StatusCode::SERVICE_UNAVAILABLE.into_response()
+    let org_id = if let Some(ref token) = params.token {
+        match state.ws_token_store.consume(token) {
+            Some(org_id) => org_id,
+            None => return StatusCode::UNAUTHORIZED.into_response(),
         }
-        Err(auth::AuthError::Invalid) => return StatusCode::UNAUTHORIZED.into_response(),
+    } else if let Some(ref key) = params.key {
+        match auth::validate_api_key(&state.pool, key).await {
+            Ok(k) => k.org_id,
+            Err(auth::AuthError::DatabaseError) => {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response()
+            }
+            Err(auth::AuthError::Invalid) => return StatusCode::UNAUTHORIZED.into_response(),
+        }
+    } else {
+        return StatusCode::UNAUTHORIZED.into_response();
     };
 
     let hub = state.ws_hub.clone();
-    let org_id = stored.org_id;
     ws.on_upgrade(move |socket| async move { hub.handle_ws(socket, org_id).await })
         .into_response()
 }

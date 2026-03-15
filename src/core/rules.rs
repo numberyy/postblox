@@ -23,6 +23,9 @@ pub enum Rule {
     DollarAmount {
         max_amount: f64,
     },
+    ContactList {
+        contacts: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -149,6 +152,32 @@ impl RuleSet {
                                 reason: format!(
                                     "dollar amount ${amount:.2} exceeds limit ${max_amount:.2}"
                                 ),
+                            };
+                        }
+                    }
+                }
+                Rule::ContactList { contacts } => {
+                    if contacts.is_empty() {
+                        return RuleVerdict::Block {
+                            rule: "contact_list".into(),
+                            reason: "contact list is empty — no senders allowed".into(),
+                        };
+                    }
+                    for addr in to {
+                        let addr_lower = addr.to_lowercase();
+                        let domain = addr_lower.rsplit('@').next().unwrap_or("");
+                        let matched = contacts.iter().any(|c| {
+                            let c_lower = c.to_lowercase();
+                            if c_lower.contains('@') {
+                                c_lower == addr_lower
+                            } else {
+                                c_lower == domain
+                            }
+                        });
+                        if !matched {
+                            return RuleVerdict::Block {
+                                rule: "contact_list".into(),
+                                reason: format!("sender '{addr}' not in contact list"),
                             };
                         }
                     }
@@ -708,5 +737,81 @@ mod tests {
             rs.evaluate(&[addr("a@ok.com")], "hello", "world", Some(0.5)),
             RuleVerdict::Allow,
         );
+    }
+
+    // === ContactList ===
+
+    #[test]
+    fn test_contact_list_exact_email_match() {
+        let rs = RuleSet(vec![Rule::ContactList {
+            contacts: vec!["alice@example.com".into()],
+        }]);
+        assert_eq!(
+            rs.evaluate(&[addr("alice@example.com")], "", "", None),
+            RuleVerdict::Allow,
+        );
+    }
+
+    #[test]
+    fn test_contact_list_domain_match() {
+        let rs = RuleSet(vec![Rule::ContactList {
+            contacts: vec!["trusted.org".into()],
+        }]);
+        assert_eq!(
+            rs.evaluate(&[addr("anyone@trusted.org")], "", "", None),
+            RuleVerdict::Allow,
+        );
+    }
+
+    #[test]
+    fn test_contact_list_case_insensitive() {
+        let rs = RuleSet(vec![Rule::ContactList {
+            contacts: vec!["Alice@Example.COM".into()],
+        }]);
+        assert_eq!(
+            rs.evaluate(&[addr("alice@example.com")], "", "", None),
+            RuleVerdict::Allow,
+        );
+    }
+
+    #[test]
+    fn test_contact_list_empty_blocks_all() {
+        let rs = RuleSet(vec![Rule::ContactList { contacts: vec![] }]);
+        let v = rs.evaluate(&[addr("anyone@any.com")], "", "", None);
+        assert!(matches!(v, RuleVerdict::Block { rule, .. } if rule == "contact_list"));
+    }
+
+    #[test]
+    fn test_contact_list_no_match_blocks() {
+        let rs = RuleSet(vec![Rule::ContactList {
+            contacts: vec!["alice@example.com".into(), "trusted.org".into()],
+        }]);
+        let v = rs.evaluate(&[addr("bob@evil.com")], "", "", None);
+        assert!(matches!(v, RuleVerdict::Block { rule, .. } if rule == "contact_list"));
+    }
+
+    #[test]
+    fn test_contact_list_mixed_email_and_domain() {
+        let rs = RuleSet(vec![Rule::ContactList {
+            contacts: vec!["alice@example.com".into(), "trusted.org".into()],
+        }]);
+        assert_eq!(
+            rs.evaluate(&[addr("alice@example.com")], "", "", None),
+            RuleVerdict::Allow,
+        );
+        assert_eq!(
+            rs.evaluate(&[addr("bob@trusted.org")], "", "", None),
+            RuleVerdict::Allow,
+        );
+    }
+
+    #[test]
+    fn test_contact_list_serde_roundtrip() {
+        let rule = Rule::ContactList {
+            contacts: vec!["alice@example.com".into(), "trusted.org".into()],
+        };
+        let json = serde_json::to_string(&rule).unwrap();
+        let parsed: Rule = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, rule);
     }
 }

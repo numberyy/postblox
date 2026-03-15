@@ -39,6 +39,7 @@ pub struct Config {
     pub content_filter: ContentFilterConfig,
     #[serde(default = "default_dns_check_interval")]
     pub dns_check_interval_secs: u64,
+    pub encryption_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -175,6 +176,7 @@ impl Config {
                     "DNS_CHECK_INTERVAL_SECS",
                     default_dns_check_interval,
                 ),
+                encryption_key: std::env::var("POSTBLOX_ENCRYPTION_KEY").ok(),
             })
         }
     }

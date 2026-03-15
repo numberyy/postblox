@@ -22,35 +22,14 @@ pub async fn run(client: PostbloxClient) -> std::io::Result<()> {
         let request: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                let err_resp = json!({
-                    "jsonrpc": "2.0",
-                    "id": null,
-                    "error": { "code": -32700, "message": format!("parse error: {e}") }
-                });
-                write_response(&mut stdout, &err_resp).await?;
+                write_response(&mut stdout, &parse_error(e)).await?;
                 continue;
             }
         };
 
-        // notifications have no id — don't respond
-        if request.get("id").is_none() {
-            continue;
-        }
-
-        let id = request["id"].clone();
-        let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = request.get("params").cloned().unwrap_or(json!({}));
-
-        let response = match method {
-            "initialize" => handle_initialize(id, &params),
-            "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
-            "tools/list" => handle_tools_list(id),
-            "tools/call" => handle_tools_call(id.clone(), &params, &client).await,
-            _ => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32601, "message": format!("method not found: {method}") }
-            }),
+        let response = match dispatch_request(&request, &client).await {
+            Some(resp) => resp,
+            None => continue,
         };
 
         write_response(&mut stdout, &response).await?;
@@ -100,6 +79,33 @@ async fn handle_tools_call(id: Value, params: &Value, client: &PostbloxClient) -
             }
         }),
     }
+}
+
+/// Dispatch a parsed JSON-RPC request. Returns None for notifications (no id).
+pub(crate) async fn dispatch_request(request: &Value, client: &PostbloxClient) -> Option<Value> {
+    request.get("id")?;
+    let id = request["id"].clone();
+    let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = request.get("params").cloned().unwrap_or(json!({}));
+    Some(match method {
+        "initialize" => handle_initialize(id, &params),
+        "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
+        "tools/list" => handle_tools_list(id),
+        "tools/call" => handle_tools_call(id.clone(), &params, client).await,
+        _ => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32601, "message": format!("method not found: {method}") }
+        }),
+    })
+}
+
+pub(crate) fn parse_error(e: serde_json::Error) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": { "code": -32700, "message": format!("parse error: {e}") }
+    })
 }
 
 async fn write_response(stdout: &mut tokio::io::Stdout, response: &Value) -> std::io::Result<()> {

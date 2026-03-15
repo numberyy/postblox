@@ -101,6 +101,31 @@ async fn main() -> anyhow::Result<()> {
     }
     let hooks: std::sync::Arc<[hooks::HookConfig]> = raw_hooks.into();
 
+    let encryption_key = match &config.encryption_key {
+        Some(hex) => {
+            if hex.len() != 64 {
+                anyhow::bail!(
+                    "POSTBLOX_ENCRYPTION_KEY must be exactly 64 hex characters (32 bytes)"
+                );
+            }
+            let bytes = db::linked_accounts::hex_decode(hex)
+                .map_err(|e| anyhow::anyhow!("POSTBLOX_ENCRYPTION_KEY invalid hex: {e}"))?;
+            let key: [u8; 32] = bytes.try_into().map_err(|_| {
+                anyhow::anyhow!("POSTBLOX_ENCRYPTION_KEY must decode to exactly 32 bytes")
+            })?;
+            tracing::info!("encryption key configured for IMAP password storage");
+            Some(key)
+        }
+        None => {
+            tracing::info!(
+                "no encryption key configured, linked account creation will be disabled"
+            );
+            None
+        }
+    };
+
+    let ws_token_store = std::sync::Arc::new(api::ws_token::WsTokenStore::new());
+
     let state = api::AppState {
         pool,
         stalwart: stalwart_client,
@@ -126,7 +151,21 @@ async fn main() -> anyhow::Result<()> {
             syntax_set: syntect::parsing::SyntaxSet::load_defaults_newlines(),
             theme_set: syntect::highlighting::ThemeSet::load_defaults(),
         }),
+        encryption_key,
+        ws_token_store: ws_token_store.clone(),
     };
+
+    // Periodic cleanup of expired WS tokens
+    {
+        let store = ws_token_store;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                store.cleanup_expired();
+            }
+        });
+    }
+
     if config.dns_check_interval_secs > 0 {
         if let Some(ref stalwart) = state.stalwart {
             let pool = state.pool.clone();

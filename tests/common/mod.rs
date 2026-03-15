@@ -45,6 +45,8 @@ pub fn test_state(pool: PgPool) -> api::AppState {
             syntax_set: syntect::parsing::SyntaxSet::load_defaults_newlines(),
             theme_set: syntect::highlighting::ThemeSet::load_defaults(),
         }),
+        encryption_key: None,
+        ws_token_store: Arc::new(api::ws_token::WsTokenStore::new()),
     }
 }
 
