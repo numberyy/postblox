@@ -201,9 +201,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("appr-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
         let cm = crate::models::CreateMessage {
             inbox_id: inbox.id,
             thread_id: None,

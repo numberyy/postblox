@@ -380,6 +380,11 @@ async fn message_detail(
 
     let attachment_data = attachments_to_value(&attachments, inbox_id, message.id);
 
+    let html_body = message
+        .html_body
+        .as_deref()
+        .map(|h| rewrite_cid_urls(h, &attachments, inbox_id, message.id));
+
     let to_addrs = message
         .to_addrs
         .as_array()
@@ -401,7 +406,7 @@ async fn message_detail(
                 from_addr => message.from_addr,
                 subject => message.subject,
                 text_body => message.text_body,
-                html_body => message.html_body,
+                html_body => html_body,
                 direction => message.direction,
                 created_at => message.created_at.format("%Y-%m-%d %H:%M").to_string(),
                 slop_score => message.slop_score,
@@ -452,17 +457,22 @@ async fn thread_view(
     let msg_data: Vec<minijinja::Value> = messages
         .iter()
         .map(|m| {
-            let atts = att_by_msg
-                .get(&m.id)
-                .map(|v| attachments_to_value_refs(v, m.inbox_id, m.id))
+            let msg_atts = att_by_msg.get(&m.id);
+            let atts = msg_atts
+                .map(|v| attachments_to_value(v, m.inbox_id, m.id))
                 .unwrap_or_default();
+            let html_body = m.html_body.as_deref().map(|h| {
+                let refs: Vec<&crate::models::Attachment> =
+                    msg_atts.map(|v| v.to_vec()).unwrap_or_default();
+                rewrite_cid_urls(h, &refs, m.inbox_id, m.id)
+            });
             minijinja::context! {
                 id => m.id.to_string(),
                 inbox_id => m.inbox_id.to_string(),
                 from_addr => m.from_addr,
                 subject => m.subject,
                 text_body => m.text_body,
-                html_body => m.html_body,
+                html_body => html_body,
                 direction => m.direction,
                 slop_score => m.slop_score,
                 created_at => m.created_at.format("%Y-%m-%d %H:%M").to_string(),
@@ -1265,38 +1275,14 @@ fn format_size(bytes: i64) -> String {
 }
 
 fn attachments_to_value(
-    attachments: &[crate::models::Attachment],
+    attachments: &[impl std::borrow::Borrow<crate::models::Attachment>],
     inbox_id: Uuid,
     message_id: Uuid,
 ) -> Vec<minijinja::Value> {
     attachments
         .iter()
         .map(|a| {
-            let url = format!(
-                "/dashboard/inboxes/{}/messages/{}/attachments/{}",
-                inbox_id, message_id, a.id
-            );
-            let is_image = a.content_type.starts_with("image/");
-            minijinja::context! {
-                id => a.id.to_string(),
-                filename => a.filename,
-                content_type => a.content_type,
-                size => format_size(a.size_bytes),
-                url => url,
-                is_image => is_image,
-            }
-        })
-        .collect()
-}
-
-fn attachments_to_value_refs(
-    attachments: &[&crate::models::Attachment],
-    inbox_id: Uuid,
-    message_id: Uuid,
-) -> Vec<minijinja::Value> {
-    attachments
-        .iter()
-        .map(|a| {
+            let a = a.borrow();
             let url = format!(
                 "/dashboard/inboxes/{}/messages/{}/attachments/{}",
                 inbox_id, message_id, a.id
@@ -1320,6 +1306,27 @@ fn approval_row(id: Uuid, color: &str, bold: bool, msg: &str) -> Response {
         "<tr id=\"approval-{id}\"><td colspan=\"5\" style=\"color:{color};{weight}\">{msg}</td></tr>"
     ))
     .into_response()
+}
+
+fn rewrite_cid_urls(
+    html: &str,
+    attachments: &[impl std::borrow::Borrow<crate::models::Attachment>],
+    inbox_id: Uuid,
+    message_id: Uuid,
+) -> String {
+    let mut result = html.to_string();
+    for att in attachments {
+        let att = att.borrow();
+        if let Some(cid) = &att.content_id {
+            let cid_url = format!("cid:{cid}");
+            let proxy_url = format!(
+                "/dashboard/inboxes/{}/messages/{}/attachments/{}",
+                inbox_id, message_id, att.id
+            );
+            result = result.replace(&cid_url, &proxy_url);
+        }
+    }
+    result
 }
 
 fn not_found() -> Response {
@@ -1586,6 +1593,7 @@ mod tests {
             size_bytes: 2048,
             storage_key: format!("{msg_id}/photo.png"),
             disposition: crate::models::Disposition::Inline,
+            content_id: None,
             created_at: Utc::now(),
         }];
 
@@ -1620,6 +1628,7 @@ mod tests {
             size_bytes: 1048576,
             storage_key: format!("{msg_id}/report.pdf"),
             disposition: crate::models::Disposition::Attachment,
+            content_id: None,
             created_at: Utc::now(),
         }];
 
@@ -1636,7 +1645,8 @@ mod tests {
 
     #[test]
     fn test_attachments_to_value_empty() {
-        let values = attachments_to_value(&[], Uuid::new_v4(), Uuid::new_v4());
+        let empty: &[crate::models::Attachment] = &[];
+        let values = attachments_to_value(empty, Uuid::new_v4(), Uuid::new_v4());
         assert!(values.is_empty());
     }
 }

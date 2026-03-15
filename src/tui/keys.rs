@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::config::KeybindingOverrides;
 use crate::state::{Mode, Panel};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,9 +33,22 @@ pub enum Action {
     OpenAttachment,
     NextAttachment,
     PrevAttachment,
+    AddAttachment,
+    RemoveAttachment,
 }
 
+#[cfg(test)]
 pub fn resolve(key: KeyEvent, mode: Mode, focus: Panel, vim_mode: bool) -> Option<Action> {
+    resolve_with_overrides(key, mode, focus, vim_mode, None)
+}
+
+pub fn resolve_with_overrides(
+    key: KeyEvent,
+    mode: Mode,
+    focus: Panel,
+    vim_mode: bool,
+    overrides: Option<&KeybindingOverrides>,
+) -> Option<Action> {
     // Ctrl combos — always active, all modes
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
@@ -43,6 +57,8 @@ pub fn resolve(key: KeyEvent, mode: Mode, focus: Panel, vim_mode: bool) -> Optio
             KeyCode::Char('r') if mode == Mode::Normal => Some(Action::Reply),
             KeyCode::Char('f') if mode == Mode::Normal => Some(Action::StartSearch),
             KeyCode::Char('e') if mode == Mode::Compose => Some(Action::OpenEditor),
+            KeyCode::Char('a') if mode == Mode::Compose => Some(Action::AddAttachment),
+            KeyCode::Char('d') if mode == Mode::Compose => Some(Action::RemoveAttachment),
             KeyCode::Enter if mode == Mode::Compose => Some(Action::Send),
             _ => None,
         };
@@ -92,6 +108,13 @@ pub fn resolve(key: KeyEvent, mode: Mode, focus: Panel, vim_mode: bool) -> Optio
         return universal;
     }
 
+    // Check user overrides before vim defaults
+    if let KeyCode::Char(c) = key.code {
+        if let Some(action) = resolve_override(c, focus, overrides) {
+            return Some(action);
+        }
+    }
+
     // Vim layer
     if !vim_mode {
         return None;
@@ -119,6 +142,36 @@ pub fn resolve(key: KeyEvent, mode: Mode, focus: Panel, vim_mode: bool) -> Optio
         KeyCode::Char(c @ '1'..='9') => Some(Action::QuickJump(c as u8 - b'0')),
         _ => None,
     }
+}
+
+fn resolve_override(
+    c: char,
+    focus: Panel,
+    overrides: Option<&KeybindingOverrides>,
+) -> Option<Action> {
+    let kb = overrides?;
+    for (action_name, &bound_char) in &kb.0 {
+        if bound_char != c {
+            continue;
+        }
+        let action = match action_name.as_str() {
+            "quit" => Some(Action::Quit),
+            "compose" => Some(Action::Compose),
+            "reply" => Some(Action::Reply),
+            "search" => Some(Action::StartSearch),
+            "refresh" => Some(Action::Refresh),
+            "approve" if focus == Panel::MessageList => Some(Action::ApproveSelected),
+            "reject" if focus == Panel::MessageList => Some(Action::RejectSelected),
+            "slop_toggle" => Some(Action::SlopToggle),
+            "help" => Some(Action::ShowHelp),
+            "briefing" => Some(Action::ShowBriefing),
+            _ => None,
+        };
+        if action.is_some() {
+            return action;
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -585,6 +638,148 @@ mod tests {
         assert_eq!(
             resolve(key(KeyCode::Char('o')), Mode::Normal, Panel::Preview, false),
             None
+        );
+    }
+
+    #[test]
+    fn test_ctrl_a_add_attachment_in_compose() {
+        assert_eq!(
+            resolve(
+                ctrl(KeyCode::Char('a')),
+                Mode::Compose,
+                Panel::Preview,
+                false
+            ),
+            Some(Action::AddAttachment)
+        );
+    }
+
+    #[test]
+    fn test_ctrl_a_not_in_normal() {
+        assert_eq!(
+            resolve(
+                ctrl(KeyCode::Char('a')),
+                Mode::Normal,
+                Panel::Sidebar,
+                false
+            ),
+            None
+        );
+    }
+
+    // Override tests
+    #[test]
+    fn test_override_replaces_vim_key() {
+        use crate::config::KeybindingOverrides;
+        use std::collections::HashMap;
+
+        let mut map = HashMap::new();
+        map.insert("quit".to_string(), 'x');
+        let kb = KeybindingOverrides(map);
+
+        assert_eq!(
+            resolve_with_overrides(
+                key(KeyCode::Char('x')),
+                Mode::Normal,
+                Panel::Sidebar,
+                true,
+                Some(&kb)
+            ),
+            Some(Action::Quit)
+        );
+    }
+
+    #[test]
+    fn test_override_without_vim_mode() {
+        use crate::config::KeybindingOverrides;
+        use std::collections::HashMap;
+
+        let mut map = HashMap::new();
+        map.insert("compose".to_string(), 'n');
+        let kb = KeybindingOverrides(map);
+
+        // Without vim mode, 'n' would normally do nothing
+        assert_eq!(
+            resolve_with_overrides(
+                key(KeyCode::Char('n')),
+                Mode::Normal,
+                Panel::Sidebar,
+                false,
+                Some(&kb)
+            ),
+            Some(Action::Compose)
+        );
+    }
+
+    #[test]
+    fn test_override_none_falls_through_to_vim() {
+        use crate::config::KeybindingOverrides;
+
+        let kb = KeybindingOverrides::default();
+
+        // No overrides, vim mode 'j' still works
+        assert_eq!(
+            resolve_with_overrides(
+                key(KeyCode::Char('j')),
+                Mode::Normal,
+                Panel::Sidebar,
+                true,
+                Some(&kb)
+            ),
+            Some(Action::MoveDown)
+        );
+    }
+
+    #[test]
+    fn test_override_approve_only_in_message_list() {
+        use crate::config::KeybindingOverrides;
+        use std::collections::HashMap;
+
+        let mut map = HashMap::new();
+        map.insert("approve".to_string(), 'A');
+        let kb = KeybindingOverrides(map);
+
+        assert_eq!(
+            resolve_with_overrides(
+                key(KeyCode::Char('A')),
+                Mode::Normal,
+                Panel::MessageList,
+                false,
+                Some(&kb)
+            ),
+            Some(Action::ApproveSelected)
+        );
+        assert_eq!(
+            resolve_with_overrides(
+                key(KeyCode::Char('A')),
+                Mode::Normal,
+                Panel::Sidebar,
+                false,
+                Some(&kb)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_override_universal_keys_take_priority() {
+        use crate::config::KeybindingOverrides;
+        use std::collections::HashMap;
+
+        // Even with override, Esc should still be Back
+        let mut map = HashMap::new();
+        map.insert("quit".to_string(), 'q');
+        let kb = KeybindingOverrides(map);
+
+        assert_eq!(
+            resolve_with_overrides(
+                key(KeyCode::Esc),
+                Mode::Normal,
+                Panel::Sidebar,
+                false,
+                Some(&kb)
+            ),
+            Some(Action::Back)
         );
     }
 }

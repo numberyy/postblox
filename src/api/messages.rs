@@ -264,6 +264,11 @@ pub async fn send_with_attachments(
                     .content_type()
                     .unwrap_or("application/octet-stream")
                     .to_string();
+                if let crate::core::content_filter::FilterResult::Block(reason) =
+                    state.content_filter.check(&content_type)
+                {
+                    return Err(ApiError::BadRequest(reason));
+                }
                 let data = field
                     .bytes()
                     .await
@@ -277,7 +282,7 @@ pub async fn send_with_attachments(
                 files.push(UploadedFile {
                     filename,
                     content_type,
-                    data: data.to_vec(),
+                    data: data.into(),
                 });
             }
             other => {
@@ -388,6 +393,7 @@ pub async fn send_with_attachments(
                 size_bytes: file.data.len() as i64,
                 storage_key,
                 disposition: crate::models::Disposition::Attachment,
+                content_id: None,
             },
         )
         .await
@@ -400,6 +406,7 @@ pub async fn send_with_attachments(
             filename,
             content_type: file.content_type,
             data: file.data,
+            content_id: None,
         });
     }
 

@@ -8,9 +8,9 @@ pub async fn create(
     attachment: &CreateAttachment,
 ) -> Result<Attachment, sqlx::Error> {
     sqlx::query_as(
-        "INSERT INTO attachments (message_id, filename, content_type, size_bytes, storage_key, disposition) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
-         RETURNING id, message_id, filename, content_type, size_bytes, storage_key, disposition, created_at",
+        "INSERT INTO attachments (message_id, filename, content_type, size_bytes, storage_key, disposition, content_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+         RETURNING id, message_id, filename, content_type, size_bytes, storage_key, disposition, content_id, created_at",
     )
     .bind(attachment.message_id)
     .bind(&attachment.filename)
@@ -18,6 +18,7 @@ pub async fn create(
     .bind(attachment.size_bytes)
     .bind(&attachment.storage_key)
     .bind(attachment.disposition)
+    .bind(&attachment.content_id)
     .fetch_one(pool)
     .await
 }
@@ -27,7 +28,7 @@ pub async fn list_by_message(
     message_id: Uuid,
 ) -> Result<Vec<Attachment>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, message_id, filename, content_type, size_bytes, storage_key, disposition, created_at \
+        "SELECT id, message_id, filename, content_type, size_bytes, storage_key, disposition, content_id, created_at \
          FROM attachments WHERE message_id = $1 ORDER BY created_at",
     )
     .bind(message_id)
@@ -43,7 +44,7 @@ pub async fn list_by_message_ids(
         return Ok(Vec::new());
     }
     sqlx::query_as(
-        "SELECT id, message_id, filename, content_type, size_bytes, storage_key, disposition, created_at \
+        "SELECT id, message_id, filename, content_type, size_bytes, storage_key, disposition, content_id, created_at \
          FROM attachments WHERE message_id = ANY($1) ORDER BY created_at",
     )
     .bind(message_ids)
@@ -53,7 +54,7 @@ pub async fn list_by_message_ids(
 
 pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Attachment>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, message_id, filename, content_type, size_bytes, storage_key, disposition, created_at \
+        "SELECT id, message_id, filename, content_type, size_bytes, storage_key, disposition, content_id, created_at \
          FROM attachments WHERE id = $1",
     )
     .bind(id)
@@ -79,9 +80,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("attach-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
         let msg = crate::db::messages::create(
             pool,
             &crate::models::CreateMessage {
@@ -121,6 +128,7 @@ mod tests {
                 size_bytes: 1024,
                 storage_key: format!("{}/report.pdf", msg.id),
                 disposition: crate::models::Disposition::Attachment,
+                content_id: None,
             },
         )
         .await
@@ -151,6 +159,7 @@ mod tests {
                 size_bytes: 100,
                 storage_key: format!("{}/a.txt", msg.id),
                 disposition: crate::models::Disposition::Attachment,
+                content_id: None,
             },
         )
         .await
@@ -165,6 +174,7 @@ mod tests {
                 size_bytes: 2048,
                 storage_key: format!("{}/b.png", msg.id),
                 disposition: crate::models::Disposition::Inline,
+                content_id: None,
             },
         )
         .await
@@ -198,6 +208,7 @@ mod tests {
                 size_bytes: 50,
                 storage_key: format!("{}/del.txt", msg.id),
                 disposition: crate::models::Disposition::Attachment,
+                content_id: None,
             },
         )
         .await
@@ -229,6 +240,7 @@ mod tests {
                 size_bytes: 10,
                 storage_key: format!("{}/cascade.txt", msg.id),
                 disposition: crate::models::Disposition::Attachment,
+                content_id: None,
             },
         )
         .await

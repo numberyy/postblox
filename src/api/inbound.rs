@@ -34,6 +34,43 @@ pub async fn process_inbound_raw(state: &AppState, body: &[u8]) -> Result<Status
         }
     };
 
+    // Content-type filter: reject if any attachment is blocked
+    for att in &parsed.attachments {
+        if let crate::core::content_filter::FilterResult::Block(reason) =
+            state.content_filter.check(&att.content_type)
+        {
+            tracing::warn!(
+                content_type = %att.content_type,
+                filename = %att.filename,
+                "inbound email rejected: {reason}"
+            );
+            return Ok(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+
+    // before_receive hooks: run after parse, before storage (fail-closed)
+    let att_info: Vec<serde_json::Value> = parsed
+        .attachments
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "filename": a.filename,
+                "content_type": a.content_type,
+                "size": a.data.len(),
+            })
+        })
+        .collect();
+    let hook_data = serde_json::json!({
+        "from": parsed.from,
+        "subject": parsed.subject,
+        "content_type": parsed.text_body.as_ref().map(|_| "text/plain").unwrap_or("unknown"),
+        "attachments": att_info,
+    });
+    if let Err(e) = crate::hooks::run_before_receive_hooks(&state.hooks, &hook_data).await {
+        tracing::warn!("inbound email rejected by before_receive hook: {e}");
+        return Ok(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
     let mut email_refs: Vec<&str> = parsed.to.iter().map(String::as_str).collect();
     email_refs.extend(parsed.cc.iter().map(String::as_str));
     let inbox = crate::db::inboxes::get_first_by_emails(&state.pool, &email_refs)
@@ -147,6 +184,7 @@ pub async fn process_inbound_raw(state: &AppState, body: &[u8]) -> Result<Status
                     size_bytes: att.data.len() as i64,
                     storage_key: storage_key.clone(),
                     disposition: att.disposition,
+                    content_id: att.content_id.clone(),
                 };
                 if let Err(e) = crate::db::attachments::create(&state.pool, &create_att).await {
                     tracing::error!(message_id = %msg.id, filename = %att.filename, "failed to store attachment metadata: {e}");
@@ -255,10 +293,7 @@ pub async fn process_inbound_raw(state: &AppState, body: &[u8]) -> Result<Status
     });
 
     if let Some(ref provider) = state.embedding_provider {
-        let text = cm
-            .extracted_text
-            .or(cm.text_body)
-            .unwrap_or_default();
+        let text = cm.extracted_text.or(cm.text_body).unwrap_or_default();
         if !text.is_empty() {
             let pool = state.pool.clone();
             let provider = provider.clone();

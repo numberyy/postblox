@@ -60,9 +60,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("perm-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
 
         let perm = upsert(&pool, inbox.id, SendMode::Approval, &serde_json::json!([]))
             .await
@@ -80,9 +86,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("perm-up-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
 
         let p1 = upsert(&pool, inbox.id, SendMode::Approval, &serde_json::json!([]))
             .await
@@ -108,9 +120,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("perm-get-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
 
         upsert(&pool, inbox.id, SendMode::Shadow, &serde_json::json!([]))
             .await
@@ -136,9 +154,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("perm-cas-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
 
         upsert(
             &pool,
@@ -162,9 +186,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("perm-uniq-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
 
         // Two upserts produce the same row, not two rows
         upsert(&pool, inbox.id, SendMode::Approval, &serde_json::json!([]))
@@ -198,9 +228,15 @@ mod tests {
             SendMode::Autonomous,
         ] {
             let email = format!("mode-{}-{}@example.com", mode, Uuid::new_v4());
-            let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
-                .await
-                .unwrap();
+            let inbox = crate::db::inboxes::create(
+                &pool,
+                org.id,
+                &email,
+                None,
+                crate::models::InboxType::Native,
+            )
+            .await
+            .unwrap();
 
             let perm = upsert(&pool, inbox.id, mode, &serde_json::json!([]))
                 .await

@@ -49,12 +49,11 @@ pub async fn store_attachment(
 }
 
 fn validate_storage_key(storage_key: &str) -> Result<(), StorageError> {
-    let parts: Vec<&str> = storage_key.splitn(2, '/').collect();
-    if parts.len() != 2 {
+    let Some((msg_id, filename)) = storage_key.split_once('/') else {
         return Err(StorageError::InvalidKey(storage_key.to_string()));
-    }
-    validate_filename(parts[0])?;
-    validate_filename(parts[1])?;
+    };
+    validate_filename(msg_id)?;
+    validate_filename(filename)?;
     Ok(())
 }
 

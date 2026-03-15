@@ -9,6 +9,7 @@ pub struct ParsedAttachment {
     pub content_type: String,
     pub data: Vec<u8>,
     pub disposition: Disposition,
+    pub content_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,13 +115,20 @@ pub fn parse(raw: &[u8]) -> Result<ParsedEmail, MailError> {
                 format!("attachment_{i}.{ext}")
             });
 
-        let disposition = if is_inline { Disposition::Inline } else { Disposition::Attachment };
+        let disposition = if is_inline {
+            Disposition::Inline
+        } else {
+            Disposition::Attachment
+        };
+
+        let content_id = part.content_id().map(|s| strip_angles(s).to_string());
 
         attachments.push(ParsedAttachment {
             filename,
             content_type,
             data,
             disposition,
+            content_id,
         });
     }
 
@@ -436,6 +444,31 @@ Content-Transfer-Encoding: base64\r\n\r\nJVBERi0=\r\n\
     #[test]
     fn test_mime_to_ext_unknown_type() {
         assert_eq!(mime_to_ext("application/x-custom"), "bin");
+    }
+
+    #[test]
+    fn test_parse_cid_attachment_extracts_content_id() {
+        let raw = b"From: a@b.com\r\nTo: x@y.com\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/related; boundary=\"rel\"\r\n\r\n\
+--rel\r\nContent-Type: text/html\r\n\r\n<html><img src=\"cid:logo123@example.com\"></html>\r\n\
+--rel\r\nContent-Type: image/png\r\nContent-Disposition: inline; filename=\"logo.png\"\r\n\
+Content-ID: <logo123@example.com>\r\n\
+Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
+--rel--\r\n";
+        let email = parse(raw).unwrap();
+        assert_eq!(email.attachments.len(), 1);
+        assert_eq!(
+            email.attachments[0].content_id.as_deref(),
+            Some("logo123@example.com")
+        );
+        assert_eq!(email.attachments[0].disposition, Disposition::Inline);
+    }
+
+    #[test]
+    fn test_parse_attachment_without_cid_has_none() {
+        let email = parse(&fixture("attachment_multipart.eml")).unwrap();
+        assert_eq!(email.attachments.len(), 1);
+        assert!(email.attachments[0].content_id.is_none());
     }
 
     #[test]

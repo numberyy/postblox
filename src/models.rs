@@ -932,7 +932,10 @@ impl sqlx::Encode<'_, sqlx::Postgres> for InboxType {
         buf: &mut sqlx::postgres::PgArgumentBuffer,
     ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
         <&str as sqlx::Encode<sqlx::Postgres>>::encode(
-            match self { Self::Native => "native", Self::Relay => "relay" },
+            match self {
+                Self::Native => "native",
+                Self::Relay => "relay",
+            },
             buf,
         )
     }
@@ -988,7 +991,10 @@ impl sqlx::Encode<'_, sqlx::Postgres> for Disposition {
         buf: &mut sqlx::postgres::PgArgumentBuffer,
     ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
         <&str as sqlx::Encode<sqlx::Postgres>>::encode(
-            match self { Self::Attachment => "attachment", Self::Inline => "inline" },
+            match self {
+                Self::Attachment => "attachment",
+                Self::Inline => "inline",
+            },
             buf,
         )
     }
@@ -1047,7 +1053,11 @@ impl sqlx::Encode<'_, sqlx::Postgres> for DomainStatus {
         buf: &mut sqlx::postgres::PgArgumentBuffer,
     ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
         <&str as sqlx::Encode<sqlx::Postgres>>::encode(
-            match self { Self::Pending => "pending", Self::Verified => "verified", Self::Failed => "failed" },
+            match self {
+                Self::Pending => "pending",
+                Self::Verified => "verified",
+                Self::Failed => "failed",
+            },
             buf,
         )
     }
@@ -1081,6 +1091,7 @@ pub struct Attachment {
     pub size_bytes: i64,
     pub storage_key: String,
     pub disposition: Disposition,
+    pub content_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -1092,6 +1103,7 @@ pub struct CreateAttachment {
     pub size_bytes: i64,
     pub storage_key: String,
     pub disposition: Disposition,
+    pub content_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -2005,6 +2017,7 @@ mod tests {
             size_bytes: 1048576,
             storage_key: "msg-123/report.pdf".into(),
             disposition: Disposition::Attachment,
+            content_id: None,
             created_at: Utc::now(),
         };
         let json = serde_json::to_string(&att).unwrap();
@@ -2021,6 +2034,7 @@ mod tests {
             size_bytes: 512,
             storage_key: "msg-456/data.csv".into(),
             disposition: Disposition::Attachment,
+            content_id: None,
         };
         let json = serde_json::to_string(&ca).unwrap();
         let back: CreateAttachment = serde_json::from_str(&json).unwrap();
@@ -2037,6 +2051,7 @@ mod tests {
             size_bytes: 2048,
             storage_key: "msg-789/logo.png".into(),
             disposition: Disposition::Inline,
+            content_id: None,
             created_at: Utc::now(),
         };
         let json = serde_json::to_value(&att).unwrap();

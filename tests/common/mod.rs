@@ -40,6 +40,7 @@ pub fn test_state(pool: PgPool) -> api::AppState {
         rate_limiter: Arc::new(api::rate_limit::RateLimiter::new(1000, 10000)),
         attachment_storage_path: std::env::temp_dir().join("postblox-test-attachments"),
         max_attachment_size_bytes: 25 * 1024 * 1024,
+        content_filter: postblox::core::content_filter::ContentFilter::new(None, None),
     }
 }
 

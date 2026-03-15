@@ -181,10 +181,15 @@ mod tests {
         let name = format!("{}.example.com", Uuid::new_v4());
         let domain = create(&pool, org.id, &name).await.unwrap();
 
-        let updated = update_status(&pool, domain.id, DomainStatus::Verified, Some("principal-123"))
-            .await
-            .unwrap()
-            .unwrap();
+        let updated = update_status(
+            &pool,
+            domain.id,
+            DomainStatus::Verified,
+            Some("principal-123"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(updated.status, DomainStatus::Verified);
         assert_eq!(
             updated.stalwart_principal_id.as_deref(),

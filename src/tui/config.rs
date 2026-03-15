@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -35,6 +36,22 @@ struct RawTui {
     theme: Option<String>,
     vim_mode: Option<bool>,
     download_dir: Option<String>,
+    #[serde(default)]
+    keybindings: RawKeybindings,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RawKeybindings {
+    quit: Option<String>,
+    compose: Option<String>,
+    reply: Option<String>,
+    search: Option<String>,
+    refresh: Option<String>,
+    approve: Option<String>,
+    reject: Option<String>,
+    slop_toggle: Option<String>,
+    help: Option<String>,
+    briefing: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +61,43 @@ pub struct TuiConfig {
     pub theme: String,
     pub vim_mode: bool,
     pub download_dir: PathBuf,
+    pub keybindings: KeybindingOverrides,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct KeybindingOverrides(pub HashMap<String, char>);
+
+impl KeybindingOverrides {
+    fn from_raw(raw: RawKeybindings) -> Self {
+        let mut map = HashMap::new();
+        let pairs = [
+            ("quit", raw.quit),
+            ("compose", raw.compose),
+            ("reply", raw.reply),
+            ("search", raw.search),
+            ("refresh", raw.refresh),
+            ("approve", raw.approve),
+            ("reject", raw.reject),
+            ("slop_toggle", raw.slop_toggle),
+            ("help", raw.help),
+            ("briefing", raw.briefing),
+        ];
+        for (action, val) in pairs {
+            if let Some(s) = val {
+                if let Some(c) = s.chars().next() {
+                    if s.chars().count() == 1 {
+                        map.insert(action.to_string(), c);
+                    }
+                }
+            }
+        }
+        Self(map)
+    }
+
+    #[cfg(test)]
+    pub fn get(&self, action: &str) -> Option<char> {
+        self.0.get(action).copied()
+    }
 }
 
 impl TuiConfig {
@@ -80,12 +134,15 @@ impl TuiConfig {
             .map(PathBuf::from)
             .unwrap_or_else(default_download_dir);
 
+        let keybindings = KeybindingOverrides::from_raw(raw.tui.keybindings);
+
         Ok(Self {
             server_url,
             api_key,
             theme: raw.tui.theme.unwrap_or_else(|| "nord".into()),
             vim_mode: raw.tui.vim_mode.unwrap_or(true),
             download_dir,
+            keybindings,
         })
     }
 
@@ -239,5 +296,88 @@ download_dir = "/tmp/my-downloads"
         )
         .unwrap();
         assert_eq!(raw.tui.download_dir.unwrap(), "/tmp/my-downloads");
+    }
+
+    #[test]
+    fn test_keybindings_default_empty() {
+        let raw: RawConfig = toml::from_str(
+            r#"
+[server]
+url = "http://localhost:3000"
+api_key = "k"
+"#,
+        )
+        .unwrap();
+        let kb = KeybindingOverrides::from_raw(raw.tui.keybindings);
+        assert!(kb.0.is_empty());
+    }
+
+    #[test]
+    fn test_keybindings_custom_overrides() {
+        let raw: RawConfig = toml::from_str(
+            r#"
+[server]
+url = "http://localhost:3000"
+api_key = "k"
+
+[tui.keybindings]
+quit = "x"
+compose = "n"
+refresh = "R"
+"#,
+        )
+        .unwrap();
+        let kb = KeybindingOverrides::from_raw(raw.tui.keybindings);
+        assert_eq!(kb.get("quit"), Some('x'));
+        assert_eq!(kb.get("compose"), Some('n'));
+        assert_eq!(kb.get("refresh"), Some('R'));
+        assert_eq!(kb.get("search"), None);
+    }
+
+    #[test]
+    fn test_keybindings_ignores_multichar() {
+        let raw: RawConfig = toml::from_str(
+            r#"
+[server]
+url = "http://localhost:3000"
+api_key = "k"
+
+[tui.keybindings]
+quit = "qq"
+compose = "c"
+"#,
+        )
+        .unwrap();
+        let kb = KeybindingOverrides::from_raw(raw.tui.keybindings);
+        assert_eq!(kb.get("quit"), None);
+        assert_eq!(kb.get("compose"), Some('c'));
+    }
+
+    #[test]
+    fn test_keybindings_all_actions() {
+        let raw: RawConfig = toml::from_str(
+            r#"
+[server]
+url = "http://localhost:3000"
+api_key = "k"
+
+[tui.keybindings]
+quit = "Q"
+compose = "C"
+reply = "R"
+search = "S"
+refresh = "F"
+approve = "A"
+reject = "N"
+slop_toggle = "T"
+help = "H"
+briefing = "B"
+"#,
+        )
+        .unwrap();
+        let kb = KeybindingOverrides::from_raw(raw.tui.keybindings);
+        assert_eq!(kb.0.len(), 10);
+        assert_eq!(kb.get("quit"), Some('Q'));
+        assert_eq!(kb.get("briefing"), Some('B'));
     }
 }

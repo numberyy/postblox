@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io;
 use std::time::Duration;
 
@@ -102,6 +103,7 @@ enum Command {
         to: String,
         subject: String,
         body: String,
+        attachments: Vec<PathBuf>,
     },
     Approve(Uuid),
     Reject(Uuid),
@@ -179,6 +181,7 @@ pub struct App {
 
     // Config
     download_dir: PathBuf,
+    keybinding_overrides: crate::config::KeybindingOverrides,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +233,7 @@ impl App {
             known_attachment_messages: std::collections::HashSet::new(),
             editor_requested: false,
             download_dir: config.download_dir.clone(),
+            keybinding_overrides: config.keybindings.clone(),
         }
     }
 
@@ -363,13 +367,26 @@ impl App {
                     to,
                     subject,
                     body,
+                    attachments,
                 } => {
-                    let result = client
-                        .send_message(inbox_id, &to, &subject, &body)
-                        .await
-                        .map(|_| ())
-                        .map_err(|e| e.to_string());
-                    let _ = tx.send(AppMsg::MessageSent(result)).await;
+                    let result = if attachments.is_empty() {
+                        client.send_message(inbox_id, &to, &subject, &body).await
+                    } else {
+                        client
+                            .send_message_with_attachments(
+                                inbox_id,
+                                &to,
+                                &subject,
+                                &body,
+                                &attachments,
+                            )
+                            .await
+                    };
+                    let _ = tx
+                        .send(AppMsg::MessageSent(
+                            result.map(|_| ()).map_err(|e| e.to_string()),
+                        ))
+                        .await;
                 }
                 Command::Approve(id) => {
                     let result = client
@@ -448,9 +465,11 @@ impl App {
                         }
                     }
                     if failed > 0 && all.is_empty() {
-                        let _ = tx.send(AppMsg::AllInboxMessagesLoaded(
-                            Err(format!("failed to load messages from {failed} inbox(es)"))
-                        )).await;
+                        let _ = tx
+                            .send(AppMsg::AllInboxMessagesLoaded(Err(format!(
+                                "failed to load messages from {failed} inbox(es)"
+                            ))))
+                            .await;
                     } else {
                         all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
                         let _ = tx.send(AppMsg::AllInboxMessagesLoaded(Ok(all))).await;
@@ -617,16 +636,14 @@ impl App {
                 let count = messages.len();
                 let mut body = String::new();
                 for (i, msg) in messages.iter().enumerate() {
-                    body.push_str(&format!(
-                        "── Message {}/{} ──────────────────────────────\n",
+                    let _ = writeln!(
+                        body,
+                        "── Message {}/{} ──────────────────────────────",
                         i + 1,
                         count
-                    ));
-                    body.push_str(&format!("From: {}\n", msg.from_addr));
-                    body.push_str(&format!(
-                        "Date: {}\n\n",
-                        msg.created_at.format("%Y-%m-%d %H:%M")
-                    ));
+                    );
+                    let _ = writeln!(body, "From: {}", msg.from_addr);
+                    let _ = writeln!(body, "Date: {}\n", msg.created_at.format("%Y-%m-%d %H:%M"));
                     let msg_text = msg_body_text(&msg.text_body, &msg.html_body);
                     body.push_str(&msg_text);
                     body.push_str("\n\n");
@@ -818,7 +835,13 @@ impl App {
 
     fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Option<Command> {
         if self.mode == Mode::Compose {
-            if let Some(action) = keys::resolve(key, self.mode, self.focus, self.vim_mode) {
+            if let Some(action) = keys::resolve_with_overrides(
+                key,
+                self.mode,
+                self.focus,
+                self.vim_mode,
+                Some(&self.keybinding_overrides),
+            ) {
                 match action {
                     Action::Back => {
                         self.compose.reset();
@@ -837,6 +860,12 @@ impl App {
                     Action::OpenEditor => {
                         self.editor_requested = true;
                     }
+                    Action::AddAttachment => {
+                        self.compose.start_attachment_input();
+                    }
+                    Action::RemoveAttachment => {
+                        self.compose.remove_last_attachment();
+                    }
                     Action::Quit => self.running = false,
                     _ => {}
                 }
@@ -847,7 +876,13 @@ impl App {
         }
 
         if self.mode == Mode::Search {
-            if let Some(action) = keys::resolve(key, self.mode, self.focus, self.vim_mode) {
+            if let Some(action) = keys::resolve_with_overrides(
+                key,
+                self.mode,
+                self.focus,
+                self.vim_mode,
+                Some(&self.keybinding_overrides),
+            ) {
                 match action {
                     Action::Back => {
                         self.search.clear();
@@ -901,7 +936,13 @@ impl App {
             return None;
         }
 
-        let action = keys::resolve(key, self.mode, self.focus, self.vim_mode)?;
+        let action = keys::resolve_with_overrides(
+            key,
+            self.mode,
+            self.focus,
+            self.vim_mode,
+            Some(&self.keybinding_overrides),
+        )?;
 
         match action {
             Action::Quit => self.running = false,
@@ -985,7 +1026,7 @@ impl App {
                     return self.handle_select();
                 }
             }
-            Action::OpenEditor => {}
+            Action::OpenEditor | Action::AddAttachment | Action::RemoveAttachment => {}
             Action::DownloadAttachment => {
                 return self.handle_download_attachment(false);
             }
@@ -1016,6 +1057,7 @@ impl App {
             to,
             subject,
             body,
+            attachments: self.compose.attachments.clone(),
         })
     }
 

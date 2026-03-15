@@ -1,5 +1,7 @@
 mod common;
 
+use std::sync::Arc;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -713,6 +715,7 @@ async fn test_attachment_cross_org_isolation() {
             size_bytes: 5,
             storage_key: "fake-key".into(),
             disposition: postblox::models::Disposition::Attachment,
+            content_id: None,
         },
     )
     .await
@@ -1266,4 +1269,800 @@ async fn test_audit_log_respects_org_boundary() {
         org_a_leaks.is_empty(),
         "org B should never see org A's audit entries"
     );
+}
+
+// ============================================================================
+// 10. Inbound Pipeline — Additional Coverage
+// ============================================================================
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_inbound_malformed_mime_returns_422() {
+    let pool = test_pool().await;
+    let state = test_state_with_inbound(pool);
+    let app = test_app(state);
+
+    let req = Request::post("/internal/stalwart/inbound")
+        .header("authorization", "Bearer test-inbound-token")
+        .body(Body::from("This is not valid MIME at all \x00\x01\x02"))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "malformed MIME should return 422, not panic"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_inbound_email_with_attachment_stores_metadata() {
+    let pool = test_pool().await;
+    let (org_id, _) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let mut state = test_state_with_inbound(pool.clone());
+    let att_dir = std::env::temp_dir().join(format!("postblox-test-att-{}", Uuid::new_v4()));
+    state.attachment_storage_path = att_dir;
+    let app = test_app(state);
+
+    let boundary = "----=_Part_123_456";
+    let mime = format!(
+        "From: sender@example.com\r\n\
+         To: {}\r\n\
+         Subject: Attachment test\r\n\
+         Message-ID: <att-test-1@example.com>\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\
+         \r\n\
+         --{boundary}\r\n\
+         Content-Type: text/plain\r\n\
+         \r\n\
+         Body text here.\r\n\
+         --{boundary}\r\n\
+         Content-Type: text/plain; name=\"test.txt\"\r\n\
+         Content-Disposition: attachment; filename=\"test.txt\"\r\n\
+         Content-Transfer-Encoding: base64\r\n\
+         \r\n\
+         SGVsbG8gV29ybGQ=\r\n\
+         --{boundary}--\r\n",
+        inbox.email,
+    );
+
+    let req = Request::post("/internal/stalwart/inbound")
+        .header("authorization", "Bearer test-inbound-token")
+        .body(Body::from(mime))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let msgs = postblox::db::messages::list_by_inbox(&pool, inbox.id, 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(msgs.len(), 1);
+
+    let attachments = postblox::db::attachments::list_by_message(&pool, msgs[0].id)
+        .await
+        .unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].filename, "test.txt");
+    assert!(attachments[0].size_bytes > 0);
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_inbound_slop_classification_sets_score() {
+    let pool = test_pool().await;
+    let (org_id, _) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let state = test_state_with_inbound(pool.clone());
+    let app = test_app(state);
+
+    let mime = raw_mime(&inbox.email, "Slop test", Some("slop-test-1@example.com"));
+    let req = Request::post("/internal/stalwart/inbound")
+        .header("authorization", "Bearer test-inbound-token")
+        .body(Body::from(mime))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Give slop update a moment (runs in-band, not spawned, so should be immediate)
+    let msgs = postblox::db::messages::list_by_inbox(&pool, inbox.id, 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(msgs.len(), 1);
+    // slop_score should be set (even if 0 for a clean message)
+    assert!(
+        msgs[0].slop_score.is_some(),
+        "inbound message should have slop_score set"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_inbound_reply_threads_to_existing() {
+    let pool = test_pool().await;
+    let (org_id, _) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let state = test_state_with_inbound(pool.clone());
+    let app = test_app(state);
+
+    // First message — creates a thread
+    let original_mid = "original-thread-1@example.com";
+    let mime1 = raw_mime(&inbox.email, "Thread start", Some(original_mid));
+    let req = Request::post("/internal/stalwart/inbound")
+        .header("authorization", "Bearer test-inbound-token")
+        .body(Body::from(mime1))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let msgs = postblox::db::messages::list_by_inbox(&pool, inbox.id, 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(msgs.len(), 1);
+    let original_thread_id = msgs[0].thread_id.unwrap();
+
+    // Reply with In-Reply-To referencing the original
+    let reply_mime = format!(
+        "From: other@example.com\r\n\
+         To: {}\r\n\
+         Subject: Re: Thread start\r\n\
+         Message-ID: <reply-to-thread-1@example.com>\r\n\
+         In-Reply-To: <{original_mid}>\r\n\
+         Content-Type: text/plain\r\n\
+         \r\n\
+         This is a reply.\r\n",
+        inbox.email,
+    );
+    let req = Request::post("/internal/stalwart/inbound")
+        .header("authorization", "Bearer test-inbound-token")
+        .body(Body::from(reply_mime))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let msgs = postblox::db::messages::list_by_inbox(&pool, inbox.id, 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(msgs.len(), 2);
+
+    let reply_msg = msgs
+        .iter()
+        .find(|m| m.message_id_header.as_deref() == Some("<reply-to-thread-1@example.com>"))
+        .expect("reply message should exist");
+    assert_eq!(
+        reply_msg.thread_id,
+        Some(original_thread_id),
+        "reply should be threaded to the same thread as the original"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_inbound_unknown_recipient_returns_404() {
+    let pool = test_pool().await;
+    let state = test_state_with_inbound(pool);
+    let app = test_app(state);
+
+    let mime = raw_mime(
+        "nobody@nonexistent-domain.example.com",
+        "Unknown recipient",
+        Some("unknown-1@example.com"),
+    );
+    let req = Request::post("/internal/stalwart/inbound")
+        .header("authorization", "Bearer test-inbound-token")
+        .body(Body::from(mime))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "email to unknown recipient should return 404"
+    );
+}
+
+// ============================================================================
+// 11. Send Validation — Permission Modes & Guard
+// ============================================================================
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_send_shadow_mode_returns_403() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    // Set inbox to shadow mode
+    postblox::db::permissions::upsert(
+        &pool,
+        inbox.id,
+        postblox::models::SendMode::Shadow,
+        &serde_json::json!([]),
+    )
+    .await
+    .unwrap();
+
+    let app = test_app(test_state(pool));
+    let path = format!("/api/v1/inboxes/{}/messages", inbox.id);
+    let body = json!({
+        "to": ["test@example.com"],
+        "subject": "Shadow test",
+        "text_body": "Should be blocked"
+    });
+    let (status, resp) = post_json(&app, &path, &key, &body).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "shadow mode should block sending: {resp}"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_send_approval_mode_returns_202_with_approval() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    // Explicitly set Approval mode
+    postblox::db::permissions::upsert(
+        &pool,
+        inbox.id,
+        postblox::models::SendMode::Approval,
+        &serde_json::json!([]),
+    )
+    .await
+    .unwrap();
+
+    let app = test_app(test_state(pool.clone()));
+    let path = format!("/api/v1/inboxes/{}/messages", inbox.id);
+    let body = json!({
+        "to": ["test@example.com"],
+        "subject": "Approval test",
+        "text_body": "Needs approval"
+    });
+    let (status, resp) = post_json(&app, &path, &key, &body).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "approval mode → 202");
+
+    let msg_id: Uuid = resp["id"].as_str().unwrap().parse().unwrap();
+
+    // Give spawned tasks a moment
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Verify an approval was created
+    let approvals = postblox::db::approvals::list_by_status(&pool, org_id, None, 0, 10)
+        .await
+        .unwrap();
+    assert!(
+        approvals.iter().any(|a| a.message_id == msg_id),
+        "approval should be created for the message"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_send_auto_approve_failing_rules_returns_403() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    // AutoApprove with a domain allowlist rule that won't match the recipient
+    let rules = serde_json::json!([
+        {
+            "type": "domain_allowlist",
+            "domains": ["allowed.example.com"]
+        }
+    ]);
+    postblox::db::permissions::upsert(
+        &pool,
+        inbox.id,
+        postblox::models::SendMode::AutoApprove,
+        &rules,
+    )
+    .await
+    .unwrap();
+
+    let app = test_app(test_state(pool));
+    let path = format!("/api/v1/inboxes/{}/messages", inbox.id);
+    let body = json!({
+        "to": ["test@blocked-domain.com"],
+        "subject": "Rule fail test",
+        "text_body": "Should be blocked by rule"
+    });
+    let (status, _) = post_json(&app, &path, &key, &body).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "auto_approve with failing rule → 403"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_send_auto_approve_passing_rules_attempts_delivery() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    // AutoApprove with a domain allowlist that matches recipient
+    let rules = serde_json::json!([
+        {
+            "type": "domain_allowlist",
+            "domains": ["example.com"]
+        }
+    ]);
+    postblox::db::permissions::upsert(
+        &pool,
+        inbox.id,
+        postblox::models::SendMode::AutoApprove,
+        &rules,
+    )
+    .await
+    .unwrap();
+
+    let app = test_app(test_state(pool.clone()));
+    let path = format!("/api/v1/inboxes/{}/messages", inbox.id);
+    let body = json!({
+        "to": ["test@example.com"],
+        "subject": "AutoApprove pass test",
+        "text_body": "Should attempt delivery"
+    });
+    let (status, _) = post_json(&app, &path, &key, &body).await;
+
+    // No Stalwart configured → delivery fails with 500, but that proves
+    // no approval was created (it went past the approval gate)
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "auto_approve with passing rules should attempt delivery (fails without Stalwart)"
+    );
+
+    // Verify NO approval was created
+    let approvals = postblox::db::approvals::list_by_status(&pool, org_id, None, 0, 10)
+        .await
+        .unwrap();
+    assert!(
+        approvals.is_empty(),
+        "auto_approve should not create an approval"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_send_guard_violation_blocks_message() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let mut state = test_state(pool);
+    state.guard_patterns = postblox::mail::guard::default_patterns();
+    let app = test_app(state);
+
+    let path = format!("/api/v1/inboxes/{}/messages", inbox.id);
+    let body = json!({
+        "to": ["test@example.com"],
+        "subject": "My AWS key",
+        "text_body": "Here is my key: AKIAIOSFODNN7EXAMPLE"
+    });
+    let (status, resp) = post_json(&app, &path, &key, &body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let err_msg = resp["error"].as_str().unwrap_or("");
+    assert!(
+        err_msg.contains("blocked"),
+        "guard violation should mention 'blocked', got: {err_msg}"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_send_cross_org_isolation_forbidden() {
+    let pool = test_pool().await;
+    let (org_a, _key_a) = setup_org(&pool).await;
+    let inbox_a = setup_inbox(&pool, org_a).await;
+
+    let (_org_b, key_b) = setup_org(&pool).await;
+
+    let app = test_app(test_state(pool));
+    let path = format!("/api/v1/inboxes/{}/messages", inbox_a.id);
+    let body = json!({
+        "to": ["test@example.com"],
+        "subject": "Cross-org send"
+    });
+    let (status, _) = post_json(&app, &path, &key_b, &body).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "org B should not be able to send from org A's inbox"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_send_before_send_hook_blocks_message() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let hooks = vec![postblox::hooks::HookConfig {
+        event: "before_send".into(),
+        command: "bash".into(),
+        args: vec![
+            "-c".into(),
+            r#"cat > /dev/null; echo '{"action":"block","reason":"hook says no"}'"#.into(),
+        ],
+        timeout_secs: 5,
+    }];
+    let mut state = test_state(pool);
+    state.hooks = Arc::from(hooks);
+    let app = test_app(state);
+
+    let path = format!("/api/v1/inboxes/{}/messages", inbox.id);
+    let body = json!({
+        "to": ["test@example.com"],
+        "subject": "Hook block test",
+        "text_body": "Should be blocked by hook"
+    });
+    let (status, resp) = post_json(&app, &path, &key, &body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let err_msg = resp["error"].as_str().unwrap_or("");
+    assert!(
+        err_msg.contains("hook says no"),
+        "hook block reason should appear in error: {err_msg}"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_send_no_auth_returns_401() {
+    let pool = test_pool().await;
+    let (org_id, _key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let app = test_app(test_state(pool));
+    let path = format!("/api/v1/inboxes/{}/messages", inbox.id);
+    let req = Request::post(&path)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "to": ["test@example.com"],
+                "subject": "No auth"
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ============================================================================
+// 12. Drafts — Send & Guard
+// ============================================================================
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_send_draft_creates_message_and_deletes_draft() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    // Default mode is Approval (no permission row = approval)
+    let app = test_app(test_state(pool.clone()));
+
+    // Create draft
+    let draft_path = format!("/api/v1/inboxes/{}/drafts", inbox.id);
+    let body = json!({
+        "to": ["draft-send-rcpt@example.com"],
+        "subject": "Send draft test",
+        "text_body": "Draft content"
+    });
+    let (status, draft_json) = post_json(&app, &draft_path, &key, &body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let draft_id: Uuid = draft_json["id"].as_str().unwrap().parse().unwrap();
+
+    // Send the draft
+    let send_path = format!("/api/v1/inboxes/{}/drafts/{}/send", inbox.id, draft_id);
+    let req = Request::post(&send_path)
+        .header("authorization", format!("Bearer {key}"))
+        .header("content-type", "application/json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    let status = resp.status();
+
+    // Approval mode → 202
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "draft send in approval mode → 202"
+    );
+
+    // Draft should be deleted
+    let fetched = postblox::db::drafts::get_by_id(&pool, draft_id)
+        .await
+        .unwrap();
+    assert!(fetched.is_none(), "draft should be deleted after sending");
+
+    // Message should exist
+    let msgs = postblox::db::messages::list_by_inbox(&pool, inbox.id, 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].subject.as_deref(), Some("Send draft test"));
+    assert_eq!(msgs[0].direction, postblox::models::Direction::Outbound);
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_send_draft_guard_violation_preserves_draft() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+
+    let mut state = test_state(pool.clone());
+    state.guard_patterns = postblox::mail::guard::default_patterns();
+    let app = test_app(state);
+
+    // Create a draft containing a secret
+    let draft_path = format!("/api/v1/inboxes/{}/drafts", inbox.id);
+    let body = json!({
+        "to": ["rcpt@example.com"],
+        "subject": "Secret draft",
+        "text_body": "Key: AKIAIOSFODNN7EXAMPLE"
+    });
+    let (status, draft_json) = post_json(&app, &draft_path, &key, &body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let draft_id: Uuid = draft_json["id"].as_str().unwrap().parse().unwrap();
+
+    // Try to send — guard should block
+    let send_path = format!("/api/v1/inboxes/{}/drafts/{}/send", inbox.id, draft_id);
+    let req = Request::post(&send_path)
+        .header("authorization", format!("Bearer {key}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Draft should still exist
+    let fetched = postblox::db::drafts::get_by_id(&pool, draft_id)
+        .await
+        .unwrap();
+    assert!(
+        fetched.is_some(),
+        "draft should be preserved when guard blocks send"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_send_draft_empty_to_returns_400() {
+    let pool = test_pool().await;
+    let (org_id, key) = setup_org(&pool).await;
+    let inbox = setup_inbox(&pool, org_id).await;
+    let app = test_app(test_state(pool.clone()));
+
+    // Create a draft with no recipients
+    let draft_path = format!("/api/v1/inboxes/{}/drafts", inbox.id);
+    let body = json!({
+        "subject": "No recipients draft"
+    });
+    let (status, draft_json) = post_json(&app, &draft_path, &key, &body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let draft_id = draft_json["id"].as_str().unwrap();
+
+    // Try to send
+    let send_path = format!("/api/v1/inboxes/{}/drafts/{}/send", inbox.id, draft_id);
+    let req = Request::post(&send_path)
+        .header("authorization", format!("Bearer {key}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "sending draft with no recipients → 400"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_send_draft_cross_org_returns_404() {
+    let pool = test_pool().await;
+    let (org_a, key_a) = setup_org(&pool).await;
+    let inbox_a = setup_inbox(&pool, org_a).await;
+    let app = test_app(test_state(pool.clone()));
+
+    // Org A creates a draft
+    let draft_path = format!("/api/v1/inboxes/{}/drafts", inbox_a.id);
+    let body = json!({
+        "to": ["test@example.com"],
+        "subject": "Org A draft"
+    });
+    let (status, draft_json) = post_json(&app, &draft_path, &key_a, &body).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let draft_id = draft_json["id"].as_str().unwrap();
+
+    // Org B tries to send it
+    let (_org_b, key_b) = setup_org(&pool).await;
+    let send_path = format!("/api/v1/inboxes/{}/drafts/{}/send", inbox_a.id, draft_id);
+    let req = Request::post(&send_path)
+        .header("authorization", format!("Bearer {key_b}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "org B should not be able to send org A's draft"
+    );
+}
+
+// ============================================================================
+// 13. Rate Limiting — HTTP-level Integration
+// ============================================================================
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_rate_limit_returns_429_after_limit() {
+    let pool = test_pool().await;
+    let (_org_id, key) = setup_org(&pool).await;
+
+    let mut state = test_state(pool);
+    // Very low limit so we can trigger it quickly
+    state.rate_limiter = Arc::new(postblox::api::rate_limit::RateLimiter::new(3, 100));
+    let app = test_app(state);
+
+    // First 3 requests should succeed
+    for i in 0..3 {
+        let (status, _) = get_json(&app, "/api/v1/inboxes", &key).await;
+        assert_eq!(status, StatusCode::OK, "request {i} should succeed");
+    }
+
+    // 4th request should be rate-limited
+    let req = Request::get("/api/v1/inboxes")
+        .header("authorization", format!("Bearer {key}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_rate_limit_headers_present() {
+    let pool = test_pool().await;
+    let (_org_id, key) = setup_org(&pool).await;
+
+    let mut state = test_state(pool);
+    state.rate_limiter = Arc::new(postblox::api::rate_limit::RateLimiter::new(100, 10000));
+    let app = test_app(state);
+
+    let req = Request::get("/api/v1/inboxes")
+        .header("authorization", format!("Bearer {key}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert!(
+        resp.headers().contains_key("x-ratelimit-limit"),
+        "response should contain X-RateLimit-Limit header"
+    );
+    assert!(
+        resp.headers().contains_key("x-ratelimit-remaining"),
+        "response should contain X-RateLimit-Remaining header"
+    );
+    assert!(
+        resp.headers().contains_key("x-ratelimit-reset"),
+        "response should contain X-RateLimit-Reset header"
+    );
+
+    let remaining: u64 = resp
+        .headers()
+        .get("x-ratelimit-remaining")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        remaining, 99,
+        "remaining should be limit - 1 after first request"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_rate_limit_different_keys_independent() {
+    let pool = test_pool().await;
+    let (_org_a, key_a) = setup_org(&pool).await;
+    let (_org_b, key_b) = setup_org(&pool).await;
+
+    let mut state = test_state(pool);
+    state.rate_limiter = Arc::new(postblox::api::rate_limit::RateLimiter::new(2, 100));
+    let app = test_app(state);
+
+    // Key A uses all its quota
+    for _ in 0..2 {
+        let (status, _) = get_json(&app, "/api/v1/inboxes", &key_a).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let req = Request::get("/api/v1/inboxes")
+        .header("authorization", format!("Bearer {key_a}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "key A should be limited"
+    );
+
+    // Key B should still work
+    let (status, _) = get_json(&app, "/api/v1/inboxes", &key_b).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "key B should not be affected by key A's limit"
+    );
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_rate_limit_unauthenticated_bypasses() {
+    let pool = test_pool().await;
+
+    let mut state = test_state(pool);
+    // Even with a very low limit, unauthenticated should bypass
+    state.rate_limiter = Arc::new(postblox::api::rate_limit::RateLimiter::new(1, 1));
+    let app = test_app(state);
+
+    // Multiple unauthenticated requests to /health (no auth needed)
+    for _ in 0..5 {
+        let req = Request::get("/health").body(Body::empty()).unwrap();
+        let resp = ServiceExt::oneshot(app.clone(), req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "unauthenticated requests should bypass rate limiting"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore] // requires DATABASE_URL
+async fn test_rate_limit_429_includes_retry_after() {
+    let pool = test_pool().await;
+    let (_org_id, key) = setup_org(&pool).await;
+
+    let mut state = test_state(pool);
+    state.rate_limiter = Arc::new(postblox::api::rate_limit::RateLimiter::new(1, 100));
+    let app = test_app(state);
+
+    // Use up the limit
+    let (status, _) = get_json(&app, "/api/v1/inboxes", &key).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Next request should be rate-limited with Retry-After header
+    let req = Request::get("/api/v1/inboxes")
+        .header("authorization", format!("Bearer {key}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        resp.headers().contains_key("retry-after"),
+        "429 response should include Retry-After header"
+    );
+    let retry_after: u64 = resp
+        .headers()
+        .get("retry-after")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(retry_after >= 1, "Retry-After should be at least 1 second");
 }

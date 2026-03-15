@@ -52,6 +52,7 @@ pub struct AppState {
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     pub attachment_storage_path: std::path::PathBuf,
     pub max_attachment_size_bytes: i64,
+    pub content_filter: crate::core::content_filter::ContentFilter,
 }
 
 #[derive(Deserialize)]

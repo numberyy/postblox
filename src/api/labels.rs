@@ -16,8 +16,7 @@ fn is_safe_css_color(s: &str) -> bool {
     }
     // Allow #hex colors: #rgb, #rrggbb, #rrggbbaa
     if let Some(hex) = s.strip_prefix('#') {
-        return matches!(hex.len(), 3 | 4 | 6 | 8)
-            && hex.chars().all(|c| c.is_ascii_hexdigit());
+        return matches!(hex.len(), 3 | 4 | 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit());
     }
     // Allow simple alphanumeric named colors (e.g. "red", "steelblue")
     s.chars().all(|c| c.is_ascii_alphabetic())

@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -44,26 +46,27 @@ pub async fn list_entries(
     let mut param_idx = 2u32;
 
     if inbox_id_filter.is_some() {
-        sql.push_str(&format!(" AND inbox_id = ${param_idx}"));
+        let _ = write!(sql, " AND inbox_id = ${param_idx}");
         param_idx += 1;
     }
     if action_filter.is_some() {
-        sql.push_str(&format!(" AND action = ${param_idx}"));
+        let _ = write!(sql, " AND action = ${param_idx}");
         param_idx += 1;
     }
     if after.is_some() {
-        sql.push_str(&format!(" AND created_at > ${param_idx}"));
+        let _ = write!(sql, " AND created_at > ${param_idx}");
         param_idx += 1;
     }
     if before.is_some() {
-        sql.push_str(&format!(" AND created_at < ${param_idx}"));
+        let _ = write!(sql, " AND created_at < ${param_idx}");
         param_idx += 1;
     }
 
-    sql.push_str(&format!(
+    let _ = write!(
+        sql,
         " ORDER BY created_at DESC LIMIT ${param_idx} OFFSET ${}",
         param_idx + 1
-    ));
+    );
 
     let mut query = sqlx::query_as::<_, AuditEntry>(&sql).bind(org_id);
 
@@ -95,9 +98,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("audit-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
         (org.id, inbox.id)
     }
 
@@ -227,9 +236,15 @@ mod tests {
         let pool = crate::db::test_pool().await;
         let (org_id, inbox_id) = setup_org(&pool).await;
         let email2 = format!("audit2-{}@example.com", Uuid::new_v4());
-        let inbox2 = crate::db::inboxes::create(&pool, org_id, &email2, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox2 = crate::db::inboxes::create(
+            &pool,
+            org_id,
+            &email2,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
 
         create_entry(
             &pool,

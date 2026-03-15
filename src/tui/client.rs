@@ -259,6 +259,54 @@ impl PostbloxClient {
         .await
     }
 
+    pub async fn send_message_with_attachments(
+        &self,
+        inbox_id: Uuid,
+        to: &str,
+        subject: &str,
+        body: &str,
+        attachments: &[std::path::PathBuf],
+    ) -> Result<Message, ClientError> {
+        let html_body = format!("<html><body><pre>{}</pre></body></html>", html_escape(body));
+        let metadata = serde_json::json!({
+            "to": [to],
+            "subject": subject,
+            "text_body": body,
+            "html_body": html_body,
+        });
+
+        let mut form = reqwest::multipart::Form::new().text("metadata", metadata.to_string());
+
+        for path in attachments {
+            let filename = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "file".into());
+            let data = tokio::fs::read(path).await.map_err(|e| ClientError::Api {
+                status: 0,
+                body: format!("failed to read {}: {e}", path.display()),
+            })?;
+            let mime = mime_from_filename(&filename);
+            let part = reqwest::multipart::Part::bytes(data)
+                .file_name(filename)
+                .mime_str(&mime)
+                .map_err(|e| ClientError::Api {
+                    status: 0,
+                    body: format!("invalid mime type: {e}"),
+                })?;
+            form = form.part("file", part);
+        }
+
+        let resp = self
+            .http
+            .post(self.url(&format!("/inboxes/{inbox_id}/messages/upload")))
+            .bearer_auth(&self.api_key)
+            .multipart(form)
+            .send()
+            .await?;
+        Self::parse_response(resp).await
+    }
+
     pub async fn list_attachments(
         &self,
         inbox_id: Uuid,
@@ -305,6 +353,35 @@ impl PostbloxClient {
         };
         let encoded_key = urlencoding::encode(&self.api_key);
         format!("{ws_base}/api/v1/ws?key={encoded_key}")
+    }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn mime_from_filename(name: &str) -> String {
+    match name.rsplit('.').next().map(|e| e.to_ascii_lowercase()) {
+        Some(ext) => match ext.as_str() {
+            "pdf" => "application/pdf",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "svg" => "image/svg+xml",
+            "txt" => "text/plain",
+            "html" | "htm" => "text/html",
+            "csv" => "text/csv",
+            "json" => "application/json",
+            "zip" => "application/zip",
+            "doc" => "application/msword",
+            "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            _ => "application/octet-stream",
+        }
+        .into(),
+        None => "application/octet-stream".into(),
     }
 }
 
@@ -431,5 +508,44 @@ mod tests {
         assert_eq!(att.content_type, "application/pdf");
         assert_eq!(att.size_bytes, 12345);
         assert_eq!(att.disposition, "attachment");
+    }
+
+    #[test]
+    fn test_upload_url_construction() {
+        let c = test_client();
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(
+            c.url(&format!("/inboxes/{id}/messages/upload")),
+            format!("http://localhost:3000/api/v1/inboxes/{id}/messages/upload")
+        );
+    }
+
+    #[test]
+    fn test_html_escape() {
+        assert_eq!(html_escape("<b>hi</b>"), "&lt;b&gt;hi&lt;/b&gt;");
+        assert_eq!(html_escape("a&b"), "a&amp;b");
+        assert_eq!(html_escape("\"hello\""), "&quot;hello&quot;");
+        assert_eq!(html_escape("plain"), "plain");
+    }
+
+    #[test]
+    fn test_mime_from_filename() {
+        assert_eq!(mime_from_filename("doc.pdf"), "application/pdf");
+        assert_eq!(mime_from_filename("photo.PNG"), "image/png");
+        assert_eq!(mime_from_filename("pic.jpg"), "image/jpeg");
+        assert_eq!(mime_from_filename("pic.JPEG"), "image/jpeg");
+        assert_eq!(mime_from_filename("data.csv"), "text/csv");
+        assert_eq!(mime_from_filename("archive.zip"), "application/zip");
+        assert_eq!(
+            mime_from_filename("unknown.xyz"),
+            "application/octet-stream"
+        );
+        assert_eq!(mime_from_filename("noext"), "application/octet-stream");
+    }
+
+    #[test]
+    fn test_mime_from_filename_gif_svg() {
+        assert_eq!(mime_from_filename("anim.gif"), "image/gif");
+        assert_eq!(mime_from_filename("icon.svg"), "image/svg+xml");
     }
 }

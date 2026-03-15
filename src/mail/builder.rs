@@ -26,6 +26,7 @@ pub struct MimeAttachment {
     pub filename: String,
     pub content_type: String,
     pub data: Vec<u8>,
+    pub content_id: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -77,17 +78,26 @@ pub fn build_mime_with_attachments(
                 sanitize_header(&att.filename)
             );
             msg.push_str("Content-Transfer-Encoding: base64\r\n");
-            let _ = write!(
-                msg,
-                "Content-Disposition: attachment; filename=\"{}\"\r\n",
-                sanitize_header(&att.filename)
-            );
+            if let Some(cid) = &att.content_id {
+                let _ = write!(msg, "Content-ID: <{}>\r\n", sanitize_header(cid));
+                let _ = write!(
+                    msg,
+                    "Content-Disposition: inline; filename=\"{}\"\r\n",
+                    sanitize_header(&att.filename)
+                );
+            } else {
+                let _ = write!(
+                    msg,
+                    "Content-Disposition: attachment; filename=\"{}\"\r\n",
+                    sanitize_header(&att.filename)
+                );
+            }
             msg.push_str("\r\n");
             let encoded = base64::engine::general_purpose::STANDARD.encode(&att.data);
             // Line-wrap at 76 chars per RFC 2045
             for chunk in encoded.as_bytes().chunks(76) {
-                // base64 Standard encoding always produces valid ASCII
-                msg.push_str(std::str::from_utf8(chunk).expect("base64 is always valid ASCII"));
+                // SAFETY: base64 Standard encoding always produces valid ASCII, which is valid UTF-8
+                msg.push_str(unsafe { std::str::from_utf8_unchecked(chunk) });
                 msg.push_str("\r\n");
             }
         }
@@ -222,6 +232,7 @@ mod tests {
             filename: "report.pdf".into(),
             content_type: "application/pdf".into(),
             data: b"PDF content here".to_vec(),
+            content_id: None,
         }];
         let s = String::from_utf8(build_mime_with_attachments(
             "bot@example.com",
@@ -247,6 +258,7 @@ mod tests {
             filename: "test.txt".into(),
             content_type: "text/plain".into(),
             data: data.to_vec(),
+            content_id: None,
         }];
         let s = String::from_utf8(build_mime_with_attachments(
             "bot@example.com",
@@ -269,6 +281,7 @@ mod tests {
             filename: "img.png".into(),
             content_type: "image/png".into(),
             data: vec![0x89, 0x50, 0x4E, 0x47],
+            content_id: None,
         }];
         let s = String::from_utf8(build_mime_with_attachments(
             "bot@example.com",
@@ -295,11 +308,13 @@ mod tests {
                 filename: "a.txt".into(),
                 content_type: "text/plain".into(),
                 data: b"aaa".to_vec(),
+                content_id: None,
             },
             MimeAttachment {
                 filename: "b.bin".into(),
                 content_type: "application/octet-stream".into(),
                 data: b"bbb".to_vec(),
+                content_id: None,
             },
         ];
         let s = String::from_utf8(build_mime_with_attachments(
@@ -348,5 +363,61 @@ mod tests {
         assert!(!s_without.contains("multipart/mixed"));
         assert!(s_with.contains("Content-Type: text/plain"));
         assert!(s_without.contains("Content-Type: text/plain"));
+    }
+
+    #[test]
+    fn test_build_mime_with_cid_attachment_emits_content_id() {
+        let attachments = vec![MimeAttachment {
+            filename: "logo.png".into(),
+            content_type: "image/png".into(),
+            data: vec![0x89, 0x50, 0x4E, 0x47],
+            content_id: Some("logo123@example.com".into()),
+        }];
+        let s = String::from_utf8(build_mime_with_attachments(
+            "bot@example.com",
+            &["user@example.com".into()],
+            &[],
+            "CID Test",
+            Some("See image"),
+            Some("<html><img src=\"cid:logo123@example.com\"></html>"),
+            "<msg@postblox>",
+            &attachments,
+        ))
+        .unwrap();
+        assert!(s.contains("Content-ID: <logo123@example.com>"));
+        assert!(s.contains("Content-Disposition: inline; filename=\"logo.png\""));
+        assert!(!s.contains("Content-Disposition: attachment; filename=\"logo.png\""));
+    }
+
+    #[test]
+    fn test_build_mime_cid_and_regular_attachments_mixed() {
+        let attachments = vec![
+            MimeAttachment {
+                filename: "logo.png".into(),
+                content_type: "image/png".into(),
+                data: vec![0x89],
+                content_id: Some("img1@mail".into()),
+            },
+            MimeAttachment {
+                filename: "doc.pdf".into(),
+                content_type: "application/pdf".into(),
+                data: b"PDF".to_vec(),
+                content_id: None,
+            },
+        ];
+        let s = String::from_utf8(build_mime_with_attachments(
+            "bot@example.com",
+            &["user@example.com".into()],
+            &[],
+            "Mixed CID",
+            Some("Body"),
+            None,
+            "<msg@postblox>",
+            &attachments,
+        ))
+        .unwrap();
+        assert!(s.contains("Content-ID: <img1@mail>"));
+        assert!(s.contains("Content-Disposition: inline; filename=\"logo.png\""));
+        assert!(s.contains("Content-Disposition: attachment; filename=\"doc.pdf\""));
     }
 }

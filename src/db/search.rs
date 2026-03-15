@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -86,35 +88,37 @@ pub async fn field_search(
     if has_free_text {
         param_idx += 1;
         free_text_idx = Some(param_idx);
-        sql.push_str(&format!(
+        let _ = write!(
+            sql,
             " AND m.search_vector @@ plainto_tsquery('english', ${param_idx})"
-        ));
+        );
         str_binds.push(parsed.free_text.clone());
     }
 
     if let Some(from) = &parsed.from {
         param_idx += 1;
-        sql.push_str(&format!(" AND m.from_addr ILIKE ${param_idx}"));
+        let _ = write!(sql, " AND m.from_addr ILIKE ${param_idx}");
         str_binds.push(format!("%{}%", escape_like(from)));
     }
 
     if let Some(to) = &parsed.to {
         param_idx += 1;
-        sql.push_str(&format!(" AND m.to_addrs::text ILIKE ${param_idx}"));
+        let _ = write!(sql, " AND m.to_addrs::text ILIKE ${param_idx}");
         str_binds.push(format!("%{}%", escape_like(to)));
     }
 
     if let Some(subject) = &parsed.subject {
         param_idx += 1;
-        sql.push_str(&format!(" AND m.subject ILIKE ${param_idx}"));
+        let _ = write!(sql, " AND m.subject ILIKE ${param_idx}");
         str_binds.push(format!("%{}%", escape_like(subject)));
     }
 
     if let Some(inbox_name) = &parsed.inbox_name {
         param_idx += 1;
-        sql.push_str(&format!(
+        let _ = write!(
+            sql,
             " AND (i.name ILIKE ${param_idx} OR i.email ILIKE ${param_idx})"
-        ));
+        );
         str_binds.push(format!("%{}%", escape_like(inbox_name)));
     }
 
@@ -124,22 +128,23 @@ pub async fn field_search(
 
     if let Some(iid) = inbox_id {
         param_idx += 1;
-        sql.push_str(&format!(" AND m.inbox_id = ${param_idx}"));
+        let _ = write!(sql, " AND m.inbox_id = ${param_idx}");
         uuid_bind = Some(iid);
     }
 
     if let Some(ft_idx) = free_text_idx {
-        sql.push_str(&format!(
+        let _ = write!(
+            sql,
             " ORDER BY ts_rank(m.search_vector, plainto_tsquery('english', ${ft_idx})) DESC, m.created_at DESC"
-        ));
+        );
     } else {
         sql.push_str(" ORDER BY m.created_at DESC");
     }
 
     param_idx += 1;
-    sql.push_str(&format!(" LIMIT ${param_idx}"));
+    let _ = write!(sql, " LIMIT ${param_idx}");
     param_idx += 1;
-    sql.push_str(&format!(" OFFSET ${param_idx}"));
+    let _ = write!(sql, " OFFSET ${param_idx}");
 
     let mut query = sqlx::query_as::<_, Message>(&sql).bind(org_id);
 

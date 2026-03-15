@@ -35,6 +35,14 @@ pub struct Config {
     pub attachment_storage_path: PathBuf,
     #[serde(default = "default_max_attachment_size")]
     pub max_attachment_size_bytes: i64,
+    #[serde(default)]
+    pub content_filter: ContentFilterConfig,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ContentFilterConfig {
+    pub allowed_types: Option<Vec<String>>,
+    pub blocked_types: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +164,7 @@ impl Config {
                     "MAX_ATTACHMENT_SIZE_BYTES",
                     default_max_attachment_size,
                 ),
+                content_filter: ContentFilterConfig::default(),
             })
         }
     }
@@ -327,5 +336,58 @@ mod tests {
             PathBuf::from("/var/data/attachments")
         );
         assert_eq!(config.max_attachment_size_bytes, 10_485_760);
+    }
+
+    #[test]
+    fn test_config_content_filter_default() {
+        let toml_str = r#"database_url = "postgres://localhost/postblox""#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.content_filter.allowed_types.is_none());
+        assert!(config.content_filter.blocked_types.is_none());
+    }
+
+    #[test]
+    fn test_config_content_filter_allowlist() {
+        let toml_str = r#"
+            database_url = "postgres://localhost/postblox"
+
+            [content_filter]
+            allowed_types = ["image/*", "application/pdf"]
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let allowed = config.content_filter.allowed_types.unwrap();
+        assert_eq!(allowed, vec!["image/*", "application/pdf"]);
+        assert!(config.content_filter.blocked_types.is_none());
+    }
+
+    #[test]
+    fn test_config_content_filter_blocklist() {
+        let toml_str = r#"
+            database_url = "postgres://localhost/postblox"
+
+            [content_filter]
+            blocked_types = ["application/x-executable", "application/x-shellscript"]
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.content_filter.allowed_types.is_none());
+        let blocked = config.content_filter.blocked_types.unwrap();
+        assert_eq!(
+            blocked,
+            vec!["application/x-executable", "application/x-shellscript"]
+        );
+    }
+
+    #[test]
+    fn test_config_content_filter_both() {
+        let toml_str = r#"
+            database_url = "postgres://localhost/postblox"
+
+            [content_filter]
+            allowed_types = ["image/*", "application/pdf"]
+            blocked_types = ["image/svg+xml"]
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.content_filter.allowed_types.is_some());
+        assert!(config.content_filter.blocked_types.is_some());
     }
 }

@@ -98,12 +98,13 @@ pub fn run_event_hooks(hooks: &[HookConfig], event_name: &str, data: serde_json:
     }
 }
 
-pub async fn run_before_send_hooks(
+async fn run_gate_hooks(
     hooks: &[HookConfig],
+    event: &str,
     data: &serde_json::Value,
 ) -> Result<(), HookError> {
-    for hook in hooks.iter().filter(|h| h.event == "before_send") {
-        match run_one(hook, "before_send", data).await {
+    for hook in hooks.iter().filter(|h| h.event == event) {
+        match run_one(hook, event, data).await {
             Ok(output) => {
                 if output.action.as_deref() == Some("block") {
                     let reason = output.reason.unwrap_or_else(|| "blocked by hook".into());
@@ -116,8 +117,21 @@ pub async fn run_before_send_hooks(
             }
         }
     }
-
     Ok(())
+}
+
+pub async fn run_before_send_hooks(
+    hooks: &[HookConfig],
+    data: &serde_json::Value,
+) -> Result<(), HookError> {
+    run_gate_hooks(hooks, "before_send", data).await
+}
+
+pub async fn run_before_receive_hooks(
+    hooks: &[HookConfig],
+    data: &serde_json::Value,
+) -> Result<(), HookError> {
+    run_gate_hooks(hooks, "before_receive", data).await
 }
 
 #[cfg(test)]
@@ -352,5 +366,142 @@ mod tests {
             timeout_secs: 5,
         }];
         run_event_hooks(&hooks, "message.received", serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn test_run_before_receive_no_matching() {
+        let hooks = vec![HookConfig {
+            event: "message.received".into(),
+            command: "echo".into(),
+            args: vec![],
+            timeout_secs: 5,
+        }];
+        let data = serde_json::json!({"from": "a@b.com"});
+        let result = run_before_receive_hooks(&hooks, &data).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_before_receive_allow_passes() {
+        let hooks = vec![HookConfig {
+            event: "before_receive".into(),
+            command: "bash".into(),
+            args: vec![
+                "-c".into(),
+                r#"cat > /dev/null; echo '{"action":"allow"}'"#.into(),
+            ],
+            timeout_secs: 5,
+        }];
+        let data = serde_json::json!({"from": "a@b.com"});
+        let result = run_before_receive_hooks(&hooks, &data).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_before_receive_block() {
+        let hooks = vec![HookConfig {
+            event: "before_receive".into(),
+            command: "bash".into(),
+            args: vec![
+                "-c".into(),
+                r#"cat > /dev/null; echo '{"action":"block","reason":"virus detected"}'"#.into(),
+            ],
+            timeout_secs: 5,
+        }];
+        let data = serde_json::json!({"from": "a@b.com"});
+        let result = run_before_receive_hooks(&hooks, &data).await;
+        assert!(
+            matches!(result, Err(HookError::Blocked(ref msg)) if msg.contains("virus detected")),
+            "got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_before_receive_fail_closed_on_bad_command() {
+        let hooks = vec![HookConfig {
+            event: "before_receive".into(),
+            command: "/nonexistent/scanner".into(),
+            args: vec![],
+            timeout_secs: 5,
+        }];
+        let data = serde_json::json!({"from": "a@b.com"});
+        let result = run_before_receive_hooks(&hooks, &data).await;
+        assert!(matches!(result, Err(HookError::Blocked(_))));
+    }
+
+    #[tokio::test]
+    async fn test_run_before_receive_fail_closed_on_invalid_json() {
+        let hooks = vec![HookConfig {
+            event: "before_receive".into(),
+            command: "bash".into(),
+            args: vec!["-c".into(), "cat > /dev/null; echo 'not json'".into()],
+            timeout_secs: 5,
+        }];
+        let data = serde_json::json!({"from": "a@b.com"});
+        let result = run_before_receive_hooks(&hooks, &data).await;
+        assert!(
+            matches!(result, Err(HookError::Blocked(ref msg)) if msg.contains("fail-closed")),
+            "got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_before_receive_multiple_hooks_first_blocks() {
+        let hooks = vec![
+            HookConfig {
+                event: "before_receive".into(),
+                command: "bash".into(),
+                args: vec![
+                    "-c".into(),
+                    r#"cat > /dev/null; echo '{"action":"block","reason":"scanner 1 blocked"}'"#
+                        .into(),
+                ],
+                timeout_secs: 5,
+            },
+            HookConfig {
+                event: "before_receive".into(),
+                command: "bash".into(),
+                args: vec![
+                    "-c".into(),
+                    r#"cat > /dev/null; echo '{"action":"allow"}'"#.into(),
+                ],
+                timeout_secs: 5,
+            },
+        ];
+        let data = serde_json::json!({"from": "a@b.com"});
+        let result = run_before_receive_hooks(&hooks, &data).await;
+        assert!(
+            matches!(result, Err(HookError::Blocked(ref msg)) if msg.contains("scanner 1 blocked")),
+            "got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_before_receive_empty_json_passes() {
+        let hooks = vec![HookConfig {
+            event: "before_receive".into(),
+            command: "bash".into(),
+            args: vec!["-c".into(), "cat > /dev/null; echo '{}'".into()],
+            timeout_secs: 5,
+        }];
+        let data = serde_json::json!({"from": "a@b.com"});
+        let result = run_before_receive_hooks(&hooks, &data).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_before_receive_timeout() {
+        let hooks = vec![HookConfig {
+            event: "before_receive".into(),
+            command: "sleep".into(),
+            args: vec!["60".into()],
+            timeout_secs: 1,
+        }];
+        let data = serde_json::json!({"from": "a@b.com"});
+        let result = run_before_receive_hooks(&hooks, &data).await;
+        assert!(
+            matches!(result, Err(HookError::Blocked(ref msg)) if msg.contains("fail-closed")),
+            "timeout should result in fail-closed block, got: {result:?}"
+        );
     }
 }

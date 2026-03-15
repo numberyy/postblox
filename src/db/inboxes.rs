@@ -111,7 +111,9 @@ mod tests {
             .unwrap();
         let email = format!("dup-{}@example.com", Uuid::new_v4());
 
-        create(&pool, org.id, &email, None, InboxType::Native).await.unwrap();
+        create(&pool, org.id, &email, None, InboxType::Native)
+            .await
+            .unwrap();
         let err = create(&pool, org.id, &email, None, InboxType::Native).await;
         assert!(err.is_err());
     }
@@ -125,7 +127,9 @@ mod tests {
             .unwrap();
         let email = format!("lookup-{}@example.com", Uuid::new_v4());
 
-        let inbox = create(&pool, org.id, &email, None, InboxType::Native).await.unwrap();
+        let inbox = create(&pool, org.id, &email, None, InboxType::Native)
+            .await
+            .unwrap();
         let found = get_by_email(&pool, &email).await.unwrap().unwrap();
         assert_eq!(found.id, inbox.id);
     }
@@ -148,8 +152,12 @@ mod tests {
 
         let e1 = format!("a-{}@example.com", Uuid::new_v4());
         let e2 = format!("b-{}@example.com", Uuid::new_v4());
-        create(&pool, org.id, &e1, None, InboxType::Native).await.unwrap();
-        create(&pool, org.id, &e2, None, InboxType::Relay).await.unwrap();
+        create(&pool, org.id, &e1, None, InboxType::Native)
+            .await
+            .unwrap();
+        create(&pool, org.id, &e2, None, InboxType::Relay)
+            .await
+            .unwrap();
 
         let inboxes = list_by_org(&pool, org.id).await.unwrap();
         assert_eq!(inboxes.len(), 2);
@@ -174,7 +182,9 @@ mod tests {
             .await
             .unwrap();
         let email = format!("del-{}@example.com", Uuid::new_v4());
-        let inbox = create(&pool, org.id, &email, None, InboxType::Native).await.unwrap();
+        let inbox = create(&pool, org.id, &email, None, InboxType::Native)
+            .await
+            .unwrap();
 
         assert!(delete(&pool, inbox.id).await.unwrap());
         assert!(get_by_id(&pool, inbox.id).await.unwrap().is_none());

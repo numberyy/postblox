@@ -180,9 +180,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
 
         let cm = crate::models::CreateMessage {
             inbox_id: inbox.id,
@@ -218,9 +224,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-nomsg-{}@example.com", Uuid::new_v4());
-        crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
 
         let since = Utc::now() - chrono::Duration::hours(1);
         let stats = stats_by_inbox(&pool, org.id, since).await.unwrap();
@@ -238,9 +250,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-s-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
 
         for (from, count) in [("alice@example.com", 2), ("bob@example.com", 1)] {
             for i in 0..count {
@@ -280,9 +298,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-out-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
 
         let cm = crate::models::CreateMessage {
             inbox_id: inbox.id,
@@ -315,9 +339,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-t-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
 
         let cm = crate::models::CreateMessage {
             inbox_id: inbox.id,
@@ -350,9 +380,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-org-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
 
         let cm = crate::models::CreateMessage {
             inbox_id: inbox.id,
@@ -388,9 +424,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("brief-ns-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Native)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Native,
+        )
+        .await
+        .unwrap();
 
         let cm = crate::models::CreateMessage {
             inbox_id: inbox.id,

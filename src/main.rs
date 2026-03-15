@@ -92,7 +92,10 @@ async fn main() -> anyhow::Result<()> {
 
     let raw_hooks = config.hooks.unwrap_or_default();
     for h in &raw_hooks {
-        if h.event != "before_send" && !events::KNOWN_EVENTS.contains(&h.event.as_str()) {
+        if h.event != "before_send"
+            && h.event != "before_receive"
+            && !events::KNOWN_EVENTS.contains(&h.event.as_str())
+        {
             tracing::warn!("unknown hook event '{}' — will never fire", h.event);
         }
     }
@@ -115,6 +118,10 @@ async fn main() -> anyhow::Result<()> {
         )),
         attachment_storage_path: config.attachment_storage_path,
         max_attachment_size_bytes: config.max_attachment_size_bytes,
+        content_filter: postblox::core::content_filter::ContentFilter::new(
+            config.content_filter.allowed_types,
+            config.content_filter.blocked_types,
+        ),
     };
     let templates = dashboard::build_templates();
     let dashboard_routes = dashboard::router(templates, state.clone());

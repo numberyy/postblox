@@ -99,9 +99,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("la-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Relay)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Relay,
+        )
+        .await
+        .unwrap();
 
         let input = CreateLinkedAccount {
             inbox_id: inbox.id,
@@ -132,9 +138,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("la-def-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Relay)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Relay,
+        )
+        .await
+        .unwrap();
 
         let input = CreateLinkedAccount {
             inbox_id: inbox.id,
@@ -157,9 +169,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("la-dup-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Relay)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Relay,
+        )
+        .await
+        .unwrap();
 
         let input = CreateLinkedAccount {
             inbox_id: inbox.id,
@@ -191,9 +209,15 @@ mod tests {
 
         for i in 0..2 {
             let email = format!("la-list-{i}-{}@example.com", Uuid::new_v4());
-            let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Relay)
-                .await
-                .unwrap();
+            let inbox = crate::db::inboxes::create(
+                &pool,
+                org.id,
+                &email,
+                None,
+                crate::models::InboxType::Relay,
+            )
+            .await
+            .unwrap();
             let input = CreateLinkedAccount {
                 inbox_id: inbox.id,
                 org_id: org.id,
@@ -232,9 +256,15 @@ mod tests {
             .unwrap();
 
         let email1 = format!("la-iso1-{}@example.com", Uuid::new_v4());
-        let inbox1 = crate::db::inboxes::create(&pool, org1.id, &email1, None, crate::models::InboxType::Relay)
-            .await
-            .unwrap();
+        let inbox1 = crate::db::inboxes::create(
+            &pool,
+            org1.id,
+            &email1,
+            None,
+            crate::models::InboxType::Relay,
+        )
+        .await
+        .unwrap();
         let input1 = CreateLinkedAccount {
             inbox_id: inbox1.id,
             org_id: org1.id,
@@ -257,9 +287,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("la-del-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Relay)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Relay,
+        )
+        .await
+        .unwrap();
 
         let input = CreateLinkedAccount {
             inbox_id: inbox.id,
@@ -289,9 +325,15 @@ mod tests {
             .await
             .unwrap();
         let email = format!("la-sync-{}@example.com", Uuid::new_v4());
-        let inbox = crate::db::inboxes::create(&pool, org.id, &email, None, crate::models::InboxType::Relay)
-            .await
-            .unwrap();
+        let inbox = crate::db::inboxes::create(
+            &pool,
+            org.id,
+            &email,
+            None,
+            crate::models::InboxType::Relay,
+        )
+        .await
+        .unwrap();
 
         let input = CreateLinkedAccount {
             inbox_id: inbox.id,
