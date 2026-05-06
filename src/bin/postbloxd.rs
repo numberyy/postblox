@@ -12,8 +12,10 @@ use tokio::signal;
 use postblox::config;
 use postblox::daemon::DaemonDispatcher;
 use postblox::db;
+use postblox::imap;
 use postblox::ipc::{default_socket_path, listen, Hub};
 use postblox::secrets::{file::FileSecretStore, SecretStore, UnconfiguredSecretStore};
+use postblox::sync::WorkerManager;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> anyhow::Result<()> {
@@ -46,12 +48,27 @@ async fn main() -> anyhow::Result<()> {
     let secrets = build_secret_store(&cfg, &db_path);
 
     let hub = Arc::new(Hub::new());
-    let dispatcher = Arc::new(DaemonDispatcher::new(pool, hub.clone(), secrets));
+    let imap_auth = imap::default_auth().context("initialize IMAP auth")?;
+    let imap_sync = imap::default_sync().context("initialize IMAP sync")?;
+    let manager = Arc::new(WorkerManager::new(
+        pool.clone(),
+        hub.clone(),
+        imap_sync.clone(),
+    ));
+    let dispatcher = Arc::new(DaemonDispatcher::with_imap_and_manager(
+        pool,
+        hub.clone(),
+        imap_auth,
+        imap_sync,
+        secrets,
+        manager.clone(),
+    ));
     let server = listen(&socket_path, dispatcher, hub).await?;
     tracing::info!(socket = %server.path().display(), "listening");
 
     signal::ctrl_c().await.context("install ctrl-c handler")?;
     tracing::info!("shutdown signal received");
+    manager.stop_all().await;
     server.shutdown().await;
     Ok(())
 }

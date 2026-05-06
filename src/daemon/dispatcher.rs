@@ -23,6 +23,7 @@ pub struct DaemonDispatcher {
     imap: Arc<dyn ImapAuth>,
     imap_sync: Arc<dyn ImapSync>,
     secrets: Arc<dyn SecretStore>,
+    worker_manager: Arc<sync::WorkerManager>,
 }
 
 impl DaemonDispatcher {
@@ -41,12 +42,46 @@ impl DaemonDispatcher {
         imap_sync: Arc<dyn ImapSync>,
         secrets: Arc<dyn SecretStore>,
     ) -> Self {
+        let worker_manager = Arc::new(sync::WorkerManager::new(
+            pool.clone(),
+            hub.clone(),
+            imap_sync.clone(),
+        ));
+        Self::with_imap_and_manager(pool, hub, imap, imap_sync, secrets, worker_manager)
+    }
+
+    pub fn with_imap_and_sync_config(
+        pool: SqlitePool,
+        hub: Arc<Hub>,
+        imap: Arc<dyn ImapAuth>,
+        imap_sync: Arc<dyn ImapSync>,
+        secrets: Arc<dyn SecretStore>,
+        worker_config: sync::WorkerConfig,
+    ) -> Self {
+        let worker_manager = Arc::new(sync::WorkerManager::with_config(
+            pool.clone(),
+            hub.clone(),
+            imap_sync.clone(),
+            worker_config,
+        ));
+        Self::with_imap_and_manager(pool, hub, imap, imap_sync, secrets, worker_manager)
+    }
+
+    pub fn with_imap_and_manager(
+        pool: SqlitePool,
+        hub: Arc<Hub>,
+        imap: Arc<dyn ImapAuth>,
+        imap_sync: Arc<dyn ImapSync>,
+        secrets: Arc<dyn SecretStore>,
+        worker_manager: Arc<sync::WorkerManager>,
+    ) -> Self {
         Self {
             pool,
             hub,
             imap,
             imap_sync,
             secrets,
+            worker_manager,
         }
     }
 
@@ -91,6 +126,18 @@ impl Dispatcher for DaemonDispatcher {
                     args,
                 )
                 .await
+            }
+            "account.start_sync" => {
+                op_account_start_sync(
+                    &self.pool,
+                    self.secrets.as_ref(),
+                    self.worker_manager.as_ref(),
+                    args,
+                )
+                .await
+            }
+            "account.stop_sync" => {
+                op_account_stop_sync(&self.pool, self.worker_manager.as_ref(), args).await
             }
 
             // -- secret ops --
@@ -425,6 +472,85 @@ async fn op_account_sync_folder(
     .await;
 
     encode_one(&report)
+}
+
+async fn op_account_start_sync(
+    pool: &SqlitePool,
+    secrets: &dyn SecretStore,
+    manager: &sync::WorkerManager,
+    args: Value,
+) -> Result<Value, RpcError> {
+    let account_id = parse_uuid(&args, "account_id")?;
+    let folder_name = args
+        .get("folder_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RpcError::bad_args("missing 'folder_name'"))?;
+
+    ensure_account_folder(pool, account_id, folder_name).await?;
+
+    let secret = secrets
+        .get(account_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("secrets::get: {e}")))?
+        .ok_or_else(|| RpcError::new("missing_secret", "no stored secret for account"))?;
+
+    let started = manager
+        .start(account_id, folder_name.to_string(), secret)
+        .await;
+    audit(
+        pool,
+        "account.start_sync",
+        Some(&account_id.to_string()),
+        &json!({"folder_name": folder_name, "started": started}),
+    )
+    .await;
+    Ok(json!({"ok": true, "started": started}))
+}
+
+async fn op_account_stop_sync(
+    pool: &SqlitePool,
+    manager: &sync::WorkerManager,
+    args: Value,
+) -> Result<Value, RpcError> {
+    let account_id = parse_uuid(&args, "account_id")?;
+    let folder_name = args
+        .get("folder_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RpcError::bad_args("missing 'folder_name'"))?;
+
+    let stopped = manager.stop(account_id, folder_name).await;
+    audit(
+        pool,
+        "account.stop_sync",
+        Some(&account_id.to_string()),
+        &json!({"folder_name": folder_name, "stopped": stopped}),
+    )
+    .await;
+    Ok(json!({"ok": true, "stopped": stopped}))
+}
+
+async fn ensure_account_folder(
+    pool: &SqlitePool,
+    account_id: uuid::Uuid,
+    folder_name: &str,
+) -> Result<(), RpcError> {
+    let account = db::accounts::get(pool, account_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?;
+    if account.is_none() {
+        return Err(RpcError::bad_args("unknown account_id"));
+    }
+
+    let folder = db::folders::get_by_name(pool, account_id, folder_name)
+        .await
+        .map_err(|e| RpcError::internal(format!("folders::get_by_name: {e}")))?;
+    if folder.is_none() {
+        return Err(RpcError::bad_args(format!(
+            "unknown folder '{folder_name}'"
+        )));
+    }
+
+    Ok(())
 }
 
 // ---------- secret ops ------------------------------------------------------

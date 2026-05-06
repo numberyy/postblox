@@ -17,6 +17,7 @@ use postblox::secrets::{
     file::{FileSecretStore, KdfParams},
     SecretStore,
 };
+use postblox::sync::WorkerConfig;
 
 struct Harness {
     _db_dir: tempfile::TempDir,
@@ -40,6 +41,21 @@ async fn make_harness_with_sync(sync: Arc<dyn ImapSync>) -> Harness {
 }
 
 async fn make_harness_with(imap: Arc<dyn ImapAuth>, imap_sync: Arc<dyn ImapSync>) -> Harness {
+    make_harness_with_config(imap, imap_sync, WorkerConfig::default()).await
+}
+
+async fn make_harness_with_sync_config(
+    sync: Arc<dyn ImapSync>,
+    worker_config: WorkerConfig,
+) -> Harness {
+    make_harness_with_config(Arc::new(NoImap), sync, worker_config).await
+}
+
+async fn make_harness_with_config(
+    imap: Arc<dyn ImapAuth>,
+    imap_sync: Arc<dyn ImapSync>,
+    worker_config: WorkerConfig,
+) -> Harness {
     let db_dir = tempfile::tempdir().unwrap();
     let pool = connect(&db_dir.path().join("postblox.db")).await.unwrap();
     let sock_dir = tempfile::tempdir().unwrap();
@@ -50,12 +66,13 @@ async fn make_harness_with(imap: Arc<dyn ImapAuth>, imap_sync: Arc<dyn ImapSync>
         "test-passphrase",
         KdfParams::insecure_for_tests(),
     ));
-    let dispatcher = Arc::new(DaemonDispatcher::with_imap(
+    let dispatcher = Arc::new(DaemonDispatcher::with_imap_and_sync_config(
         pool.clone(),
         hub.clone(),
         imap,
         imap_sync,
         secrets,
+        worker_config,
     ));
     let server = listen(&sock, dispatcher, hub.clone()).await.unwrap();
     Harness {
@@ -813,6 +830,172 @@ async fn setup_account_with_secret(h: &Harness) -> uuid::Uuid {
         .unwrap();
     assert!(resp.ok, "{:?}", resp);
     id
+}
+
+fn fast_worker_config() -> WorkerConfig {
+    WorkerConfig {
+        poll_interval: Duration::from_millis(50),
+        initial_backoff: Duration::from_millis(5),
+        max_backoff: Duration::from_millis(10),
+    }
+}
+
+async fn wait_for_message_count(
+    pool: &SqlitePool,
+    account_id: uuid::Uuid,
+    folder_name: &str,
+    expected: usize,
+) {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let folder = folders::get_by_name(pool, account_id, folder_name)
+                .await
+                .unwrap()
+                .unwrap();
+            let rows = messages::list_by_folder(pool, folder.id, 100, 0)
+                .await
+                .unwrap();
+            if rows.len() >= expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("expected messages inserted by sync worker");
+}
+
+#[tokio::test]
+async fn account_start_sync_starts_worker_and_stop_sync_is_idempotent() {
+    let msgs = vec![FetchedMessage {
+        uid: 11,
+        flags: vec![],
+        internal_date: Some(chrono::Utc::now()),
+        raw: rfc822("worker@x", None, "Worker", "body"),
+    }];
+    let h = make_harness_with_sync_config(
+        Arc::new(ScriptedSync::new(1, 12, msgs)),
+        fast_worker_config(),
+    )
+    .await;
+    let account_id = setup_account_with_secret(&h).await;
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let started = c
+        .request(
+            "account.start_sync",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(started.ok, "{:?}", started);
+    assert_eq!(started.data["ok"], json!(true));
+    assert_eq!(started.data["started"], json!(true));
+
+    wait_for_message_count(&h.pool, account_id, "INBOX", 1).await;
+
+    let duplicate = c
+        .request(
+            "account.start_sync",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(duplicate.ok, "{:?}", duplicate);
+    assert_eq!(duplicate.data["started"], json!(false));
+
+    let stopped = c
+        .request(
+            "account.stop_sync",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(stopped.ok, "{:?}", stopped);
+    assert_eq!(stopped.data["stopped"], json!(true));
+
+    let stopped_again = c
+        .request(
+            "account.stop_sync",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(stopped_again.ok, "{:?}", stopped_again);
+    assert_eq!(stopped_again.data["stopped"], json!(false));
+}
+
+#[tokio::test]
+async fn account_start_sync_missing_secret_returns_missing_secret() {
+    let h = make_harness_with_sync_config(
+        Arc::new(ScriptedSync::new(1, 1, vec![])),
+        fast_worker_config(),
+    )
+    .await;
+    let id = make_account(&h, "missing@example.com").await;
+    folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id: id,
+            name: "INBOX".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Inbox,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "account.start_sync",
+            json!({"account_id": id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("missing_secret")
+    );
+}
+
+#[tokio::test]
+async fn account_start_sync_unknown_account_or_folder_returns_bad_args() {
+    let h = make_harness_with_sync_config(
+        Arc::new(ScriptedSync::new(1, 1, vec![])),
+        fast_worker_config(),
+    )
+    .await;
+    let id = setup_account_with_secret(&h).await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let missing_account = c
+        .request(
+            "account.start_sync",
+            json!({"account_id": uuid::Uuid::new_v4(), "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(!missing_account.ok);
+    assert_eq!(
+        missing_account.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+
+    let missing_folder = c
+        .request(
+            "account.start_sync",
+            json!({"account_id": id, "folder_name": "Nope"}),
+        )
+        .await
+        .unwrap();
+    assert!(!missing_folder.ok);
+    assert_eq!(
+        missing_folder.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
 }
 
 #[tokio::test]

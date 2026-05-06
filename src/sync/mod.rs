@@ -6,7 +6,11 @@
 //! the production path stays the same shape.
 
 pub mod error;
+pub mod manager;
 pub mod reconciler;
+pub mod worker;
 
 pub use error::SyncError;
+pub use manager::WorkerManager;
 pub use reconciler::{reconcile_folder, ReconcileReport};
+pub use worker::WorkerConfig;
