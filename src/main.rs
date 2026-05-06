@@ -1,6 +1,6 @@
-// postblox v2 — refocus in progress.
+// postblox — refocus in progress.
 //
-// Phase R0 cuts the legacy server, dashboard, multi-tenant, slop, and
+// Phase R0 cut the legacy server, dashboard, multi-tenant, slop, and
 // permission stacks. Phases R1+ build the SQLite-backed daemon, the
 // rebuilt TUI, the trimmed MCP bridge, and OAuth/keyring auth.
 //

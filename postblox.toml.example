@@ -1,4 +1,4 @@
-# postblox v2 — local-first email TUI + MCP bridge.
+# postblox — local-first email TUI + MCP bridge.
 #
 # This file is a placeholder; the full schema lands with phase R1
 # (SQLite + accounts) and R4 (MCP gates). For now nothing is read.
