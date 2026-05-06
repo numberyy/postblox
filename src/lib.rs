@@ -9,3 +9,4 @@ pub mod models;
 pub mod secrets;
 pub mod smtp;
 pub mod sync;
+pub mod tui;
