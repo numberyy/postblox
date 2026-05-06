@@ -1,3 +1,4 @@
+pub mod daemon;
 pub mod db;
 pub mod embeddings;
 pub mod ipc;

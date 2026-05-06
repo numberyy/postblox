@@ -1,9 +1,10 @@
+use serde::Deserialize;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::models::Draft;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct NewDraft {
     pub account_id: Uuid,
     pub in_reply_to_msg: Option<Uuid>,

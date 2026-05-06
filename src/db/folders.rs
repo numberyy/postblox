@@ -1,9 +1,10 @@
+use serde::Deserialize;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::models::{Folder, FolderRole};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct NewFolder {
     pub account_id: Uuid,
     pub name: String,

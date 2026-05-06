@@ -1,66 +1,145 @@
-//! End-to-end IPC test: real Unix socket, real SQLite pool, real
-//! `Dispatcher` impl. Covers what the daemon binary itself runs.
+//! End-to-end IPC test against the real `DaemonDispatcher` over a
+//! real Unix socket and a real on-disk SQLite pool.
 
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::json;
 use sqlx::SqlitePool;
+use tokio::time::{timeout, Duration};
 
-use postblox::db::{accounts, connect, folders};
+use postblox::daemon::DaemonDispatcher;
+use postblox::db::{accounts, connect, folders, messages, threads};
 use postblox::ipc::client::Client;
-use postblox::ipc::{listen, Dispatcher, Hub, RpcError, Topic};
+use postblox::ipc::{listen, Hub, Topic};
 use postblox::models::{AuthKind, FolderRole};
 
-#[derive(Clone)]
-struct DaemonDispatcher {
+struct Harness {
+    _db_dir: tempfile::TempDir,
+    _sock_dir: tempfile::TempDir,
+    sock: std::path::PathBuf,
     pool: SqlitePool,
+    hub: Arc<Hub>,
+    _server: postblox::ipc::server::ServerHandle,
 }
 
-#[async_trait::async_trait]
-impl Dispatcher for DaemonDispatcher {
-    async fn dispatch(&self, op: &str, args: Value) -> Result<Value, RpcError> {
-        match op {
-            "account.list" => serde_json::to_value(
-                accounts::list(&self.pool)
-                    .await
-                    .map_err(|e| RpcError::internal(e.to_string()))?,
-            )
-            .map_err(|e| RpcError::internal(e.to_string())),
-            "folder.list" => {
-                let id = args
-                    .get("account_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| RpcError::bad_args("missing account_id"))?;
-                let id =
-                    uuid::Uuid::parse_str(id).map_err(|e| RpcError::bad_args(e.to_string()))?;
-                serde_json::to_value(
-                    folders::list_by_account(&self.pool, id)
-                        .await
-                        .map_err(|e| RpcError::internal(e.to_string()))?,
-                )
-                .map_err(|e| RpcError::internal(e.to_string()))
-            }
-            other => Err(RpcError::unknown_op(other)),
-        }
+async fn make_harness() -> Harness {
+    let db_dir = tempfile::tempdir().unwrap();
+    let pool = connect(&db_dir.path().join("postblox.db")).await.unwrap();
+    let sock_dir = tempfile::tempdir().unwrap();
+    let sock = sock_dir.path().join("postbloxd.sock");
+    let hub = Arc::new(Hub::new());
+    let dispatcher = Arc::new(DaemonDispatcher::new(pool.clone(), hub.clone()));
+    let server = listen(&sock, dispatcher, hub.clone()).await.unwrap();
+    Harness {
+        _db_dir: db_dir,
+        _sock_dir: sock_dir,
+        sock,
+        pool,
+        hub,
+        _server: server,
     }
 }
 
-async fn make_pool() -> (tempfile::TempDir, SqlitePool) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("postblox.db");
-    let pool = connect(&path).await.unwrap();
-    (dir, pool)
+fn account_args(email: &str) -> serde_json::Value {
+    json!({
+        "email": email,
+        "display_name": null,
+        "auth_kind": "password",
+        "imap_host": "i",
+        "imap_port": 993,
+        "imap_use_tls": true,
+        "smtp_host": "s",
+        "smtp_port": 465,
+        "smtp_use_tls": true,
+        "smtp_starttls": false,
+    })
 }
 
 #[tokio::test]
-async fn account_list_round_trip_through_socket() {
-    let (_dir, pool) = make_pool().await;
+async fn account_create_then_list_round_trip() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
 
+    let resp = c
+        .request("account.create", account_args("alice@example.com"))
+        .await
+        .unwrap();
+    assert!(resp.ok, "create failed: {:?}", resp.error);
+    let id = resp.data["id"].as_str().unwrap().to_string();
+
+    let listed = c.request("account.list", json!({})).await.unwrap();
+    assert!(listed.ok);
+    let arr = listed.data.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["email"], "alice@example.com");
+    assert_eq!(arr[0]["id"], id);
+}
+
+#[tokio::test]
+async fn account_create_with_bad_args_returns_bad_args() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request("account.create", json!({"email": "x"}))
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(resp.error.unwrap().code, "bad_args");
+}
+
+#[tokio::test]
+async fn folder_upsert_creates_then_updates() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let acc = c
+        .request("account.create", account_args("a@x.com"))
+        .await
+        .unwrap();
+    let acc_id = acc.data["id"].as_str().unwrap();
+
+    let f1 = c
+        .request(
+            "folder.upsert",
+            json!({
+                "account_id": acc_id,
+                "name": "INBOX",
+                "delimiter": "/",
+                "role": "inbox",
+                "selectable": true,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(f1.ok, "{:?}", f1.error);
+    let folder_id = f1.data["id"].as_str().unwrap().to_string();
+
+    // upsert again should keep the same row.
+    let f2 = c
+        .request(
+            "folder.upsert",
+            json!({
+                "account_id": acc_id,
+                "name": "INBOX",
+                "delimiter": "/",
+                "role": "inbox",
+                "selectable": true,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(f2.data["id"].as_str().unwrap(), folder_id);
+}
+
+#[tokio::test]
+async fn message_set_flags_publishes_mail_updated() {
+    let h = make_harness().await;
+
+    // Seed via direct db calls — set_flags needs an existing message.
     let acc = accounts::create(
-        &pool,
+        &h.pool,
         &accounts::NewAccount {
-            email: "alice@example.com".into(),
-            display_name: Some("Alice".into()),
+            email: "a@x.com".into(),
+            display_name: None,
             auth_kind: AuthKind::Password,
             imap_host: "i".into(),
             imap_port: 993,
@@ -73,34 +152,168 @@ async fn account_list_round_trip_through_socket() {
     )
     .await
     .unwrap();
+    let folder = folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id: acc.id,
+            name: "INBOX".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Inbox,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+    let thread = threads::create(&h.pool, acc.id, None, Some("subj"))
+        .await
+        .unwrap();
+    let msg = messages::create(
+        &h.pool,
+        &messages::NewMessage {
+            account_id: acc.id,
+            folder_id: folder.id,
+            thread_id: Some(thread.id),
+            uid: 1,
+            message_id_header: None,
+            in_reply_to: None,
+            references_header: None,
+            from_addr: "b@x.com".into(),
+            to_addrs: json!([]),
+            cc_addrs: json!([]),
+            bcc_addrs: json!([]),
+            reply_to: None,
+            subject: Some("subj".into()),
+            snippet: None,
+            text_body: None,
+            html_body: None,
+            raw_size: 1,
+            flags: json!([]),
+            internal_date: chrono::Utc::now(),
+            sent_at: None,
+        },
+    )
+    .await
+    .unwrap();
 
-    let sock_dir = tempfile::tempdir().unwrap();
-    let sock = sock_dir.path().join("postbloxd.sock");
-    let hub = Arc::new(Hub::new());
-    let dispatcher = Arc::new(DaemonDispatcher { pool: pool.clone() });
-    let _server = listen(&sock, dispatcher, hub).await.unwrap();
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let sub = c.subscribe(Topic::MailUpdated).await.unwrap();
+    assert!(sub > 0);
 
-    let mut client = Client::connect(&sock).await.unwrap();
+    // Let the forwarder register before we publish.
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let resp = client.request("account.list", json!({})).await.unwrap();
-    assert!(resp.ok, "account.list should succeed: {:?}", resp.error);
-    let arr = resp.data.as_array().unwrap();
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["email"], "alice@example.com");
-    assert_eq!(arr[0]["id"], acc.id.to_string());
+    let resp = c
+        .request(
+            "message.set_flags",
+            json!({"id": msg.id.to_string(), "flags": ["\\Seen"]}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp.error);
+
+    let event = timeout(Duration::from_secs(2), c.next_event())
+        .await
+        .expect("expected event")
+        .unwrap();
+    assert_eq!(event.topic, "mail.updated");
+    assert_eq!(event.data["message_id"], msg.id.to_string());
+    assert_eq!(event.data["flags"], json!(["\\Seen"]));
+
+    // Audit log should have one entry for the flag change.
+    let audit = c
+        .request("audit.list_recent", json!({"limit": 10}))
+        .await
+        .unwrap();
+    assert!(audit.ok);
+    let entries = audit.data.as_array().unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["action"] == "message.set_flags" && e["target"] == msg.id.to_string()),
+        "expected audit entry for set_flags, got {entries:?}"
+    );
+}
+
+#[tokio::test]
+async fn draft_create_update_delete_round_trip() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let acc = c
+        .request("account.create", account_args("a@x.com"))
+        .await
+        .unwrap();
+    let acc_id = acc.data["id"].as_str().unwrap();
+
+    let created = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": acc_id,
+                "to_addrs": ["bob@x.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "hi",
+                "text_body": "hello",
+                "html_body": null,
+                "in_reply_to_msg": null,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(created.ok, "{:?}", created.error);
+    let draft_id = created.data["id"].as_str().unwrap().to_string();
+
+    let updated = c
+        .request(
+            "draft.update",
+            json!({
+                "id": draft_id,
+                "to_addrs": ["bob@x.com"],
+                "subject": "edited",
+                "text_body": "edited body",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(updated.ok, "{:?}", updated.error);
+    assert_eq!(updated.data["subject"], "edited");
+    assert_eq!(updated.data["text_body"], "edited body");
+
+    let deleted = c
+        .request("draft.delete", json!({"id": draft_id}))
+        .await
+        .unwrap();
+    assert!(deleted.ok);
+    assert_eq!(deleted.data["removed"], true);
+}
+
+#[tokio::test]
+async fn account_delete_cascade_through_socket() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let created = c
+        .request("account.create", account_args("a@x.com"))
+        .await
+        .unwrap();
+    let acc_id = created.data["id"].as_str().unwrap().to_string();
+
+    let removed = c
+        .request("account.delete", json!({"id": acc_id}))
+        .await
+        .unwrap();
+    assert!(removed.ok);
+    assert_eq!(removed.data["removed"], true);
+
+    let listed = c.request("account.list", json!({})).await.unwrap();
+    assert!(listed.data.as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn folder_list_with_bad_uuid_returns_bad_args() {
-    let (_dir, pool) = make_pool().await;
-    let sock_dir = tempfile::tempdir().unwrap();
-    let sock = sock_dir.path().join("postbloxd.sock");
-    let hub = Arc::new(Hub::new());
-    let dispatcher = Arc::new(DaemonDispatcher { pool });
-    let _server = listen(&sock, dispatcher, hub).await.unwrap();
-
-    let mut client = Client::connect(&sock).await.unwrap();
-    let resp = client
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
         .request("folder.list", json!({"account_id": "not-a-uuid"}))
         .await
         .unwrap();
@@ -109,25 +322,18 @@ async fn folder_list_with_bad_uuid_returns_bad_args() {
 }
 
 #[tokio::test]
-async fn subscription_delivers_published_event() {
-    let (_dir, pool) = make_pool().await;
-    let sock_dir = tempfile::tempdir().unwrap();
-    let sock = sock_dir.path().join("postbloxd.sock");
-    let hub = Arc::new(Hub::new());
-    let dispatcher = Arc::new(DaemonDispatcher { pool: pool.clone() });
-    let _server = listen(&sock, dispatcher, hub.clone()).await.unwrap();
-
-    let mut client = Client::connect(&sock).await.unwrap();
-    let sub = client.subscribe(Topic::MailNew).await.unwrap();
+async fn subscription_delivers_published_event_via_hub() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let sub = c.subscribe(Topic::MailNew).await.unwrap();
     assert!(sub > 0);
 
-    // Allow the forwarder task to register before we publish.
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    hub.publish(Topic::MailNew, json!({"id": "abc"})).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    h.hub.publish(Topic::MailNew, json!({"id": "abc"})).await;
 
-    let event = tokio::time::timeout(std::time::Duration::from_secs(2), client.next_event())
+    let event = timeout(Duration::from_secs(2), c.next_event())
         .await
-        .expect("event must arrive")
+        .unwrap()
         .unwrap();
     assert_eq!(event.topic, "mail.new");
     assert_eq!(event.data, json!({"id": "abc"}));
@@ -135,12 +341,10 @@ async fn subscription_delivers_published_event() {
 
 #[tokio::test]
 async fn many_concurrent_clients_all_get_responses() {
-    let (_dir, pool) = make_pool().await;
-
-    // Insert two accounts + a folder per account so list has content.
+    let h = make_harness().await;
     for email in ["a@x.com", "b@x.com"] {
-        let acc = accounts::create(
-            &pool,
+        accounts::create(
+            &h.pool,
             &accounts::NewAccount {
                 email: email.into(),
                 display_name: None,
@@ -156,34 +360,15 @@ async fn many_concurrent_clients_all_get_responses() {
         )
         .await
         .unwrap();
-        folders::upsert(
-            &pool,
-            &folders::NewFolder {
-                account_id: acc.id,
-                name: "INBOX".into(),
-                delimiter: "/".into(),
-                role: FolderRole::Inbox,
-                selectable: true,
-            },
-        )
-        .await
-        .unwrap();
     }
 
-    let sock_dir = tempfile::tempdir().unwrap();
-    let sock = sock_dir.path().join("postbloxd.sock");
-    let hub = Arc::new(Hub::new());
-    let dispatcher = Arc::new(DaemonDispatcher { pool: pool.clone() });
-    let _server = listen(&sock, dispatcher, hub).await.unwrap();
-
-    // 10 concurrent clients, each issuing 5 ops.
     let mut handles = Vec::new();
     for _ in 0..10 {
-        let sock = sock.clone();
+        let sock = h.sock.clone();
         handles.push(tokio::spawn(async move {
-            let mut client = Client::connect(&sock).await.unwrap();
+            let mut c = Client::connect(&sock).await.unwrap();
             for _ in 0..5 {
-                let resp = client.request("account.list", json!({})).await.unwrap();
+                let resp = c.request("account.list", json!({})).await.unwrap();
                 assert!(resp.ok);
                 assert_eq!(resp.data.as_array().unwrap().len(), 2);
             }

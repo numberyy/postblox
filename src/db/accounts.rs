@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::models::{Account, AuthKind, SyncStatus};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct NewAccount {
     pub email: String,
     pub display_name: Option<String>,
