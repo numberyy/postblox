@@ -13,8 +13,8 @@ pub mod client;
 pub mod error;
 
 pub use client::{
-    connect, fetch_uid_range, list_folders, Connector, FetchedMessage, FolderInfo, FolderSync,
-    PlainConnector, RustlsConnector,
+    connect, fetch_uid_range, list_folders, wait_for_idle_change, Connector, FetchedMessage,
+    FolderInfo, FolderSync, IdleOutcome, IdleRequest, PlainConnector, RustlsConnector,
 };
 pub use error::ImapError;
 
@@ -46,6 +46,12 @@ pub trait ImapSync: Send + Sync {
         folder: &str,
         from_uid: u32,
     ) -> Result<FolderSync, ImapError>;
+}
+
+/// Erased entry point for one bounded IMAP IDLE wait.
+#[async_trait::async_trait]
+pub trait ImapIdle: Send + Sync {
+    async fn idle_once(&self, request: IdleRequest<'_>) -> Result<IdleOutcome, ImapError>;
 }
 
 /// Concrete impl backed by a `Connector`. One struct services both
@@ -94,6 +100,13 @@ impl<C: Connector> ImapSync for ConnectorAuth<C> {
     }
 }
 
+#[async_trait::async_trait]
+impl<C: Connector> ImapIdle for ConnectorAuth<C> {
+    async fn idle_once(&self, request: IdleRequest<'_>) -> Result<IdleOutcome, ImapError> {
+        wait_for_idle_change(&self.connector, request).await
+    }
+}
+
 /// Default production binding: rustls + native cert store. Returns the
 /// same `Arc` typed two ways so callers don't have to construct twice.
 pub fn default_auth() -> Result<Arc<dyn ImapAuth>, ImapError> {
@@ -101,5 +114,9 @@ pub fn default_auth() -> Result<Arc<dyn ImapAuth>, ImapError> {
 }
 
 pub fn default_sync() -> Result<Arc<dyn ImapSync>, ImapError> {
+    Ok(Arc::new(ConnectorAuth::new(RustlsConnector::new()?)))
+}
+
+pub fn default_idle() -> Result<Arc<dyn ImapIdle>, ImapError> {
     Ok(Arc::new(ConnectorAuth::new(RustlsConnector::new()?)))
 }

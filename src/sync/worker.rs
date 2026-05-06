@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::imap::{ImapError, ImapSync};
+use crate::imap::{IdleOutcome, IdleRequest, ImapError, ImapIdle, ImapSync};
 use crate::ipc::Hub;
 use crate::secrets::Secret;
 
@@ -16,6 +16,7 @@ use super::{reconcile_folder, SyncError};
 #[derive(Debug, Clone, Copy)]
 pub struct WorkerConfig {
     pub poll_interval: Duration,
+    pub idle_timeout: Duration,
     pub initial_backoff: Duration,
     pub max_backoff: Duration,
 }
@@ -24,10 +25,23 @@ impl Default for WorkerConfig {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(60),
+            idle_timeout: Duration::from_secs(29 * 60),
             initial_backoff: Duration::from_secs(5),
             max_backoff: Duration::from_secs(60),
         }
     }
+}
+
+pub(crate) struct SyncWorker {
+    pub(crate) pool: SqlitePool,
+    pub(crate) hub: Arc<Hub>,
+    pub(crate) imap: Arc<dyn ImapSync>,
+    pub(crate) idle: Option<Arc<dyn ImapIdle>>,
+    pub(crate) account_id: Uuid,
+    pub(crate) folder_name: String,
+    pub(crate) secret: Secret,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) config: WorkerConfig,
 }
 
 pub(crate) struct PollingWorker {
@@ -111,6 +125,169 @@ pub(crate) async fn run_polling_worker(worker: PollingWorker) {
     }
 }
 
+pub(crate) async fn run_sync_worker(worker: SyncWorker) {
+    let SyncWorker {
+        pool,
+        hub,
+        imap,
+        idle,
+        account_id,
+        folder_name,
+        secret,
+        cancel,
+        config,
+    } = worker;
+
+    let Some(idle) = idle else {
+        run_polling_worker(PollingWorker {
+            pool,
+            hub,
+            imap,
+            account_id,
+            folder_name,
+            secret,
+            cancel,
+            config,
+        })
+        .await;
+        return;
+    };
+
+    let mut backoff = config.initial_backoff;
+    loop {
+        if cancel.is_cancelled() {
+            return;
+        }
+
+        let reconcile = tokio::select! {
+            _ = cancel.cancelled() => return,
+            result = reconcile_folder(
+                &pool,
+                &hub,
+                imap.as_ref(),
+                account_id,
+                &folder_name,
+                &secret,
+            ) => result,
+        };
+
+        match reconcile {
+            Ok(report) => {
+                tracing::debug!(
+                    %account_id,
+                    folder_name = %folder_name,
+                    inserted = report.inserted,
+                    wiped = report.wiped,
+                    "idle sync worker reconciled folder"
+                );
+                backoff = config.initial_backoff;
+            }
+            Err(err) if is_auth_error(&err) => {
+                tracing::warn!(
+                    %account_id,
+                    folder_name = %folder_name,
+                    error = %err,
+                    "idle sync worker stopped after authentication failure"
+                );
+                return;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    %account_id,
+                    folder_name = %folder_name,
+                    error = %err,
+                    retry_in_ms = backoff.as_millis(),
+                    "idle sync worker reconcile failed; retrying"
+                );
+                if sleep_or_cancel(backoff, &cancel).await {
+                    return;
+                }
+                backoff = next_backoff(backoff, config.max_backoff);
+                continue;
+            }
+        }
+
+        let account = match crate::db::accounts::get(&pool, account_id).await {
+            Ok(Some(account)) => account,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::warn!(
+                    %account_id,
+                    folder_name = %folder_name,
+                    error = %err,
+                    retry_in_ms = backoff.as_millis(),
+                    "idle sync worker account lookup failed; retrying"
+                );
+                if sleep_or_cancel(backoff, &cancel).await {
+                    return;
+                }
+                backoff = next_backoff(backoff, config.max_backoff);
+                continue;
+            }
+        };
+
+        let wait = idle
+            .idle_once(IdleRequest {
+                host: &account.imap_host,
+                port: account.imap_port as u16,
+                username: &account.email,
+                password: &secret,
+                folder: &folder_name,
+                timeout: config.idle_timeout,
+                cancel: cancel.clone(),
+            })
+            .await;
+
+        match wait {
+            Ok(IdleOutcome::NewData | IdleOutcome::Timeout) => {
+                backoff = config.initial_backoff;
+            }
+            Ok(IdleOutcome::Interrupted) => {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                backoff = config.initial_backoff;
+            }
+            Err(ImapError::Unsupported(_)) => {
+                run_polling_worker(PollingWorker {
+                    pool,
+                    hub,
+                    imap,
+                    account_id,
+                    folder_name,
+                    secret,
+                    cancel,
+                    config,
+                })
+                .await;
+                return;
+            }
+            Err(err @ ImapError::Auth(_)) => {
+                tracing::warn!(
+                    %account_id,
+                    folder_name = %folder_name,
+                    error = %err,
+                    "idle sync worker stopped after authentication failure"
+                );
+                return;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    %account_id,
+                    folder_name = %folder_name,
+                    error = %err,
+                    retry_in_ms = backoff.as_millis(),
+                    "idle sync worker wait failed; retrying"
+                );
+                if sleep_or_cancel(backoff, &cancel).await {
+                    return;
+                }
+                backoff = next_backoff(backoff, config.max_backoff);
+            }
+        }
+    }
+}
+
 fn is_auth_error(err: &SyncError) -> bool {
     matches!(
         err,
@@ -135,6 +312,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    use tokio::sync::Notify;
     use tokio::task::JoinHandle;
     use tokio::time::{timeout, Duration};
 
@@ -200,9 +378,74 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone)]
+    enum IdleScript {
+        WaitForSignal,
+        Unsupported,
+    }
+
+    struct ScriptedIdle {
+        calls: AtomicUsize,
+        outcomes: Mutex<VecDeque<IdleScript>>,
+        entered: Notify,
+        signal: Notify,
+    }
+
+    impl ScriptedIdle {
+        fn new(outcomes: Vec<IdleScript>) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                outcomes: Mutex::new(outcomes.into()),
+                entered: Notify::new(),
+                signal: Notify::new(),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        async fn wait_until_entered(&self, expected: usize) {
+            timeout(Duration::from_secs(1), async {
+                loop {
+                    if self.calls() >= expected {
+                        return;
+                    }
+                    self.entered.notified().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ImapIdle for ScriptedIdle {
+        async fn idle_once(&self, request: IdleRequest<'_>) -> Result<IdleOutcome, ImapError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_waiters();
+            let outcome = self
+                .outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(IdleScript::WaitForSignal);
+            match outcome {
+                IdleScript::Unsupported => Err(ImapError::Unsupported("no idle".into())),
+                IdleScript::WaitForSignal => {
+                    tokio::select! {
+                        _ = self.signal.notified() => Ok(IdleOutcome::NewData),
+                        _ = request.cancel.cancelled() => Ok(IdleOutcome::Interrupted),
+                    }
+                }
+            }
+        }
+    }
+
     fn fast_config() -> WorkerConfig {
         WorkerConfig {
             poll_interval: Duration::from_millis(20),
+            idle_timeout: Duration::from_secs(30),
             initial_backoff: Duration::from_millis(5),
             max_backoff: Duration::from_millis(10),
         }
@@ -253,6 +496,30 @@ mod tests {
             pool,
             hub: Arc::new(Hub::new()),
             imap,
+            account_id,
+            folder_name: "INBOX".into(),
+            secret: zeroize::Zeroizing::new("right".to_string()),
+            cancel: cancel.clone(),
+            config,
+        }));
+        (cancel, handle)
+    }
+
+    fn spawn_idle_worker(
+        pool: SqlitePool,
+        sync: Arc<ScriptedSync>,
+        idle: Arc<ScriptedIdle>,
+        account_id: Uuid,
+        config: WorkerConfig,
+    ) -> (CancellationToken, JoinHandle<()>) {
+        let cancel = CancellationToken::new();
+        let imap: Arc<dyn ImapSync> = sync;
+        let idle_trait: Arc<dyn ImapIdle> = idle;
+        let handle = tokio::spawn(run_sync_worker(SyncWorker {
+            pool,
+            hub: Arc::new(Hub::new()),
+            imap,
+            idle: Some(idle_trait),
             account_id,
             folder_name: "INBOX".into(),
             secret: zeroize::Zeroizing::new("right".to_string()),
@@ -338,5 +605,63 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(40)).await;
         assert_eq!(after_auth, 1);
         assert_eq!(sync.calls(), after_auth);
+    }
+
+    #[tokio::test]
+    async fn test_idle_worker_reconciles_initially_and_after_idle_change() {
+        let pool = crate::db::test_pool().await;
+        let account_id = seed_account_folder(&pool).await;
+        let sync = Arc::new(ScriptedSync::new(vec![Outcome::Ok]));
+        let idle = Arc::new(ScriptedIdle::new(vec![IdleScript::WaitForSignal]));
+        let (cancel, handle) =
+            spawn_idle_worker(pool, sync.clone(), idle.clone(), account_id, fast_config());
+
+        wait_for_calls(&sync, 1).await;
+        idle.wait_until_entered(1).await;
+        idle.signal.notify_waiters();
+        wait_for_calls(&sync, 2).await;
+
+        cancel.cancel();
+        handle.await.unwrap();
+        assert!(idle.calls() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_idle_worker_falls_back_to_polling_when_idle_unsupported() {
+        let pool = crate::db::test_pool().await;
+        let account_id = seed_account_folder(&pool).await;
+        let sync = Arc::new(ScriptedSync::new(vec![Outcome::Ok]));
+        let idle = Arc::new(ScriptedIdle::new(vec![IdleScript::Unsupported]));
+        let (cancel, handle) =
+            spawn_idle_worker(pool, sync.clone(), idle.clone(), account_id, fast_config());
+
+        wait_for_calls(&sync, 3).await;
+
+        cancel.cancel();
+        handle.await.unwrap();
+        assert_eq!(idle.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_idle_worker_cancel_interrupts_idle_wait_and_joins_cleanly() {
+        let pool = crate::db::test_pool().await;
+        let account_id = seed_account_folder(&pool).await;
+        let sync = Arc::new(ScriptedSync::new(vec![Outcome::Ok]));
+        let idle = Arc::new(ScriptedIdle::new(vec![IdleScript::WaitForSignal]));
+        let (cancel, handle) =
+            spawn_idle_worker(pool, sync.clone(), idle.clone(), account_id, fast_config());
+
+        wait_for_calls(&sync, 1).await;
+        idle.wait_until_entered(1).await;
+        cancel.cancel();
+        timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+        let after_cancel = sync.calls();
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(sync.calls(), after_cancel);
+        assert_eq!(idle.calls(), 1);
     }
 }

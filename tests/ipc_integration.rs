@@ -1,7 +1,8 @@
 //! End-to-end IPC test against the real `DaemonDispatcher` over a
 //! real Unix socket and a real on-disk SQLite pool.
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 use sqlx::SqlitePool;
@@ -17,6 +18,7 @@ use postblox::secrets::{
     file::{FileSecretStore, KdfParams},
     SecretStore,
 };
+use postblox::smtp::{SmtpError, SmtpSubmitRequest, SmtpSubmitter};
 use postblox::sync::WorkerConfig;
 
 struct Harness {
@@ -56,6 +58,31 @@ async fn make_harness_with_config(
     imap_sync: Arc<dyn ImapSync>,
     worker_config: WorkerConfig,
 ) -> Harness {
+    make_harness_with_config_and_smtp(
+        imap,
+        imap_sync,
+        Arc::new(postblox::smtp::LettreSmtpSubmitter::new()),
+        worker_config,
+    )
+    .await
+}
+
+async fn make_harness_with_smtp(smtp: Arc<dyn SmtpSubmitter>) -> Harness {
+    make_harness_with_config_and_smtp(
+        Arc::new(NoImap),
+        Arc::new(NoSync),
+        smtp,
+        WorkerConfig::default(),
+    )
+    .await
+}
+
+async fn make_harness_with_config_and_smtp(
+    imap: Arc<dyn ImapAuth>,
+    imap_sync: Arc<dyn ImapSync>,
+    smtp: Arc<dyn SmtpSubmitter>,
+    worker_config: WorkerConfig,
+) -> Harness {
     let db_dir = tempfile::tempdir().unwrap();
     let pool = connect(&db_dir.path().join("postblox.db")).await.unwrap();
     let sock_dir = tempfile::tempdir().unwrap();
@@ -66,12 +93,13 @@ async fn make_harness_with_config(
         "test-passphrase",
         KdfParams::insecure_for_tests(),
     ));
-    let dispatcher = Arc::new(DaemonDispatcher::with_imap_and_sync_config(
+    let dispatcher = Arc::new(DaemonDispatcher::with_imap_sync_smtp_config(
         pool.clone(),
         hub.clone(),
         imap,
         imap_sync,
         secrets,
+        smtp,
         worker_config,
     ));
     let server = listen(&sock, dispatcher, hub.clone()).await.unwrap();
@@ -122,6 +150,62 @@ impl ImapSync for NoSync {
         Err(ImapError::Protocol(
             "imap sync not configured for this test".into(),
         ))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CapturedSmtp {
+    host: String,
+    port: u16,
+    use_tls: bool,
+    starttls: bool,
+    username: String,
+    password: String,
+    from: String,
+    recipients: Vec<String>,
+    mime: Vec<u8>,
+}
+
+struct MockSmtp {
+    calls: Mutex<Vec<CapturedSmtp>>,
+    outcomes: Mutex<VecDeque<Result<(), SmtpError>>>,
+}
+
+impl MockSmtp {
+    fn ok() -> Self {
+        Self {
+            calls: Mutex::new(vec![]),
+            outcomes: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    fn with_outcome(outcome: Result<(), SmtpError>) -> Self {
+        Self {
+            calls: Mutex::new(vec![]),
+            outcomes: Mutex::new(VecDeque::from([outcome])),
+        }
+    }
+
+    fn calls(&self) -> Vec<CapturedSmtp> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl SmtpSubmitter for MockSmtp {
+    async fn submit(&self, request: SmtpSubmitRequest) -> Result<(), SmtpError> {
+        self.calls.lock().unwrap().push(CapturedSmtp {
+            host: request.server.host,
+            port: request.server.port,
+            use_tls: request.server.use_tls,
+            starttls: request.server.starttls,
+            username: request.username,
+            password: request.password.to_string(),
+            from: request.from,
+            recipients: request.recipients,
+            mime: request.mime,
+        });
+        self.outcomes.lock().unwrap().pop_front().unwrap_or(Ok(()))
     }
 }
 
@@ -371,6 +455,199 @@ async fn draft_create_update_delete_round_trip() {
         .unwrap();
     assert!(deleted.ok);
     assert_eq!(deleted.data["removed"], true);
+}
+
+#[tokio::test]
+async fn message_send_with_draft_submits_mime_and_audits() {
+    let smtp = Arc::new(MockSmtp::ok());
+    let h = make_harness_with_smtp(smtp.clone()).await;
+    let account_id = setup_account_with_secret(&h).await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let draft = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": account_id,
+                "to_addrs": ["to@example.com"],
+                "cc_addrs": ["copy@example.com"],
+                "bcc_addrs": ["blind@example.com"],
+                "subject": "SMTP hi",
+                "text_body": "plain body",
+                "html_body": "<p>html body</p>",
+                "in_reply_to_msg": null,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(draft.ok, "{:?}", draft.error);
+    let draft_id = draft.data["id"].as_str().unwrap().to_string();
+
+    let sent = c
+        .request(
+            "message.send",
+            json!({"account_id": account_id, "draft_id": draft_id}),
+        )
+        .await
+        .unwrap();
+    assert!(sent.ok, "{:?}", sent.error);
+    let message_id = sent.data["message_id"].as_str().unwrap();
+
+    let calls = smtp.calls();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.host, "smtp.example.com");
+    assert_eq!(call.port, 465);
+    assert!(call.use_tls);
+    assert!(!call.starttls);
+    assert_eq!(call.username, "u@example.com");
+    assert_eq!(call.password, "right");
+    assert_eq!(call.from, "u@example.com");
+    assert_eq!(
+        call.recipients,
+        vec![
+            "to@example.com".to_string(),
+            "copy@example.com".to_string(),
+            "blind@example.com".to_string()
+        ]
+    );
+    let mime = String::from_utf8(call.mime.clone()).unwrap();
+    assert!(mime.contains("From: u@example.com\r\n"));
+    assert!(mime.contains("To: to@example.com\r\n"));
+    assert!(mime.contains("Cc: copy@example.com\r\n"));
+    assert!(mime.contains("Subject: SMTP hi\r\n"));
+    assert!(mime.contains(&format!("Message-ID: {message_id}\r\n")));
+    assert!(mime.contains("plain body"));
+    assert!(mime.contains("<p>html body</p>"));
+    assert!(!mime.contains("blind@example.com"));
+
+    let audit = c
+        .request("audit.list_recent", json!({"limit": 10}))
+        .await
+        .unwrap();
+    assert!(audit.ok);
+    let entries = audit.data.as_array().unwrap();
+    assert!(
+        entries.iter().any(|e| {
+            e["action"] == "message.send"
+                && e["target"] == draft_id
+                && e["details"]["message_id"] == message_id
+        }),
+        "expected message.send audit entry, got {entries:?}"
+    );
+}
+
+#[tokio::test]
+async fn message_send_missing_secret_returns_missing_secret() {
+    let smtp = Arc::new(MockSmtp::ok());
+    let h = make_harness_with_smtp(smtp.clone()).await;
+    let account_id = make_account(&h, "u@example.com").await;
+    let draft = postblox::db::drafts::create(
+        &h.pool,
+        &postblox::db::drafts::NewDraft {
+            account_id,
+            in_reply_to_msg: None,
+            to_addrs: json!(["to@example.com"]),
+            cc_addrs: json!([]),
+            bcc_addrs: json!([]),
+            subject: Some("No secret".into()),
+            text_body: Some("body".into()),
+            html_body: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "message.send",
+            json!({"account_id": account_id, "draft_id": draft.id}),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("missing_secret")
+    );
+    assert!(smtp.calls().is_empty());
+}
+
+#[tokio::test]
+async fn message_send_auth_failure_maps_to_auth_failed() {
+    let smtp = Arc::new(MockSmtp::with_outcome(Err(SmtpError::Auth(
+        "bad credentials".into(),
+    ))));
+    let h = make_harness_with_smtp(smtp.clone()).await;
+    let account_id = setup_account_with_secret(&h).await;
+    let draft = postblox::db::drafts::create(
+        &h.pool,
+        &postblox::db::drafts::NewDraft {
+            account_id,
+            in_reply_to_msg: None,
+            to_addrs: json!(["to@example.com"]),
+            cc_addrs: json!([]),
+            bcc_addrs: json!([]),
+            subject: Some("Auth".into()),
+            text_body: Some("body".into()),
+            html_body: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "message.send",
+            json!({"account_id": account_id, "draft_id": draft.id}),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("auth_failed")
+    );
+    assert_eq!(smtp.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn message_send_bad_args_return_bad_args() {
+    let smtp = Arc::new(MockSmtp::ok());
+    let h = make_harness_with_smtp(smtp.clone()).await;
+    let account_id = setup_account_with_secret(&h).await;
+    let draft = postblox::db::drafts::create(
+        &h.pool,
+        &postblox::db::drafts::NewDraft {
+            account_id,
+            in_reply_to_msg: None,
+            to_addrs: json!([]),
+            cc_addrs: json!([]),
+            bcc_addrs: json!([]),
+            subject: Some("No recipients".into()),
+            text_body: Some("body".into()),
+            html_body: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "message.send",
+            json!({"account_id": account_id, "draft_id": draft.id}),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+    assert!(smtp.calls().is_empty());
 }
 
 #[tokio::test]
@@ -835,6 +1112,7 @@ async fn setup_account_with_secret(h: &Harness) -> uuid::Uuid {
 fn fast_worker_config() -> WorkerConfig {
     WorkerConfig {
         poll_interval: Duration::from_millis(50),
+        idle_timeout: Duration::from_secs(30),
         initial_backoff: Duration::from_millis(5),
         max_backoff: Duration::from_millis(10),
     }

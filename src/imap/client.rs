@@ -4,12 +4,16 @@
 //! pulling in a real TLS handshake.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use async_imap::extensions::idle::IdleResponse;
+use async_imap::types::Capability;
 use async_imap::types::Name;
 use futures::StreamExt;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::TlsConnector;
+use tokio_util::sync::CancellationToken;
 
 use super::error::ImapError;
 
@@ -158,6 +162,24 @@ pub struct FetchedMessage {
     pub raw: Vec<u8>,
 }
 
+/// Why one IDLE wait ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleOutcome {
+    NewData,
+    Timeout,
+    Interrupted,
+}
+
+pub struct IdleRequest<'a> {
+    pub host: &'a str,
+    pub port: u16,
+    pub username: &'a str,
+    pub password: &'a str,
+    pub folder: &'a str,
+    pub timeout: Duration,
+    pub cancel: CancellationToken,
+}
+
 /// IMAP system flags are reported as enum variants; we serialise them
 /// back to their RFC 3501 wire form so the rest of the codebase can
 /// treat flags as strings.
@@ -237,6 +259,57 @@ where
         exists,
         messages,
     })
+}
+
+pub async fn wait_for_idle_change<C: Connector>(
+    connector: &C,
+    request: IdleRequest<'_>,
+) -> Result<IdleOutcome, ImapError> {
+    let IdleRequest {
+        host,
+        port,
+        username,
+        password,
+        folder,
+        timeout,
+        cancel,
+    } = request;
+    let mut session = connect(connector, host, port, username, password).await?;
+    let capabilities = session.capabilities().await.map_err(ImapError::from)?;
+    let supports_idle = capabilities
+        .iter()
+        .any(|cap| matches!(cap, Capability::Atom(name) if name.eq_ignore_ascii_case("IDLE")));
+    if !supports_idle {
+        let _ = session.logout().await;
+        return Err(ImapError::Unsupported(
+            "server does not advertise IDLE".into(),
+        ));
+    }
+
+    session.select(folder).await.map_err(ImapError::from)?;
+    let mut idle = session.idle();
+    idle.init().await.map_err(ImapError::from)?;
+
+    let response = {
+        let (wait, interrupt) = idle.wait_with_timeout(timeout);
+        tokio::pin!(wait);
+        tokio::select! {
+            response = &mut wait => response.map_err(ImapError::from),
+            _ = cancel.cancelled() => {
+                drop(interrupt);
+                wait.await.map_err(ImapError::from)
+            }
+        }
+    };
+
+    let mut session = idle.done().await.map_err(ImapError::from)?;
+    let _ = session.logout().await;
+
+    match response? {
+        IdleResponse::NewData(_) => Ok(IdleOutcome::NewData),
+        IdleResponse::Timeout => Ok(IdleOutcome::Timeout),
+        IdleResponse::ManualInterrupt => Ok(IdleOutcome::Interrupted),
+    }
 }
 
 #[cfg(test)]

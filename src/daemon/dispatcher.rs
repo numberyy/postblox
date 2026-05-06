@@ -14,6 +14,7 @@ use crate::imap::{self, ImapAuth, ImapSync};
 use crate::ipc::{Dispatcher, Hub, RpcError, Topic};
 use crate::models::FolderRole;
 use crate::secrets::SecretStore;
+use crate::smtp::{self, SmtpError, SmtpServer, SmtpSubmitRequest, SmtpSubmitter};
 use crate::sync;
 
 #[derive(Clone)]
@@ -23,6 +24,7 @@ pub struct DaemonDispatcher {
     imap: Arc<dyn ImapAuth>,
     imap_sync: Arc<dyn ImapSync>,
     secrets: Arc<dyn SecretStore>,
+    smtp: Arc<dyn SmtpSubmitter>,
     worker_manager: Arc<sync::WorkerManager>,
 }
 
@@ -31,7 +33,16 @@ impl DaemonDispatcher {
     pub fn new(pool: SqlitePool, hub: Arc<Hub>, secrets: Arc<dyn SecretStore>) -> Self {
         let imap = imap::default_auth().expect("rustls platform verifier init");
         let imap_sync = imap::default_sync().expect("rustls platform verifier init");
-        Self::with_imap(pool, hub, imap, imap_sync, secrets)
+        let imap_idle = imap::default_idle().expect("rustls platform verifier init");
+        let smtp = Arc::new(smtp::LettreSmtpSubmitter::new());
+        let worker_manager = Arc::new(sync::WorkerManager::with_idle_config(
+            pool.clone(),
+            hub.clone(),
+            imap_sync.clone(),
+            Some(imap_idle),
+            sync::WorkerConfig::default(),
+        ));
+        Self::with_imap_smtp_and_manager(pool, hub, imap, imap_sync, secrets, smtp, worker_manager)
     }
 
     /// Test/customisation constructor: bring your own IMAP impls.
@@ -42,12 +53,24 @@ impl DaemonDispatcher {
         imap_sync: Arc<dyn ImapSync>,
         secrets: Arc<dyn SecretStore>,
     ) -> Self {
+        let smtp = Arc::new(smtp::LettreSmtpSubmitter::new());
+        Self::with_imap_and_smtp(pool, hub, imap, imap_sync, secrets, smtp)
+    }
+
+    pub fn with_imap_and_smtp(
+        pool: SqlitePool,
+        hub: Arc<Hub>,
+        imap: Arc<dyn ImapAuth>,
+        imap_sync: Arc<dyn ImapSync>,
+        secrets: Arc<dyn SecretStore>,
+        smtp: Arc<dyn SmtpSubmitter>,
+    ) -> Self {
         let worker_manager = Arc::new(sync::WorkerManager::new(
             pool.clone(),
             hub.clone(),
             imap_sync.clone(),
         ));
-        Self::with_imap_and_manager(pool, hub, imap, imap_sync, secrets, worker_manager)
+        Self::with_imap_smtp_and_manager(pool, hub, imap, imap_sync, secrets, smtp, worker_manager)
     }
 
     pub fn with_imap_and_sync_config(
@@ -58,13 +81,26 @@ impl DaemonDispatcher {
         secrets: Arc<dyn SecretStore>,
         worker_config: sync::WorkerConfig,
     ) -> Self {
+        let smtp = Arc::new(smtp::LettreSmtpSubmitter::new());
+        Self::with_imap_sync_smtp_config(pool, hub, imap, imap_sync, secrets, smtp, worker_config)
+    }
+
+    pub fn with_imap_sync_smtp_config(
+        pool: SqlitePool,
+        hub: Arc<Hub>,
+        imap: Arc<dyn ImapAuth>,
+        imap_sync: Arc<dyn ImapSync>,
+        secrets: Arc<dyn SecretStore>,
+        smtp: Arc<dyn SmtpSubmitter>,
+        worker_config: sync::WorkerConfig,
+    ) -> Self {
         let worker_manager = Arc::new(sync::WorkerManager::with_config(
             pool.clone(),
             hub.clone(),
             imap_sync.clone(),
             worker_config,
         ));
-        Self::with_imap_and_manager(pool, hub, imap, imap_sync, secrets, worker_manager)
+        Self::with_imap_smtp_and_manager(pool, hub, imap, imap_sync, secrets, smtp, worker_manager)
     }
 
     pub fn with_imap_and_manager(
@@ -75,12 +111,26 @@ impl DaemonDispatcher {
         secrets: Arc<dyn SecretStore>,
         worker_manager: Arc<sync::WorkerManager>,
     ) -> Self {
+        let smtp = Arc::new(smtp::LettreSmtpSubmitter::new());
+        Self::with_imap_smtp_and_manager(pool, hub, imap, imap_sync, secrets, smtp, worker_manager)
+    }
+
+    pub fn with_imap_smtp_and_manager(
+        pool: SqlitePool,
+        hub: Arc<Hub>,
+        imap: Arc<dyn ImapAuth>,
+        imap_sync: Arc<dyn ImapSync>,
+        secrets: Arc<dyn SecretStore>,
+        smtp: Arc<dyn SmtpSubmitter>,
+        worker_manager: Arc<sync::WorkerManager>,
+    ) -> Self {
         Self {
             pool,
             hub,
             imap,
             imap_sync,
             secrets,
+            smtp,
             worker_manager,
         }
     }
@@ -112,6 +162,9 @@ impl Dispatcher for DaemonDispatcher {
             "draft.create" => op_draft_create(&self.pool, args).await,
             "draft.update" => op_draft_update(&self.pool, args).await,
             "draft.delete" => op_draft_delete(&self.pool, args).await,
+            "message.send" => {
+                op_message_send(&self.pool, self.secrets.as_ref(), self.smtp.as_ref(), args).await
+            }
 
             // -- network ops --
             "account.test_login" => {
@@ -348,6 +401,125 @@ async fn op_draft_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
         .map_err(|e| RpcError::internal(format!("drafts::delete: {e}")))?;
     audit(pool, "draft.delete", Some(&id.to_string()), &json!({})).await;
     Ok(json!({"removed": removed}))
+}
+
+async fn op_message_send(
+    pool: &SqlitePool,
+    secrets: &dyn SecretStore,
+    smtp: &dyn SmtpSubmitter,
+    args: Value,
+) -> Result<Value, RpcError> {
+    let account_id = parse_uuid(&args, "account_id")?;
+    let draft_id = parse_uuid(&args, "draft_id")?;
+
+    let account = db::accounts::get(pool, account_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
+    let draft = db::drafts::get(pool, draft_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("drafts::get: {e}")))?
+        .ok_or_else(|| RpcError::bad_args("unknown draft_id"))?;
+    if draft.account_id != account_id {
+        return Err(RpcError::bad_args("draft does not belong to account"));
+    }
+
+    let to = parse_addr_array(&draft.to_addrs, "to_addrs")?;
+    let cc = parse_addr_array(&draft.cc_addrs, "cc_addrs")?;
+    let bcc = parse_addr_array(&draft.bcc_addrs, "bcc_addrs")?;
+    let recipients = all_recipients(&to, &cc, &bcc)?;
+    let smtp_port =
+        u16::try_from(account.smtp_port).map_err(|_| RpcError::bad_args("bad smtp_port"))?;
+
+    let secret = secrets
+        .get(account_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("secrets::get: {e}")))?
+        .ok_or_else(|| RpcError::new("missing_secret", "no stored secret for account"))?;
+
+    let message_id = format!("<{}@postblox.local>", uuid::Uuid::new_v4());
+    let subject = draft.subject.clone().unwrap_or_default();
+    let mime = crate::mail::builder::build_mime(
+        &account.email,
+        &to,
+        &cc,
+        &subject,
+        draft.text_body.as_deref(),
+        draft.html_body.as_deref(),
+        &message_id,
+    );
+
+    smtp.submit(SmtpSubmitRequest {
+        server: SmtpServer {
+            host: account.smtp_host.clone(),
+            port: smtp_port,
+            use_tls: account.smtp_use_tls,
+            starttls: account.smtp_starttls,
+        },
+        username: account.email.clone(),
+        password: secret,
+        from: account.email.clone(),
+        recipients,
+        mime,
+    })
+    .await
+    .map_err(map_smtp_error)?;
+
+    audit(
+        pool,
+        "message.send",
+        Some(&draft_id.to_string()),
+        &json!({
+            "account_id": account_id,
+            "message_id": message_id,
+        }),
+    )
+    .await;
+    Ok(json!({"ok": true, "message_id": message_id}))
+}
+
+fn parse_addr_array(value: &Value, field: &str) -> Result<Vec<String>, RpcError> {
+    let values = value
+        .as_array()
+        .ok_or_else(|| RpcError::bad_args(format!("{field} must be an array")))?;
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        let addr = value
+            .as_str()
+            .ok_or_else(|| RpcError::bad_args(format!("{field} must contain strings")))?;
+        let addr = addr.trim();
+        if addr.is_empty() {
+            return Err(RpcError::bad_args(format!(
+                "{field} must not contain empty addresses"
+            )));
+        }
+        out.push(addr.to_string());
+    }
+    Ok(out)
+}
+
+fn all_recipients(to: &[String], cc: &[String], bcc: &[String]) -> Result<Vec<String>, RpcError> {
+    let recipients = to
+        .iter()
+        .chain(cc.iter())
+        .chain(bcc.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    if recipients.is_empty() {
+        Err(RpcError::bad_args("at least one recipient is required"))
+    } else {
+        Ok(recipients)
+    }
+}
+
+fn map_smtp_error(err: SmtpError) -> RpcError {
+    match err {
+        SmtpError::Auth(message) => RpcError::new("auth_failed", message),
+        SmtpError::InvalidRequest(message) => RpcError::bad_args(message),
+        SmtpError::InvalidConfig(message)
+        | SmtpError::Transient(message)
+        | SmtpError::Internal(message) => RpcError::internal(message),
+    }
 }
 
 // ---------- network ops -----------------------------------------------------

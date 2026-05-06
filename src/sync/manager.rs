@@ -9,11 +9,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::imap::ImapSync;
+use crate::imap::{ImapIdle, ImapSync};
 use crate::ipc::Hub;
 use crate::secrets::Secret;
 
-use super::worker::{run_polling_worker, PollingWorker, WorkerConfig};
+use super::worker::{run_sync_worker, SyncWorker, WorkerConfig};
 
 type WorkerKey = (Uuid, String);
 
@@ -21,6 +21,7 @@ pub struct WorkerManager {
     pool: SqlitePool,
     hub: Arc<Hub>,
     imap: Arc<dyn ImapSync>,
+    idle: Option<Arc<dyn ImapIdle>>,
     config: WorkerConfig,
     workers: Mutex<HashMap<WorkerKey, WorkerHandle>>,
 }
@@ -41,10 +42,21 @@ impl WorkerManager {
         imap: Arc<dyn ImapSync>,
         config: WorkerConfig,
     ) -> Self {
+        Self::with_idle_config(pool, hub, imap, None, config)
+    }
+
+    pub fn with_idle_config(
+        pool: SqlitePool,
+        hub: Arc<Hub>,
+        imap: Arc<dyn ImapSync>,
+        idle: Option<Arc<dyn ImapIdle>>,
+        config: WorkerConfig,
+    ) -> Self {
         Self {
             pool,
             hub,
             imap,
+            idle,
             config,
             workers: Mutex::new(HashMap::new()),
         }
@@ -61,10 +73,11 @@ impl WorkerManager {
         workers.remove(&key);
 
         let cancel = CancellationToken::new();
-        let join = tokio::spawn(run_polling_worker(PollingWorker {
+        let join = tokio::spawn(run_sync_worker(SyncWorker {
             pool: self.pool.clone(),
             hub: self.hub.clone(),
             imap: self.imap.clone(),
+            idle: self.idle.clone(),
             account_id,
             folder_name,
             secret,
@@ -218,6 +231,7 @@ mod tests {
             imap,
             WorkerConfig {
                 poll_interval: Duration::from_secs(30),
+                idle_timeout: Duration::from_secs(30),
                 initial_backoff: Duration::from_millis(5),
                 max_backoff: Duration::from_millis(10),
             },
@@ -259,6 +273,7 @@ mod tests {
             imap,
             WorkerConfig {
                 poll_interval: Duration::from_millis(10),
+                idle_timeout: Duration::from_secs(30),
                 initial_backoff: Duration::from_millis(5),
                 max_backoff: Duration::from_millis(10),
             },

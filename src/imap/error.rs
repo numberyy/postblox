@@ -16,6 +16,9 @@ pub enum ImapError {
     #[error("auth failed: {0}")]
     Auth(String),
 
+    #[error("unsupported: {0}")]
+    Unsupported(String),
+
     #[error("invalid server name: {0}")]
     InvalidName(String),
 }

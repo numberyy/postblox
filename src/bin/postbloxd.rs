@@ -50,10 +50,13 @@ async fn main() -> anyhow::Result<()> {
     let hub = Arc::new(Hub::new());
     let imap_auth = imap::default_auth().context("initialize IMAP auth")?;
     let imap_sync = imap::default_sync().context("initialize IMAP sync")?;
-    let manager = Arc::new(WorkerManager::new(
+    let imap_idle = imap::default_idle().context("initialize IMAP IDLE")?;
+    let manager = Arc::new(WorkerManager::with_idle_config(
         pool.clone(),
         hub.clone(),
         imap_sync.clone(),
+        Some(imap_idle),
+        postblox::sync::WorkerConfig::default(),
     ));
     let dispatcher = Arc::new(DaemonDispatcher::with_imap_and_manager(
         pool,
