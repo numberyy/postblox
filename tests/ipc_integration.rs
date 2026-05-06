@@ -13,7 +13,7 @@ use postblox::db::{accounts, connect, folders, messages, threads};
 use postblox::imap::{FetchedMessage, FolderInfo, FolderSync, ImapAuth, ImapError, ImapSync};
 use postblox::ipc::client::Client;
 use postblox::ipc::{listen, Hub, Topic};
-use postblox::models::{AuthKind, FolderRole};
+use postblox::models::{ApprovalState, AuthKind, FolderRole};
 use postblox::secrets::{
     file::{FileSecretStore, KdfParams},
     SecretStore,
@@ -699,6 +699,170 @@ async fn subscription_delivers_published_event_via_hub() {
         .unwrap();
     assert_eq!(event.topic, "mail.new");
     assert_eq!(event.data, json!({"id": "abc"}));
+}
+
+#[tokio::test]
+async fn mcp_gate_ops_round_trip_over_socket() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let created = c
+        .request(
+            "mcp.gate.create",
+            json!({
+                "tool": "postblox_message_send",
+                "arg_pattern": json!({
+                    "account_id": "00000000-0000-0000-0000-000000000001"
+                })
+                .to_string(),
+                "action": "auto_allow",
+                "note": "test rule",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(created.ok, "{:?}", created.error);
+    assert_eq!(created.data["tool"], "postblox_message_send");
+    assert_eq!(created.data["action"], "auto_allow");
+    let gate_id = created.data["id"].as_str().unwrap().to_string();
+
+    let listed = c
+        .request("mcp.gate.list", json!({"tool": "postblox_message_send"}))
+        .await
+        .unwrap();
+    assert!(listed.ok, "{:?}", listed.error);
+    let gates = listed.data.as_array().unwrap();
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0]["id"], gate_id);
+
+    let other_tool = c
+        .request("mcp.gate.list", json!({"tool": "postblox_draft_delete"}))
+        .await
+        .unwrap();
+    assert!(other_tool.ok);
+    assert!(other_tool.data.as_array().unwrap().is_empty());
+
+    let removed = c
+        .request("mcp.gate.delete", json!({"id": gate_id}))
+        .await
+        .unwrap();
+    assert!(removed.ok);
+    assert_eq!(removed.data["removed"], true);
+    assert!(postblox::db::mcp::list_gates(&h.pool)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn mcp_approval_ops_publish_requested_and_decided_events() {
+    let h = make_harness().await;
+    let mut events = Client::connect(&h.sock).await.unwrap();
+    let _requested_sub = events.subscribe(Topic::McpApprovalRequested).await.unwrap();
+    let _decided_sub = events.subscribe(Topic::McpApprovalDecided).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let created = c
+        .request(
+            "mcp.approval.create",
+            json!({
+                "tool": "postblox_message_send",
+                "args": {"draft_id": "00000000-0000-0000-0000-000000000001"},
+                "summary": "send test draft",
+                "_actor": "mcp:postblox_message_send",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(created.ok, "{:?}", created.error);
+    let approval_id = created.data["id"].as_str().unwrap().to_string();
+    assert_eq!(created.data["state"], "pending");
+
+    let requested = timeout(Duration::from_secs(2), events.next_event())
+        .await
+        .expect("approval requested event")
+        .unwrap();
+    assert_eq!(requested.topic, "mcp.approval_requested");
+    assert_eq!(requested.data["approval_id"], approval_id);
+    assert_eq!(requested.data["tool"], "postblox_message_send");
+
+    let listed = c
+        .request("mcp.approval.list", json!({"state": "pending"}))
+        .await
+        .unwrap();
+    assert!(listed.ok);
+    assert_eq!(listed.data.as_array().unwrap().len(), 1);
+
+    let got = c
+        .request("mcp.approval.get", json!({"id": approval_id}))
+        .await
+        .unwrap();
+    assert!(got.ok);
+    assert_eq!(got.data["state"], "pending");
+
+    let decided = c
+        .request(
+            "mcp.approval.decide",
+            json!({
+                "id": approval_id,
+                "state": "allowed",
+                "decided_by": "test-user",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(decided.ok);
+    assert_eq!(decided.data["decided"], true);
+
+    let event = timeout(Duration::from_secs(2), events.next_event())
+        .await
+        .expect("approval decided event")
+        .unwrap();
+    assert_eq!(event.topic, "mcp.approval_decided");
+    assert_eq!(event.data["approval_id"], approval_id);
+    assert_eq!(event.data["state"], "allowed");
+
+    let approval =
+        postblox::db::mcp::get_approval(&h.pool, uuid::Uuid::parse_str(&approval_id).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(approval.state, ApprovalState::Allowed);
+    assert_eq!(approval.decided_by.as_deref(), Some("test-user"));
+}
+
+#[tokio::test]
+async fn mcp_actor_override_is_used_for_write_audit_rows() {
+    let h = make_harness().await;
+    let account_id = make_account(&h, "mcp-audit@example.com").await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let created = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": account_id,
+                "to_addrs": ["bob@example.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "audit",
+                "text_body": "body",
+                "html_body": null,
+                "in_reply_to_msg": null,
+                "_actor": "mcp:postblox_draft_create",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(created.ok, "{:?}", created.error);
+
+    let audits = postblox::db::audit::list_recent(&h.pool, 10, 0)
+        .await
+        .unwrap();
+    assert!(audits.iter().any(|entry| {
+        entry.action == "draft.create" && entry.actor == "mcp:postblox_draft_create"
+    }));
 }
 
 #[tokio::test]

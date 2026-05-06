@@ -5,6 +5,7 @@ pub mod embeddings;
 pub mod imap;
 pub mod ipc;
 pub mod mail;
+pub mod mcp;
 pub mod models;
 pub mod secrets;
 pub mod smtp;

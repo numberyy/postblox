@@ -12,7 +12,7 @@ use sqlx::SqlitePool;
 use crate::db;
 use crate::imap::{self, ImapAuth, ImapSync};
 use crate::ipc::{Dispatcher, Hub, RpcError, Topic};
-use crate::models::FolderRole;
+use crate::models::{ApprovalState, FolderRole, GateAction};
 use crate::secrets::SecretStore;
 use crate::smtp::{self, SmtpError, SmtpServer, SmtpSubmitRequest, SmtpSubmitter};
 use crate::sync;
@@ -154,6 +154,15 @@ impl Dispatcher for DaemonDispatcher {
             "search" => op_search(&self.pool, args).await,
             "audit.list_recent" => op_audit_list(&self.pool, args).await,
 
+            // -- MCP gate/approval ops --
+            "mcp.gate.list" => op_mcp_gate_list(&self.pool, args).await,
+            "mcp.gate.create" => op_mcp_gate_create(&self.pool, args).await,
+            "mcp.gate.delete" => op_mcp_gate_delete(&self.pool, args).await,
+            "mcp.approval.create" => op_mcp_approval_create(&self.pool, &self.hub, args).await,
+            "mcp.approval.list" => op_mcp_approval_list(&self.pool, args).await,
+            "mcp.approval.get" => op_mcp_approval_get(&self.pool, args).await,
+            "mcp.approval.decide" => op_mcp_approval_decide(&self.pool, &self.hub, args).await,
+
             // -- write ops --
             "account.create" => op_account_create(&self.pool, args).await,
             "account.delete" => op_account_delete(&self.pool, args).await,
@@ -275,6 +284,166 @@ async fn op_audit_list(pool: &SqlitePool, args: Value) -> Result<Value, RpcError
     )
 }
 
+// ---------- MCP gate/approval ops ------------------------------------------
+
+async fn op_mcp_gate_list(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    match args.get("tool").and_then(Value::as_str) {
+        Some(tool) => encode(
+            db::mcp::list_gates_for_tool(pool, tool).await,
+            "mcp::list_gates_for_tool",
+        ),
+        None => encode(db::mcp::list_gates(pool).await, "mcp::list_gates"),
+    }
+}
+
+async fn op_mcp_gate_create(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let actor = actor_from_args(&args);
+    let tool = parse_str(&args, "tool")?;
+    let action = parse_str(&args, "action")?
+        .parse::<GateAction>()
+        .map_err(RpcError::bad_args)?;
+    let arg_pattern = optional_str(&args, "arg_pattern")?;
+    if let Some(pattern) = arg_pattern {
+        let parsed: Value = serde_json::from_str(pattern)
+            .map_err(|e| RpcError::bad_args(format!("bad 'arg_pattern': {e}")))?;
+        if !parsed.is_object() {
+            return Err(RpcError::bad_args("'arg_pattern' must be a JSON object"));
+        }
+    }
+    let note = optional_str(&args, "note")?;
+    let gate = db::mcp::create_gate(pool, tool, arg_pattern, action, note)
+        .await
+        .map_err(|e| RpcError::internal(format!("mcp::create_gate: {e}")))?;
+    audit_actor(
+        pool,
+        &actor,
+        "mcp.gate.create",
+        Some(&gate.id.to_string()),
+        &json!({"tool": tool, "action": action}),
+    )
+    .await;
+    encode_one(&gate)
+}
+
+async fn op_mcp_gate_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let actor = actor_from_args(&args);
+    let id = parse_uuid(&args, "id")?;
+    let removed = db::mcp::delete_gate(pool, id)
+        .await
+        .map_err(|e| RpcError::internal(format!("mcp::delete_gate: {e}")))?;
+    audit_actor(
+        pool,
+        &actor,
+        "mcp.gate.delete",
+        Some(&id.to_string()),
+        &json!({"removed": removed}),
+    )
+    .await;
+    Ok(json!({"removed": removed}))
+}
+
+async fn op_mcp_approval_create(
+    pool: &SqlitePool,
+    hub: &Hub,
+    args: Value,
+) -> Result<Value, RpcError> {
+    let actor = actor_from_args(&args);
+    let tool = parse_str(&args, "tool")?;
+    let approval_args = args.get("args").cloned().unwrap_or_else(|| json!({}));
+    let summary = parse_str(&args, "summary")?;
+    let approval = db::mcp::create_approval(pool, tool, &approval_args, summary)
+        .await
+        .map_err(|e| RpcError::internal(format!("mcp::create_approval: {e}")))?;
+    audit_actor(
+        pool,
+        &actor,
+        "mcp.approval.create",
+        Some(&approval.id.to_string()),
+        &json!({"tool": tool}),
+    )
+    .await;
+    hub.publish(
+        Topic::McpApprovalRequested,
+        json!({
+            "approval_id": approval.id,
+            "tool": approval.tool,
+            "summary": approval.summary,
+            "state": approval.state,
+            "args": approval.args,
+        }),
+    )
+    .await;
+    encode_one(&approval)
+}
+
+async fn op_mcp_approval_list(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let state = match args.get("state").and_then(Value::as_str) {
+        Some(state) => Some(state.parse::<ApprovalState>().map_err(RpcError::bad_args)?),
+        None => None,
+    };
+    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+    let offset = args.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
+    encode(
+        db::mcp::list_approvals(pool, state, limit, offset).await,
+        "mcp::list_approvals",
+    )
+}
+
+async fn op_mcp_approval_get(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let id = parse_uuid(&args, "id")?;
+    encode(db::mcp::get_approval(pool, id).await, "mcp::get_approval")
+}
+
+async fn op_mcp_approval_decide(
+    pool: &SqlitePool,
+    hub: &Hub,
+    args: Value,
+) -> Result<Value, RpcError> {
+    let actor = actor_from_args(&args);
+    let id = parse_uuid(&args, "id")?;
+    let state = parse_str(&args, "state")?
+        .parse::<ApprovalState>()
+        .map_err(RpcError::bad_args)?;
+    if state == ApprovalState::Pending {
+        return Err(RpcError::bad_args(
+            "'state' must be allowed, denied, or expired",
+        ));
+    }
+    let decided_by = args
+        .get("decided_by")
+        .and_then(Value::as_str)
+        .unwrap_or(actor.as_str());
+    let decided = db::mcp::decide(pool, id, state, decided_by)
+        .await
+        .map_err(|e| RpcError::internal(format!("mcp::decide: {e}")))?;
+    audit_actor(
+        pool,
+        &actor,
+        "mcp.approval.decide",
+        Some(&id.to_string()),
+        &json!({"state": state, "decided": decided}),
+    )
+    .await;
+    if decided {
+        if let Some(approval) = db::mcp::get_approval(pool, id)
+            .await
+            .map_err(|e| RpcError::internal(format!("mcp::get_approval: {e}")))?
+        {
+            hub.publish(
+                Topic::McpApprovalDecided,
+                json!({
+                    "approval_id": approval.id,
+                    "tool": approval.tool,
+                    "state": approval.state,
+                    "decided_by": approval.decided_by,
+                }),
+            )
+            .await;
+        }
+    }
+    Ok(json!({"decided": decided}))
+}
+
 // ---------- write ops -------------------------------------------------------
 
 async fn op_account_create(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
@@ -316,6 +485,7 @@ async fn op_message_set_flags(
     hub: &Hub,
     args: Value,
 ) -> Result<Value, RpcError> {
+    let actor = actor_from_args(&args);
     let id = parse_uuid(&args, "id")?;
     let flags = args
         .get("flags")
@@ -324,8 +494,9 @@ async fn op_message_set_flags(
     db::messages::set_flags(pool, id, &flags)
         .await
         .map_err(|e| RpcError::internal(format!("messages::set_flags: {e}")))?;
-    audit(
+    audit_actor(
         pool,
+        &actor,
         "message.set_flags",
         Some(&id.to_string()),
         &json!({"flags": &flags}),
@@ -340,13 +511,15 @@ async fn op_message_set_flags(
 }
 
 async fn op_draft_create(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let actor = actor_from_args(&args);
     let new: db::drafts::NewDraft =
         serde_json::from_value(args).map_err(|e| RpcError::bad_args(e.to_string()))?;
     let draft = db::drafts::create(pool, &new)
         .await
         .map_err(|e| RpcError::internal(format!("drafts::create: {e}")))?;
-    audit(
+    audit_actor(
         pool,
+        &actor,
         "draft.create",
         Some(&draft.id.to_string()),
         &json!({}),
@@ -377,6 +550,7 @@ fn default_addrs() -> Value {
 }
 
 async fn op_draft_update(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let actor = actor_from_args(&args);
     let upd: DraftUpdate =
         serde_json::from_value(args).map_err(|e| RpcError::bad_args(e.to_string()))?;
     let patch = db::drafts::DraftPatch {
@@ -390,16 +564,31 @@ async fn op_draft_update(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
     let draft = db::drafts::update(pool, upd.id, &patch)
         .await
         .map_err(|e| RpcError::internal(format!("drafts::update: {e}")))?;
-    audit(pool, "draft.update", Some(&upd.id.to_string()), &json!({})).await;
+    audit_actor(
+        pool,
+        &actor,
+        "draft.update",
+        Some(&upd.id.to_string()),
+        &json!({}),
+    )
+    .await;
     encode_one(&draft)
 }
 
 async fn op_draft_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let actor = actor_from_args(&args);
     let id = parse_uuid(&args, "id")?;
     let removed = db::drafts::delete(pool, id)
         .await
         .map_err(|e| RpcError::internal(format!("drafts::delete: {e}")))?;
-    audit(pool, "draft.delete", Some(&id.to_string()), &json!({})).await;
+    audit_actor(
+        pool,
+        &actor,
+        "draft.delete",
+        Some(&id.to_string()),
+        &json!({}),
+    )
+    .await;
     Ok(json!({"removed": removed}))
 }
 
@@ -409,6 +598,7 @@ async fn op_message_send(
     smtp: &dyn SmtpSubmitter,
     args: Value,
 ) -> Result<Value, RpcError> {
+    let actor = actor_from_args(&args);
     let account_id = parse_uuid(&args, "account_id")?;
     let draft_id = parse_uuid(&args, "draft_id")?;
 
@@ -465,8 +655,9 @@ async fn op_message_send(
     .await
     .map_err(map_smtp_error)?;
 
-    audit(
+    audit_actor(
         pool,
+        &actor,
         "message.send",
         Some(&draft_id.to_string()),
         &json!({
@@ -807,11 +998,51 @@ fn parse_uuid(args: &Value, key: &str) -> Result<uuid::Uuid, RpcError> {
     uuid::Uuid::parse_str(s).map_err(|e| RpcError::bad_args(format!("bad '{key}': {e}")))
 }
 
+fn parse_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, RpcError> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| RpcError::bad_args(format!("missing '{key}'")))
+}
+
+fn optional_str<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, RpcError> {
+    match args.get(key) {
+        Some(Value::Null) | None => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.as_str())),
+        Some(_) => Err(RpcError::bad_args(format!("'{key}' must be a string"))),
+    }
+}
+
+fn actor_from_args(args: &Value) -> String {
+    args.get("_actor")
+        .and_then(Value::as_str)
+        .filter(|actor| actor_is_allowed(actor))
+        .unwrap_or("user")
+        .to_string()
+}
+
+fn actor_is_allowed(actor: &str) -> bool {
+    actor == "user"
+        || (actor
+            .strip_prefix("mcp:")
+            .is_some_and(|name| !name.is_empty() && name.len() <= 128))
+}
+
 async fn audit(pool: &SqlitePool, action: &str, target: Option<&str>, details: &Value) {
+    audit_actor(pool, "user", action, target, details).await;
+}
+
+async fn audit_actor(
+    pool: &SqlitePool,
+    actor: &str,
+    action: &str,
+    target: Option<&str>,
+    details: &Value,
+) {
     if let Err(e) = db::audit::record(
         pool,
         &db::audit::NewAuditEntry {
-            actor: "user".into(),
+            actor: actor.into(),
             action: action.into(),
             target: target.map(|s| s.to_string()),
             details: details.clone(),
