@@ -9,6 +9,7 @@ use tokio::time::{timeout, Duration};
 
 use postblox::daemon::DaemonDispatcher;
 use postblox::db::{accounts, connect, folders, messages, threads};
+use postblox::imap::{FolderInfo, ImapAuth, ImapError};
 use postblox::ipc::client::Client;
 use postblox::ipc::{listen, Hub, Topic};
 use postblox::models::{AuthKind, FolderRole};
@@ -23,12 +24,16 @@ struct Harness {
 }
 
 async fn make_harness() -> Harness {
+    make_harness_with_imap(Arc::new(NoImap)).await
+}
+
+async fn make_harness_with_imap(imap: Arc<dyn ImapAuth>) -> Harness {
     let db_dir = tempfile::tempdir().unwrap();
     let pool = connect(&db_dir.path().join("postblox.db")).await.unwrap();
     let sock_dir = tempfile::tempdir().unwrap();
     let sock = sock_dir.path().join("postbloxd.sock");
     let hub = Arc::new(Hub::new());
-    let dispatcher = Arc::new(DaemonDispatcher::new(pool.clone(), hub.clone()));
+    let dispatcher = Arc::new(DaemonDispatcher::with_imap(pool.clone(), hub.clone(), imap));
     let server = listen(&sock, dispatcher, hub.clone()).await.unwrap();
     Harness {
         _db_dir: db_dir,
@@ -37,6 +42,26 @@ async fn make_harness() -> Harness {
         pool,
         hub,
         _server: server,
+    }
+}
+
+/// Refuses every IMAP call. Default for tests that don't exercise the
+/// network path; keeps the production rustls platform-verifier out of
+/// `cargo test`.
+struct NoImap;
+
+#[async_trait::async_trait]
+impl ImapAuth for NoImap {
+    async fn test_login(
+        &self,
+        _: &str,
+        _: u16,
+        _: &str,
+        _: &str,
+    ) -> Result<Vec<FolderInfo>, ImapError> {
+        Err(ImapError::Protocol(
+            "imap not configured for this test".into(),
+        ))
     }
 }
 
@@ -377,4 +402,156 @@ async fn many_concurrent_clients_all_get_responses() {
     for h in handles {
         h.await.unwrap();
     }
+}
+
+// ---- IMAP test_login -------------------------------------------------------
+
+/// `ImapAuth` mock with deterministic behaviour: returns the list of
+/// folders unless the password matches `bad_password`, in which case it
+/// reports an auth failure.
+struct MockImap {
+    folders: Vec<FolderInfo>,
+    bad_password: String,
+}
+
+#[async_trait::async_trait]
+impl ImapAuth for MockImap {
+    async fn test_login(
+        &self,
+        _: &str,
+        _: u16,
+        _: &str,
+        password: &str,
+    ) -> Result<Vec<FolderInfo>, ImapError> {
+        if password == self.bad_password {
+            return Err(ImapError::Auth("bad creds".into()));
+        }
+        Ok(self.folders.clone())
+    }
+}
+
+fn fi(name: &str) -> FolderInfo {
+    FolderInfo {
+        name: name.into(),
+        delimiter: "/".into(),
+        selectable: true,
+    }
+}
+
+#[tokio::test]
+async fn account_test_login_seeds_folders_with_role_mapping() {
+    let mock = Arc::new(MockImap {
+        folders: vec![
+            fi("INBOX"),
+            fi("Sent"),
+            fi("Drafts"),
+            fi("[Gmail]/All Mail"),
+            fi("Notes"),
+        ],
+        bad_password: "WRONG".into(),
+    });
+    let h = make_harness_with_imap(mock).await;
+
+    let account = accounts::create(
+        &h.pool,
+        &accounts::NewAccount {
+            email: "user@example.com".into(),
+            display_name: None,
+            auth_kind: AuthKind::Password,
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            imap_use_tls: true,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 465,
+            smtp_use_tls: true,
+            smtp_starttls: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "account.test_login",
+            json!({"account_id": account.id, "password": "hunter2"}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "expected ok, got {:?}", resp);
+    assert_eq!(resp.data["ok"], json!(true));
+    assert_eq!(resp.data["folders"].as_array().unwrap().len(), 5);
+
+    let got = folders::list_by_account(&h.pool, account.id).await.unwrap();
+    let by_name = |n: &str| got.iter().find(|f| f.name == n).expect("folder present");
+    assert_eq!(by_name("INBOX").role, FolderRole::Inbox);
+    assert_eq!(by_name("Sent").role, FolderRole::Sent);
+    assert_eq!(by_name("Drafts").role, FolderRole::Drafts);
+    assert_eq!(by_name("[Gmail]/All Mail").role, FolderRole::All);
+    assert_eq!(by_name("Notes").role, FolderRole::Custom);
+}
+
+#[tokio::test]
+async fn account_test_login_returns_auth_failed_on_bad_password() {
+    let mock = Arc::new(MockImap {
+        folders: vec![fi("INBOX")],
+        bad_password: "WRONG".into(),
+    });
+    let h = make_harness_with_imap(mock).await;
+
+    let account = accounts::create(
+        &h.pool,
+        &accounts::NewAccount {
+            email: "user@example.com".into(),
+            display_name: None,
+            auth_kind: AuthKind::Password,
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            imap_use_tls: true,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 465,
+            smtp_use_tls: true,
+            smtp_starttls: false,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "account.test_login",
+            json!({"account_id": account.id, "password": "WRONG"}),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("auth_failed")
+    );
+    // No folders should have been written.
+    let got = folders::list_by_account(&h.pool, account.id).await.unwrap();
+    assert!(got.is_empty());
+}
+
+#[tokio::test]
+async fn account_test_login_unknown_account_returns_bad_args() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "account.test_login",
+            json!({
+                "account_id": uuid::Uuid::new_v4(),
+                "password": "x",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
 }

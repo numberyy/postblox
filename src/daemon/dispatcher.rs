@@ -10,17 +10,27 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
 use crate::db;
+use crate::imap::{self, ImapAuth};
 use crate::ipc::{Dispatcher, Hub, RpcError, Topic};
+use crate::models::FolderRole;
 
 #[derive(Clone)]
 pub struct DaemonDispatcher {
     pool: SqlitePool,
     hub: Arc<Hub>,
+    imap: Arc<dyn ImapAuth>,
 }
 
 impl DaemonDispatcher {
+    /// Production constructor: TLS-backed IMAP via rustls.
     pub fn new(pool: SqlitePool, hub: Arc<Hub>) -> Self {
-        Self { pool, hub }
+        let imap = imap::default_auth().expect("rustls platform verifier init");
+        Self::with_imap(pool, hub, imap)
+    }
+
+    /// Test/customisation constructor: bring your own `ImapAuth`.
+    pub fn with_imap(pool: SqlitePool, hub: Arc<Hub>, imap: Arc<dyn ImapAuth>) -> Self {
+        Self { pool, hub, imap }
     }
 
     pub fn pool(&self) -> &SqlitePool {
@@ -50,6 +60,11 @@ impl Dispatcher for DaemonDispatcher {
             "draft.create" => op_draft_create(&self.pool, args).await,
             "draft.update" => op_draft_update(&self.pool, args).await,
             "draft.delete" => op_draft_delete(&self.pool, args).await,
+
+            // -- network ops --
+            "account.test_login" => {
+                op_account_test_login(&self.pool, self.imap.as_ref(), args).await
+            }
 
             other => Err(RpcError::unknown_op(other)),
         }
@@ -251,6 +266,82 @@ async fn op_draft_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
         .map_err(|e| RpcError::internal(format!("drafts::delete: {e}")))?;
     audit(pool, "draft.delete", Some(&id.to_string()), &json!({})).await;
     Ok(json!({"removed": removed}))
+}
+
+// ---------- network ops -----------------------------------------------------
+
+async fn op_account_test_login(
+    pool: &SqlitePool,
+    imap: &dyn ImapAuth,
+    args: Value,
+) -> Result<Value, RpcError> {
+    let account_id = parse_uuid(&args, "account_id")?;
+    let password = args
+        .get("password")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RpcError::bad_args("missing 'password'"))?;
+
+    let account = db::accounts::get(pool, account_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
+
+    let folders = imap
+        .test_login(
+            &account.imap_host,
+            account.imap_port as u16,
+            &account.email,
+            password,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::imap::ImapError::Auth(m) => RpcError::new("auth_failed", m),
+            other => RpcError::internal(other.to_string()),
+        })?;
+
+    // Upsert what the server reported so folder.list reflects reality.
+    for f in &folders {
+        let role = role_for(&f.name);
+        let _ = db::folders::upsert(
+            pool,
+            &db::folders::NewFolder {
+                account_id,
+                name: f.name.clone(),
+                delimiter: f.delimiter.clone(),
+                role,
+                selectable: f.selectable,
+            },
+        )
+        .await;
+    }
+
+    audit(
+        pool,
+        "account.test_login",
+        Some(&account_id.to_string()),
+        &json!({"folders": folders.len()}),
+    )
+    .await;
+
+    Ok(json!({
+        "ok": true,
+        "folders": folders.iter().map(|f| &f.name).collect::<Vec<_>>(),
+    }))
+}
+
+/// Map well-known IMAP folder names to the project's `FolderRole`.
+fn role_for(name: &str) -> FolderRole {
+    match name.to_ascii_uppercase().as_str() {
+        "INBOX" => FolderRole::Inbox,
+        "SENT" | "SENT ITEMS" | "[GMAIL]/SENT MAIL" => FolderRole::Sent,
+        "DRAFTS" | "[GMAIL]/DRAFTS" => FolderRole::Drafts,
+        "TRASH" | "DELETED ITEMS" | "[GMAIL]/TRASH" => FolderRole::Trash,
+        "ARCHIVE" => FolderRole::Archive,
+        "ALL MAIL" | "[GMAIL]/ALL MAIL" => FolderRole::All,
+        "SPAM" | "JUNK" | "[GMAIL]/SPAM" => FolderRole::Spam,
+        "STARRED" | "[GMAIL]/STARRED" => FolderRole::Starred,
+        _ => FolderRole::Custom,
+    }
 }
 
 // ---------- helpers ---------------------------------------------------------
