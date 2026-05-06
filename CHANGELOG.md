@@ -1,0 +1,23 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+- `postbloxd` daemon: Unix-socket IPC, length-prefixed JSON frames,
+  per-topic broadcast hub, length- and connection-bounded server.
+- `DaemonDispatcher` with read ops (`account.list`, `folder.list`,
+  `thread.list`, `message.list_by_folder`, `message.list_by_thread`,
+  `message.get`, `search`, `audit.list_recent`) and write ops
+  (`account.create`/`delete`, `folder.upsert`, `message.set_flags`,
+  `draft.create`/`update`/`delete`).
+- SQLite schema (9 tables + FTS5 virtual table + 3 triggers), one
+  module per entity, in-memory test pool.
+- Pure-Rust MIME parser, reply extractor, threading, builder.
+- Embeddings client (`EmbeddingProvider` + OpenAI-compatible HTTP).
+
+[Unreleased]: https://github.com/numbery/postblox/commits/main

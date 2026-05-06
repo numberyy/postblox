@@ -1,39 +1,119 @@
 # postblox
 
-Local-first email TUI + MCP bridge.
+[![CI](https://github.com/numbery/postblox/actions/workflows/ci.yml/badge.svg)](https://github.com/numbery/postblox/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE-MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE-APACHE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.80-orange.svg)](rust-toolchain.toml)
+
+**Local-first email TUI and MCP bridge for AI agents.**
 
 postblox connects to email accounts you already own (Gmail, Fastmail, …),
 keeps a local SQLite mirror in real time over IMAP IDLE, and exposes an
 MCP bridge so AI agents can read events freely and call tools through
 per-tool / per-pattern approval gates.
 
-> Status: undergoing a hard refocus. The legacy mail server, dashboard,
-> multi-tenant orgs, and slop classifier were cut. postblox is being
-> rebuilt phase by phase. See the working plan at the top of `CLAUDE.md`.
+> **Status:** pre-1.0. Active development happens in a private mirror;
+> `main` advances on tagged releases.
 
-## Goals
+## Why
 
-- **Beautiful, fast TUI** — Gmail-class layout, FTS5 search, live updates.
-- **MCP bridge** — outbound notifications ungated; inbound tool calls
-  gated per tool + per arg pattern.
-- **Instant sync** — IMAP IDLE plus write-through actions.
-- **No mail server** — bring your own accounts.
-- **Local-first** — SQLite, no daemon dependencies beyond your terminal.
+- **Beautiful, fast TUI.** Gmail-class layout, FTS5 search, live updates
+  driven by IMAP IDLE.
+- **MCP bridge.** Outbound notifications stream freely; inbound tool
+  calls run through per-tool, per-arg-pattern approval gates.
+- **Instant sync.** IDLE plus write-through actions: a flag toggle in
+  the TUI is reflected on the server before the next frame renders.
+- **Bring your own accounts.** No mail server, no SMTP relay, no signup.
+- **One file.** Everything lives in a single SQLite database you own.
+
+## Architecture
+
+```
+            ┌──────────────────────────────────────┐
+            │              postbloxd                │
+            │ ┌─────────┐  ┌────────┐  ┌─────────┐ │
+            │ │ IMAP    │  │ SQLite │  │ MCP     │ │
+            │ │ workers │←→│  pool  │←→│ gates   │ │
+            │ └─────────┘  └────────┘  └─────────┘ │
+            │            ↑↓ Unix socket            │
+            └──────────────────────────────────────┘
+                          ↑↓     ↑↓
+                       ┌──────┐ ┌──────────┐
+                       │ TUI  │ │ MCP shim │
+                       └──────┘ └──────────┘
+```
+
+A single daemon owns the DB pool and the IMAP IDLE connections. Clients
+(the TUI, the MCP shim) speak length-prefixed JSON frames over a Unix
+socket — `~/.local/share/postblox/postbloxd.sock` by default.
+
+## Install
+
+```sh
+git clone https://github.com/numbery/postblox
+cd postblox
+cargo install --path . --locked
+```
+
+Requires:
+- Rust **1.80+** (see `rust-toolchain.toml`)
+- A POSIX system (Linux or macOS). Windows isn't supported yet.
+
+## Quick start
+
+```sh
+# Start the daemon (foreground; ctrl-c to stop).
+postbloxd
+```
+
+Then, in another shell, connect a client. (The TUI lands in R3c; until
+then, you can drive the daemon from any process that speaks the IPC
+protocol — see `tests/ipc_integration.rs` for the wire format.)
+
+## Configuration
+
+postblox reads:
+
+- `POSTBLOX_DB` — database path (default `$XDG_DATA_HOME/postblox/postblox.db`).
+- `POSTBLOX_SOCKET` — socket path (default `$XDG_RUNTIME_DIR/postblox.sock`).
+- `RUST_LOG` — standard `tracing-subscriber` env filter.
+
+Account credentials live in your OS keyring; see [`SECURITY.md`](SECURITY.md).
 
 ## Roadmap
 
-| Phase | Scope | Status |
-|-------|-------|--------|
-| R0 | Cut: remove server, dashboard, slop, multi-tenant, postgres | **DONE** |
-| R1 | SQLite schema + accounts + folders + threads + messages + FTS5 | next |
-| R2 | `postbloxd` daemon — Unix socket IPC, IMAP IDLE workers | |
-| R3 | Rewire TUI to socket | |
-| R4 | Rebuild MCP — 12 tools + notifications stream + gates | |
-| R5 | Auth — OS keyring + OAuth2 (Gmail) | |
-| R6 | TUI polish — write-through actions, command bar, themes | |
-| R7+ | Bitwarden as an additional `SecretStore` backend | |
-| R7+ | Replace embeddings/sqlite-vec with LLM-gateway-driven search — gateway reads the SQLite file (or queries via a tool) and runs ranking server-side | |
+Tracked in [`CHANGELOG.md`](CHANGELOG.md). At a glance:
+
+- SQLite schema + FTS5 search ✅
+- `postbloxd` daemon over a Unix socket ✅
+- Local write-through ops + event bus ✅
+- IMAP IDLE workers + SMTP submission
+- TUI client over the socket
+- MCP bridge with per-tool, per-pattern approval gates
+- OS keyring + Gmail OAuth2
+- Optional Bitwarden secret-store backend
+- Optional LLM-gateway-driven hybrid search
+
+## Contributing
+
+PRs are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and
+[`CLAUDE.md`](CLAUDE.md) (the project's code rules) before opening one.
+
+Open PRs against `main`. A maintainer will land them via a private
+integration branch and tag a release.
 
 ## License
 
-[MIT](LICENSE)
+Dual-licensed under either of:
+
+- [MIT](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
+
+at your option.
+
+## Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this project by you, as defined in the
+Apache-2.0 license, shall be dual-licensed as above, without any
+additional terms or conditions.

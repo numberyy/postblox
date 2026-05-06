@@ -3,8 +3,24 @@ name = "postblox"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
-description = "Local-first email TUI + MCP bridge"
-license = "MIT"
+description = "Local-first email TUI and MCP bridge for AI agents."
+authors = ["Nikhil <numbery@users.noreply.github.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/numbery/postblox"
+homepage = "https://github.com/numbery/postblox"
+documentation = "https://docs.rs/postblox"
+readme = "README.md"
+keywords = ["email", "imap", "tui", "mcp", "sqlite"]
+categories = ["email", "command-line-utilities", "database"]
+include = [
+    "src/**/*.rs",
+    "migrations/**/*.sql",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "CHANGELOG.md",
+]
 
 [[bin]]
 name = "postblox"

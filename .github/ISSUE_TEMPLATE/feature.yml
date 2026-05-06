@@ -1,0 +1,42 @@
+name: Feature request
+description: Suggest a small, well-scoped feature.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        postblox stays small on purpose — see CLAUDE.md for the
+        anti-bloat rules. Surgical, justified features land faster.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user-visible problem does this solve? Who hits it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: |
+        What should change? If multiple shapes are reasonable, list them
+        and call out trade-offs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else did you consider? Why is this better?
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I read CLAUDE.md and this fits the "no abstraction before the third use" rule.
+        - label: This is implementable in one self-contained PR.

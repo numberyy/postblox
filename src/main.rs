@@ -1,14 +1,9 @@
-// postblox — refocus in progress.
-//
-// Phase R0 cut the legacy server, dashboard, multi-tenant, slop, and
-// permission stacks. Phases R1+ build the SQLite-backed daemon, the
-// rebuilt TUI, the trimmed MCP bridge, and OAuth/keyring auth.
-//
-// For now the binary is a placeholder so `cargo check` succeeds while
-// the pure-rust mail/ and embeddings/ modules continue to compile and
-// be tested.
+//! `postblox` — placeholder CLI.
+//!
+//! The runtime lives in the `postbloxd` binary. Once the TUI lands,
+//! this entry point will become the interactive client.
 
 fn main() {
-    eprintln!("postblox is being rebuilt (phase R0 complete). See plans/ for the refocus roadmap.");
+    eprintln!("Run `postbloxd` to start the daemon. The interactive TUI is not yet shipped.");
     std::process::exit(0);
 }
