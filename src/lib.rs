@@ -1,15 +1,2 @@
-pub mod api;
-pub mod cli;
-pub mod config;
-pub mod core;
-pub mod dashboard;
-pub mod db;
 pub mod embeddings;
-pub mod events;
-pub mod hooks;
 pub mod mail;
-pub mod models;
-pub mod notifications;
-pub mod stalwart;
-pub mod storage;
-pub mod sync;

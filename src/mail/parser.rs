@@ -1,7 +1,14 @@
 use mail_parser::{Address, HeaderValue, MessageParser, MimeHeaders, PartType};
+use serde::{Deserialize, Serialize};
 
 use crate::mail::error::MailError;
-use crate::models::Disposition;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Disposition {
+    Inline,
+    Attachment,
+}
 
 #[derive(Debug, Clone)]
 pub struct ParsedAttachment {

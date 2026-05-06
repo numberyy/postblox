@@ -31,28 +31,11 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg17-v0.8.0
-        env:
-          POSTGRES_USER: postblox
-          POSTGRES_PASSWORD: postblox
-          POSTGRES_DB: postblox_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      DATABASE_URL: postgres://postblox:postblox@localhost:5432/postblox_test
-      STALWART_ADMIN_TOKEN: test-token
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --include-ignored
+      - run: cargo test
 
   deny:
     runs-on: ubuntu-latest

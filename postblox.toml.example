@@ -1,49 +1,33 @@
-database_url = "postgres://postblox:postblox@localhost:5432/postblox"
+# postblox v2 — local-first email TUI + MCP bridge.
+#
+# This file is a placeholder; the full schema lands with phase R1
+# (SQLite + accounts) and R4 (MCP gates). For now nothing is read.
 
-# host = "0.0.0.0"
-# port = 3000
+# Where postblox stores its SQLite DB and attachments.
+# Defaults to $XDG_DATA_HOME/postblox.
+# data_dir = "~/.local/share/postblox"
 
-# Stalwart mail server connection
-# stalwart_url = "http://localhost:8080"
-# stalwart_admin_user = "admin"
-# stalwart_admin_token = "your-admin-password"
-# stalwart_inbound_token = "your-inbound-webhook-token"
-# stalwart_smtp_host = "localhost"
-# stalwart_smtp_port = 25
+# [[accounts]]
+# email     = "you@example.com"
+# imap_host = "imap.fastmail.com"
+# imap_port = 993
+# smtp_host = "smtp.fastmail.com"
+# smtp_port = 465
+# auth      = "password"   # or "oauth2_google"
 
-# Outbound SMTP relay (Mailgun, SES, Postmark, etc.)
-# Bypasses direct delivery — mail goes through relay's warm IPs
-# relay_host = "smtp.mailgun.org"
-# relay_port = 587
-# relay_username = "postmaster@mg.example.com"
-# relay_password = "your-relay-password"
-# relay_starttls = true
+# [embeddings]
+# url        = "http://localhost:11434"
+# model      = "nomic-embed-text"
+# dimension  = 768
 
-# Semantic search via pgvector
-# embedding_url = "http://localhost:11434/v1/embeddings"
-# embedding_model = "nomic-embed-text"
-# embedding_api_key = "optional-api-key"
-# embedding_dimension = 768
-
-# trust_auto_upgrade_threshold = 10
-
-# attachment_storage_path = "data/attachments"
-# max_attachment_size_bytes = 26214400
-
-# [rate_limit]
-# requests_per_minute = 60
-# requests_per_hour = 1000
-
-# [[guard_patterns]]
-# name = "block-marketing"
-# pattern = "unsubscribe|marketing|newsletter"
-
-# [[hooks]]
-# event = "message.received"
-# command = "/usr/local/bin/notify"
-# args = ["--channel", "email"]
-# timeout_secs = 5
-
-# [[hooks]]
-# event = "before_send"
-# command = "/usr/local/bin/check-outbound"
+# [mcp.gates]
+# default = "require"          # auto_allow | require | deny
+#
+# [[mcp.gates.rule]]
+# tool   = "send"
+# to     = "*@myorg.com"
+# action = "auto_allow"
+#
+# [[mcp.gates.rule]]
+# tool   = "delete"
+# action = "deny"
