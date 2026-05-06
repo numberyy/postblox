@@ -7,3 +7,4 @@ pub mod ipc;
 pub mod mail;
 pub mod models;
 pub mod secrets;
+pub mod sync;

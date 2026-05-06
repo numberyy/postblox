@@ -10,16 +10,18 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
 use crate::db;
-use crate::imap::{self, ImapAuth};
+use crate::imap::{self, ImapAuth, ImapSync};
 use crate::ipc::{Dispatcher, Hub, RpcError, Topic};
 use crate::models::FolderRole;
 use crate::secrets::SecretStore;
+use crate::sync;
 
 #[derive(Clone)]
 pub struct DaemonDispatcher {
     pool: SqlitePool,
     hub: Arc<Hub>,
     imap: Arc<dyn ImapAuth>,
+    imap_sync: Arc<dyn ImapSync>,
     secrets: Arc<dyn SecretStore>,
 }
 
@@ -27,20 +29,23 @@ impl DaemonDispatcher {
     /// Production constructor: TLS-backed IMAP via rustls.
     pub fn new(pool: SqlitePool, hub: Arc<Hub>, secrets: Arc<dyn SecretStore>) -> Self {
         let imap = imap::default_auth().expect("rustls platform verifier init");
-        Self::with_imap(pool, hub, imap, secrets)
+        let imap_sync = imap::default_sync().expect("rustls platform verifier init");
+        Self::with_imap(pool, hub, imap, imap_sync, secrets)
     }
 
-    /// Test/customisation constructor: bring your own `ImapAuth`.
+    /// Test/customisation constructor: bring your own IMAP impls.
     pub fn with_imap(
         pool: SqlitePool,
         hub: Arc<Hub>,
         imap: Arc<dyn ImapAuth>,
+        imap_sync: Arc<dyn ImapSync>,
         secrets: Arc<dyn SecretStore>,
     ) -> Self {
         Self {
             pool,
             hub,
             imap,
+            imap_sync,
             secrets,
         }
     }
@@ -76,6 +81,16 @@ impl Dispatcher for DaemonDispatcher {
             // -- network ops --
             "account.test_login" => {
                 op_account_test_login(&self.pool, self.imap.as_ref(), args).await
+            }
+            "account.sync_folder" => {
+                op_account_sync_folder(
+                    &self.pool,
+                    &self.hub,
+                    self.imap_sync.as_ref(),
+                    self.secrets.as_ref(),
+                    args,
+                )
+                .await
             }
 
             // -- secret ops --
@@ -362,6 +377,54 @@ fn role_for(name: &str) -> FolderRole {
         "STARRED" | "[GMAIL]/STARRED" => FolderRole::Starred,
         _ => FolderRole::Custom,
     }
+}
+
+async fn op_account_sync_folder(
+    pool: &SqlitePool,
+    hub: &Arc<Hub>,
+    imap_sync: &dyn ImapSync,
+    secrets: &dyn SecretStore,
+    args: Value,
+) -> Result<Value, RpcError> {
+    let account_id = parse_uuid(&args, "account_id")?;
+    let folder_name = args
+        .get("folder_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RpcError::bad_args("missing 'folder_name'"))?;
+
+    let secret = secrets
+        .get(account_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("secrets::get: {e}")))?
+        .ok_or_else(|| RpcError::new("missing_secret", "no stored secret for account"))?;
+
+    let report = sync::reconcile_folder(pool, hub, imap_sync, account_id, folder_name, &secret)
+        .await
+        .map_err(|e| match e {
+            sync::SyncError::Imap(crate::imap::ImapError::Auth(m)) => {
+                RpcError::new("auth_failed", m)
+            }
+            sync::SyncError::UnknownAccount => RpcError::bad_args("unknown account_id"),
+            sync::SyncError::UnknownFolder(_) => RpcError::bad_args(e.to_string()),
+            sync::SyncError::MissingCredentials => {
+                RpcError::new("missing_secret", "no stored secret")
+            }
+            other => RpcError::internal(other.to_string()),
+        })?;
+
+    audit(
+        pool,
+        "account.sync_folder",
+        Some(&account_id.to_string()),
+        &json!({
+            "folder_name": folder_name,
+            "inserted": report.inserted,
+            "wiped": report.wiped,
+        }),
+    )
+    .await;
+
+    encode_one(&report)
 }
 
 // ---------- secret ops ------------------------------------------------------

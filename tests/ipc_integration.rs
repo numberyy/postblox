@@ -9,7 +9,7 @@ use tokio::time::{timeout, Duration};
 
 use postblox::daemon::DaemonDispatcher;
 use postblox::db::{accounts, connect, folders, messages, threads};
-use postblox::imap::{FolderInfo, ImapAuth, ImapError};
+use postblox::imap::{FetchedMessage, FolderInfo, FolderSync, ImapAuth, ImapError, ImapSync};
 use postblox::ipc::client::Client;
 use postblox::ipc::{listen, Hub, Topic};
 use postblox::models::{AuthKind, FolderRole};
@@ -28,10 +28,18 @@ struct Harness {
 }
 
 async fn make_harness() -> Harness {
-    make_harness_with_imap(Arc::new(NoImap)).await
+    make_harness_with(Arc::new(NoImap), Arc::new(NoSync)).await
 }
 
 async fn make_harness_with_imap(imap: Arc<dyn ImapAuth>) -> Harness {
+    make_harness_with(imap, Arc::new(NoSync)).await
+}
+
+async fn make_harness_with_sync(sync: Arc<dyn ImapSync>) -> Harness {
+    make_harness_with(Arc::new(NoImap), sync).await
+}
+
+async fn make_harness_with(imap: Arc<dyn ImapAuth>, imap_sync: Arc<dyn ImapSync>) -> Harness {
     let db_dir = tempfile::tempdir().unwrap();
     let pool = connect(&db_dir.path().join("postblox.db")).await.unwrap();
     let sock_dir = tempfile::tempdir().unwrap();
@@ -46,6 +54,7 @@ async fn make_harness_with_imap(imap: Arc<dyn ImapAuth>) -> Harness {
         pool.clone(),
         hub.clone(),
         imap,
+        imap_sync,
         secrets,
     ));
     let server = listen(&sock, dispatcher, hub.clone()).await.unwrap();
@@ -75,6 +84,26 @@ impl ImapAuth for NoImap {
     ) -> Result<Vec<FolderInfo>, ImapError> {
         Err(ImapError::Protocol(
             "imap not configured for this test".into(),
+        ))
+    }
+}
+
+/// Sync counterpart of `NoImap`.
+struct NoSync;
+
+#[async_trait::async_trait]
+impl ImapSync for NoSync {
+    async fn sync_folder(
+        &self,
+        _: &str,
+        _: u16,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: u32,
+    ) -> Result<FolderSync, ImapError> {
+        Err(ImapError::Protocol(
+            "imap sync not configured for this test".into(),
         ))
     }
 }
@@ -688,4 +717,394 @@ async fn account_delete_secret_is_idempotent() {
         .await
         .unwrap();
     assert!(resp.ok);
+}
+
+// ---- account.sync_folder ---------------------------------------------------
+
+/// Fetcher with scripted UID validity / message list. Per-call password
+/// check so we can also exercise the auth-failure path.
+struct ScriptedSync {
+    uid_validity: std::sync::Mutex<u32>,
+    uid_next: std::sync::Mutex<u32>,
+    messages: std::sync::Mutex<Vec<FetchedMessage>>,
+    password: String,
+}
+
+impl ScriptedSync {
+    fn new(uid_validity: u32, uid_next: u32, msgs: Vec<FetchedMessage>) -> Self {
+        Self {
+            uid_validity: std::sync::Mutex::new(uid_validity),
+            uid_next: std::sync::Mutex::new(uid_next),
+            messages: std::sync::Mutex::new(msgs),
+            password: "right".into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ImapSync for ScriptedSync {
+    async fn sync_folder(
+        &self,
+        _: &str,
+        _: u16,
+        _: &str,
+        password: &str,
+        _: &str,
+        from_uid: u32,
+    ) -> Result<FolderSync, ImapError> {
+        if password != self.password {
+            return Err(ImapError::Auth("bad password".into()));
+        }
+        let messages: Vec<FetchedMessage> = self
+            .messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.uid >= from_uid)
+            .cloned()
+            .collect();
+        Ok(FolderSync {
+            uid_validity: Some(*self.uid_validity.lock().unwrap()),
+            uid_next: Some(*self.uid_next.lock().unwrap()),
+            exists: messages.len() as u32,
+            messages,
+        })
+    }
+}
+
+fn rfc822(msg_id: &str, in_reply_to: Option<&str>, subject: &str, body: &str) -> Vec<u8> {
+    let mut s = String::new();
+    s.push_str(&format!("Message-ID: <{msg_id}>\r\n"));
+    if let Some(p) = in_reply_to {
+        s.push_str(&format!("In-Reply-To: <{p}>\r\n"));
+        s.push_str(&format!("References: <{p}>\r\n"));
+    }
+    s.push_str("From: alice@example.com\r\n");
+    s.push_str("To: bob@example.com\r\n");
+    s.push_str(&format!("Subject: {subject}\r\n"));
+    s.push_str("MIME-Version: 1.0\r\n");
+    s.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+    s.push_str("\r\n");
+    s.push_str(body);
+    s.into_bytes()
+}
+
+async fn setup_account_with_secret(h: &Harness) -> uuid::Uuid {
+    let id = make_account(h, "u@example.com").await;
+    folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id: id,
+            name: "INBOX".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Inbox,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "account.set_secret",
+            json!({"account_id": id, "password": "right"}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp);
+    id
+}
+
+#[tokio::test]
+async fn account_sync_folder_inserts_new_messages_and_publishes_events() {
+    let msgs = vec![
+        FetchedMessage {
+            uid: 5,
+            flags: vec!["\\Seen".into()],
+            internal_date: Some(chrono::Utc::now()),
+            raw: rfc822("a1@x", None, "Hello", "world"),
+        },
+        FetchedMessage {
+            uid: 6,
+            flags: vec![],
+            internal_date: Some(chrono::Utc::now()),
+            raw: rfc822("a2@x", Some("a1@x"), "Re: Hello", "again"),
+        },
+    ];
+    let h = make_harness_with_sync(Arc::new(ScriptedSync::new(1, 7, msgs))).await;
+    let account_id = setup_account_with_secret(&h).await;
+
+    // subscribe to mail.new before triggering the sync so we see events
+    let mut sub = Client::connect(&h.sock).await.unwrap();
+    let _sub_id = sub.subscribe(Topic::MailNew).await.unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "account.sync_folder",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp);
+    assert_eq!(resp.data["inserted"], json!(2));
+    assert_eq!(resp.data["wiped"], json!(0));
+
+    // both messages on disk
+    let folder = folders::get_by_name(&h.pool, account_id, "INBOX")
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = messages::list_by_folder(&h.pool, folder.id, 100, 0)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    let uids: Vec<i64> = rows.iter().map(|m| m.uid).collect();
+    assert!(uids.contains(&5));
+    assert!(uids.contains(&6));
+
+    // both replies threaded into one thread (In-Reply-To on the second)
+    let thread_ids: std::collections::HashSet<_> = rows.iter().map(|m| m.thread_id).collect();
+    assert_eq!(
+        thread_ids.len(),
+        1,
+        "expected single thread, got {thread_ids:?}"
+    );
+
+    // last_seen_uid was updated to the high UID
+    let folder_after = folders::get(&h.pool, folder.id).await.unwrap().unwrap();
+    assert_eq!(folder_after.last_seen_uid, Some(6));
+    assert_eq!(folder_after.uid_validity, Some(1));
+    assert_eq!(folder_after.uid_next, Some(7));
+
+    // Two mail.new events (one per inserted message). Use a generous
+    // timeout because the dispatcher publishes after each insert.
+    timeout(Duration::from_secs(2), async {
+        let _ = sub.next_event().await.unwrap();
+        let _ = sub.next_event().await.unwrap();
+    })
+    .await
+    .expect("mail.new events");
+}
+
+#[tokio::test]
+async fn account_sync_folder_skips_already_present_uids() {
+    let msgs = vec![FetchedMessage {
+        uid: 1,
+        flags: vec![],
+        internal_date: Some(chrono::Utc::now()),
+        raw: rfc822("dup@x", None, "Hi", "dup"),
+    }];
+    let scripted = Arc::new(ScriptedSync::new(1, 2, msgs));
+    let h = make_harness_with_sync(scripted.clone()).await;
+    let account_id = setup_account_with_secret(&h).await;
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    // First call inserts.
+    let resp = c
+        .request(
+            "account.sync_folder",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok);
+    assert_eq!(resp.data["inserted"], json!(1));
+
+    // Second call: same UID still on the server, but already in DB.
+    let resp = c
+        .request(
+            "account.sync_folder",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok);
+    assert_eq!(resp.data["inserted"], json!(0));
+
+    // exactly one row
+    let folder = folders::get_by_name(&h.pool, account_id, "INBOX")
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = messages::list_by_folder(&h.pool, folder.id, 100, 0)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
+#[tokio::test]
+async fn account_sync_folder_uid_validity_change_triggers_full_resync() {
+    let scripted = Arc::new(ScriptedSync::new(
+        1,
+        2,
+        vec![FetchedMessage {
+            uid: 1,
+            flags: vec![],
+            internal_date: Some(chrono::Utc::now()),
+            raw: rfc822("first@x", None, "first", "body1"),
+        }],
+    ));
+    let h = make_harness_with_sync(scripted.clone()).await;
+    let account_id = setup_account_with_secret(&h).await;
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "account.sync_folder",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok);
+
+    // Server rolls UIDVALIDITY and presents an entirely new mailbox.
+    *scripted.uid_validity.lock().unwrap() = 99;
+    *scripted.uid_next.lock().unwrap() = 2;
+    *scripted.messages.lock().unwrap() = vec![FetchedMessage {
+        uid: 1,
+        flags: vec![],
+        internal_date: Some(chrono::Utc::now()),
+        raw: rfc822("brand_new@x", None, "different mailbox", "x"),
+    }];
+
+    let resp = c
+        .request(
+            "account.sync_folder",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp);
+    assert_eq!(resp.data["wiped"], json!(1), "expected wipe");
+    assert_eq!(resp.data["inserted"], json!(1));
+
+    // The original message is gone; only the new one remains.
+    let folder = folders::get_by_name(&h.pool, account_id, "INBOX")
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = messages::list_by_folder(&h.pool, folder.id, 100, 0)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].message_id_header.as_deref(), Some("brand_new@x"));
+
+    // uid_validity is now the new value
+    let folder_after = folders::get(&h.pool, folder.id).await.unwrap().unwrap();
+    assert_eq!(folder_after.uid_validity, Some(99));
+}
+
+#[tokio::test]
+async fn account_sync_folder_empty_inbox_is_a_noop() {
+    let h = make_harness_with_sync(Arc::new(ScriptedSync::new(1, 1, vec![]))).await;
+    let account_id = setup_account_with_secret(&h).await;
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "account.sync_folder",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok);
+    assert_eq!(resp.data["inserted"], json!(0));
+    assert_eq!(resp.data["wiped"], json!(0));
+}
+
+#[tokio::test]
+async fn account_sync_folder_returns_auth_failed_on_bad_password() {
+    // Stored password is "wrong" but ScriptedSync expects "right"
+    let h = make_harness_with_sync(Arc::new(ScriptedSync::new(1, 1, vec![]))).await;
+    let id = make_account(&h, "u@example.com").await;
+    folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id: id,
+            name: "INBOX".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Inbox,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    c.request(
+        "account.set_secret",
+        json!({"account_id": id, "password": "wrong"}),
+    )
+    .await
+    .unwrap();
+
+    let resp = c
+        .request(
+            "account.sync_folder",
+            json!({"account_id": id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("auth_failed")
+    );
+}
+
+#[tokio::test]
+async fn account_sync_folder_unknown_folder_returns_bad_args() {
+    let h = make_harness_with_sync(Arc::new(ScriptedSync::new(1, 1, vec![]))).await;
+    let id = make_account(&h, "u@example.com").await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    c.request(
+        "account.set_secret",
+        json!({"account_id": id, "password": "right"}),
+    )
+    .await
+    .unwrap();
+    let resp = c
+        .request(
+            "account.sync_folder",
+            json!({"account_id": id, "folder_name": "Nope"}),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+}
+
+#[tokio::test]
+async fn account_sync_folder_missing_secret_surfaces_specific_error() {
+    let h = make_harness_with_sync(Arc::new(ScriptedSync::new(1, 1, vec![]))).await;
+    let id = make_account(&h, "u@example.com").await;
+    folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id: id,
+            name: "INBOX".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Inbox,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "account.sync_folder",
+            json!({"account_id": id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("missing_secret")
+    );
 }

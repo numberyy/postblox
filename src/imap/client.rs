@@ -136,6 +136,109 @@ pub struct FolderInfo {
     pub selectable: bool,
 }
 
+/// Result of selecting a folder and fetching `<from_uid>:*`. The
+/// reconciler uses [`FolderSync::uid_validity`] to detect rebuilds and
+/// [`FolderSync::messages`] for the actual inserts.
+#[derive(Debug, Clone)]
+pub struct FolderSync {
+    pub uid_validity: Option<u32>,
+    pub uid_next: Option<u32>,
+    pub exists: u32,
+    pub messages: Vec<FetchedMessage>,
+}
+
+/// A single message returned by a UID-FETCH. `raw` holds RFC822 bytes;
+/// `internal_date` is the IMAP `INTERNALDATE` (when the server
+/// received it).
+#[derive(Debug, Clone)]
+pub struct FetchedMessage {
+    pub uid: u32,
+    pub flags: Vec<String>,
+    pub internal_date: Option<chrono::DateTime<chrono::Utc>>,
+    pub raw: Vec<u8>,
+}
+
+/// IMAP system flags are reported as enum variants; we serialise them
+/// back to their RFC 3501 wire form so the rest of the codebase can
+/// treat flags as strings.
+fn flag_name(f: async_imap::types::Flag<'_>) -> String {
+    use async_imap::types::Flag;
+    match f {
+        Flag::Seen => "\\Seen".into(),
+        Flag::Answered => "\\Answered".into(),
+        Flag::Flagged => "\\Flagged".into(),
+        Flag::Deleted => "\\Deleted".into(),
+        Flag::Draft => "\\Draft".into(),
+        Flag::Recent => "\\Recent".into(),
+        Flag::MayCreate => "\\*".into(),
+        Flag::Custom(c) => c.into_owned(),
+    }
+}
+
+/// `SELECT folder` then `UID FETCH <from_uid>:* (UID FLAGS INTERNALDATE
+/// RFC822)`. Stops short of `LOGOUT` so callers can chain more
+/// operations; the wrapping `ImapSync::sync_folder` impl logs out for
+/// us.
+pub async fn fetch_uid_range<S>(
+    session: &mut Session<S>,
+    folder: &str,
+    from_uid: u32,
+) -> Result<FolderSync, ImapError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send + 'static,
+{
+    let mailbox = session.select(folder).await.map_err(ImapError::from)?;
+    let uid_validity = mailbox.uid_validity;
+    let uid_next = mailbox.uid_next;
+    let exists = mailbox.exists;
+
+    // Empty mailbox: nothing to pull.
+    if exists == 0 {
+        return Ok(FolderSync {
+            uid_validity,
+            uid_next,
+            exists,
+            messages: vec![],
+        });
+    }
+
+    // `<from>:*` selects everything from `from_uid` upward, regardless of
+    // whether the server's actual high UID is `uid_next - 1` or lower.
+    let range = format!("{}:*", from_uid.max(1));
+    let stream = session
+        .uid_fetch(&range, "(UID FLAGS INTERNALDATE RFC822)")
+        .await
+        .map_err(ImapError::from)?;
+    let fetches: Vec<async_imap::types::Fetch> =
+        stream.filter_map(|r| async move { r.ok() }).collect().await;
+
+    let messages: Vec<FetchedMessage> = fetches
+        .into_iter()
+        .filter_map(|f| {
+            let uid = f.uid?;
+            // Skip messages where the server did not include a body.
+            // This shouldn't happen for the query we sent but defending
+            // against it keeps the reconciler simpler.
+            let raw = f.body().map(|b| b.to_vec())?;
+            let flags = f.flags().map(flag_name).collect();
+            let internal_date = f.internal_date().map(|d| d.with_timezone(&chrono::Utc));
+            Some(FetchedMessage {
+                uid,
+                flags,
+                internal_date,
+                raw,
+            })
+        })
+        .collect();
+
+    Ok(FolderSync {
+        uid_validity,
+        uid_next,
+        exists,
+        messages,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -198,6 +198,16 @@ pub async fn delete_by_folder_uid(
     Ok(r.rows_affected() > 0)
 }
 
+/// Wipe every message in a folder. Used when the server's
+/// `UIDVALIDITY` changed under us and we have to refetch from scratch.
+pub async fn delete_all_in_folder(pool: &SqlitePool, folder_id: Uuid) -> Result<u64, sqlx::Error> {
+    let r = sqlx::query("DELETE FROM messages WHERE folder_id = ?")
+        .bind(folder_id)
+        .execute(pool)
+        .await?;
+    Ok(r.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
