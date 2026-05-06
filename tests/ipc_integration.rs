@@ -13,6 +13,10 @@ use postblox::imap::{FolderInfo, ImapAuth, ImapError};
 use postblox::ipc::client::Client;
 use postblox::ipc::{listen, Hub, Topic};
 use postblox::models::{AuthKind, FolderRole};
+use postblox::secrets::{
+    file::{FileSecretStore, KdfParams},
+    SecretStore,
+};
 
 struct Harness {
     _db_dir: tempfile::TempDir,
@@ -33,7 +37,17 @@ async fn make_harness_with_imap(imap: Arc<dyn ImapAuth>) -> Harness {
     let sock_dir = tempfile::tempdir().unwrap();
     let sock = sock_dir.path().join("postbloxd.sock");
     let hub = Arc::new(Hub::new());
-    let dispatcher = Arc::new(DaemonDispatcher::with_imap(pool.clone(), hub.clone(), imap));
+    let secrets: Arc<dyn SecretStore> = Arc::new(FileSecretStore::with_params(
+        db_dir.path().join("secrets.bin"),
+        "test-passphrase",
+        KdfParams::insecure_for_tests(),
+    ));
+    let dispatcher = Arc::new(DaemonDispatcher::with_imap(
+        pool.clone(),
+        hub.clone(),
+        imap,
+        secrets,
+    ));
     let server = listen(&sock, dispatcher, hub.clone()).await.unwrap();
     Harness {
         _db_dir: db_dir,
@@ -554,4 +568,124 @@ async fn account_test_login_unknown_account_returns_bad_args() {
         resp.error.as_ref().map(|e| e.code.as_str()),
         Some("bad_args")
     );
+}
+
+// ---- account.set_secret / delete_secret ------------------------------------
+
+async fn make_account(h: &Harness, email: &str) -> uuid::Uuid {
+    accounts::create(
+        &h.pool,
+        &accounts::NewAccount {
+            email: email.into(),
+            display_name: None,
+            auth_kind: AuthKind::Password,
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            imap_use_tls: true,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 465,
+            smtp_use_tls: true,
+            smtp_starttls: false,
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+#[tokio::test]
+async fn account_set_secret_round_trip_via_socket() {
+    let h = make_harness().await;
+    let id = make_account(&h, "u@example.com").await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let resp = c
+        .request(
+            "account.set_secret",
+            json!({"account_id": id, "password": "hunter2"}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp);
+    assert_eq!(resp.data["ok"], json!(true));
+
+    // Confirm the audit row was written so the daemon can prove it.
+    let audits = postblox::db::audit::list_recent(&h.pool, 10, 0)
+        .await
+        .unwrap();
+    assert!(audits.iter().any(|a| a.action == "account.set_secret"));
+}
+
+#[tokio::test]
+async fn account_set_secret_rejects_unknown_account() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "account.set_secret",
+            json!({
+                "account_id": uuid::Uuid::new_v4(),
+                "password": "x",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+}
+
+#[tokio::test]
+async fn account_set_secret_rejects_empty_password() {
+    let h = make_harness().await;
+    let id = make_account(&h, "u@example.com").await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "account.set_secret",
+            json!({"account_id": id, "password": ""}),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+}
+
+#[tokio::test]
+async fn account_delete_secret_is_idempotent() {
+    let h = make_harness().await;
+    let id = make_account(&h, "u@example.com").await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    // delete before set: should still succeed
+    let resp = c
+        .request("account.delete_secret", json!({"account_id": id}))
+        .await
+        .unwrap();
+    assert!(resp.ok);
+
+    // set, then delete
+    c.request(
+        "account.set_secret",
+        json!({"account_id": id, "password": "p"}),
+    )
+    .await
+    .unwrap();
+    let resp = c
+        .request("account.delete_secret", json!({"account_id": id}))
+        .await
+        .unwrap();
+    assert!(resp.ok);
+
+    // delete again: still ok
+    let resp = c
+        .request("account.delete_secret", json!({"account_id": id}))
+        .await
+        .unwrap();
+    assert!(resp.ok);
 }

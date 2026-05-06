@@ -7,6 +7,15 @@
 # Defaults to $XDG_DATA_HOME/postblox.
 # data_dir = "~/.local/share/postblox"
 
+# [secrets]
+# # Passphrase for the file-backed secret store (AES-256-GCM,
+# # Argon2id-derived key). Required to use account.set_secret.
+# # Will be replaced by the OS keyring backend in R5.
+# passphrase = "change me"
+# # Optional: override where the encrypted secrets file lives.
+# # Defaults to <data_dir>/secrets.bin.
+# # path = "~/.local/share/postblox/secrets.bin"
+
 # [[accounts]]
 # email     = "you@example.com"
 # imap_host = "imap.fastmail.com"

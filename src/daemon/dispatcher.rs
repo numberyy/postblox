@@ -13,24 +13,36 @@ use crate::db;
 use crate::imap::{self, ImapAuth};
 use crate::ipc::{Dispatcher, Hub, RpcError, Topic};
 use crate::models::FolderRole;
+use crate::secrets::SecretStore;
 
 #[derive(Clone)]
 pub struct DaemonDispatcher {
     pool: SqlitePool,
     hub: Arc<Hub>,
     imap: Arc<dyn ImapAuth>,
+    secrets: Arc<dyn SecretStore>,
 }
 
 impl DaemonDispatcher {
     /// Production constructor: TLS-backed IMAP via rustls.
-    pub fn new(pool: SqlitePool, hub: Arc<Hub>) -> Self {
+    pub fn new(pool: SqlitePool, hub: Arc<Hub>, secrets: Arc<dyn SecretStore>) -> Self {
         let imap = imap::default_auth().expect("rustls platform verifier init");
-        Self::with_imap(pool, hub, imap)
+        Self::with_imap(pool, hub, imap, secrets)
     }
 
     /// Test/customisation constructor: bring your own `ImapAuth`.
-    pub fn with_imap(pool: SqlitePool, hub: Arc<Hub>, imap: Arc<dyn ImapAuth>) -> Self {
-        Self { pool, hub, imap }
+    pub fn with_imap(
+        pool: SqlitePool,
+        hub: Arc<Hub>,
+        imap: Arc<dyn ImapAuth>,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Self {
+        Self {
+            pool,
+            hub,
+            imap,
+            secrets,
+        }
     }
 
     pub fn pool(&self) -> &SqlitePool {
@@ -64,6 +76,14 @@ impl Dispatcher for DaemonDispatcher {
             // -- network ops --
             "account.test_login" => {
                 op_account_test_login(&self.pool, self.imap.as_ref(), args).await
+            }
+
+            // -- secret ops --
+            "account.set_secret" => {
+                op_account_set_secret(&self.pool, self.secrets.as_ref(), args).await
+            }
+            "account.delete_secret" => {
+                op_account_delete_secret(&self.pool, self.secrets.as_ref(), args).await
             }
 
             other => Err(RpcError::unknown_op(other)),
@@ -342,6 +362,66 @@ fn role_for(name: &str) -> FolderRole {
         "STARRED" | "[GMAIL]/STARRED" => FolderRole::Starred,
         _ => FolderRole::Custom,
     }
+}
+
+// ---------- secret ops ------------------------------------------------------
+
+async fn op_account_set_secret(
+    pool: &SqlitePool,
+    secrets: &dyn SecretStore,
+    args: Value,
+) -> Result<Value, RpcError> {
+    let account_id = parse_uuid(&args, "account_id")?;
+    let password = args
+        .get("password")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RpcError::bad_args("missing 'password'"))?;
+    if password.is_empty() {
+        return Err(RpcError::bad_args("'password' must be non-empty"));
+    }
+
+    // Verify the account exists before stashing the secret. Otherwise
+    // a typo'd UUID would silently store an orphan entry.
+    let account = db::accounts::get(pool, account_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?;
+    if account.is_none() {
+        return Err(RpcError::bad_args("unknown account_id"));
+    }
+
+    secrets
+        .put(account_id, zeroize::Zeroizing::new(password.to_string()))
+        .await
+        .map_err(|e| RpcError::internal(format!("secrets::put: {e}")))?;
+
+    audit(
+        pool,
+        "account.set_secret",
+        Some(&account_id.to_string()),
+        &json!({}),
+    )
+    .await;
+    Ok(json!({"ok": true}))
+}
+
+async fn op_account_delete_secret(
+    pool: &SqlitePool,
+    secrets: &dyn SecretStore,
+    args: Value,
+) -> Result<Value, RpcError> {
+    let account_id = parse_uuid(&args, "account_id")?;
+    secrets
+        .delete(account_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("secrets::delete: {e}")))?;
+    audit(
+        pool,
+        "account.delete_secret",
+        Some(&account_id.to_string()),
+        &json!({}),
+    )
+    .await;
+    Ok(json!({"ok": true}))
 }
 
 // ---------- helpers ---------------------------------------------------------
