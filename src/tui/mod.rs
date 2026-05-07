@@ -23,6 +23,7 @@ use command::{parse_command, Command};
 use ipc::MailboxClient;
 
 const COMPOSER_BODY_KEY_VIEWPORT_LINES: usize = 3;
+const DETAIL_KEY_VIEWPORT_LINES: usize = 6;
 
 #[derive(Debug, Error)]
 pub enum TuiError {
@@ -265,6 +266,10 @@ async fn handle_key<C: Mailbox + ?Sized>(
         InputMode::Normal => {}
     }
 
+    if app.active == ActivePane::Details && handle_detail_key(key, app) {
+        return false;
+    }
+
     match key.code {
         KeyCode::Char(':') => {
             app.enter_command_mode();
@@ -278,6 +283,14 @@ async fn handle_key<C: Mailbox + ?Sized>(
             false
         }
         KeyCode::Char('q') => true,
+        KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.focus_detail_pane() {
+                app.set_status("Details");
+            } else {
+                app.set_status("No message detail open");
+            }
+            false
+        }
         KeyCode::Down | KeyCode::Char('j') => {
             if app.move_selection(1) {
                 refresh_after_selection_change(app, client).await;
@@ -363,6 +376,82 @@ async fn handle_key<C: Mailbox + ?Sized>(
                 refresh_after_selection_change(app, client).await;
             }
             false
+        }
+        _ => false,
+    }
+}
+
+fn handle_detail_key(key: KeyEvent, app: &mut AppState) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            if app.clear_detail_selection() {
+                app.set_status("Detail selection cleared");
+            } else {
+                app.set_status("Details");
+            }
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                app.start_detail_line_selection();
+            }
+            app.move_detail_line(1, DETAIL_KEY_VIEWPORT_LINES);
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                app.start_detail_line_selection();
+            }
+            app.move_detail_line(-1, DETAIL_KEY_VIEWPORT_LINES);
+            true
+        }
+        KeyCode::PageDown => {
+            app.move_detail_line(
+                DETAIL_KEY_VIEWPORT_LINES as isize,
+                DETAIL_KEY_VIEWPORT_LINES,
+            );
+            true
+        }
+        KeyCode::PageUp => {
+            app.move_detail_line(
+                -(DETAIL_KEY_VIEWPORT_LINES as isize),
+                DETAIL_KEY_VIEWPORT_LINES,
+            );
+            true
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.move_detail_line(
+                DETAIL_KEY_VIEWPORT_LINES as isize,
+                DETAIL_KEY_VIEWPORT_LINES,
+            );
+            true
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.move_detail_line(
+                -(DETAIL_KEY_VIEWPORT_LINES as isize),
+                DETAIL_KEY_VIEWPORT_LINES,
+            );
+            true
+        }
+        KeyCode::Left => {
+            app.move_detail_cursor_left();
+            true
+        }
+        KeyCode::Right => {
+            app.move_detail_cursor_right();
+            true
+        }
+        KeyCode::Home => {
+            app.detail_home();
+            true
+        }
+        KeyCode::End => {
+            app.detail_end();
+            true
+        }
+        KeyCode::Char('v') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.toggle_detail_line_selection();
+            true
         }
         _ => false,
     }
@@ -873,6 +962,7 @@ async fn refresh_current_pane<C: Mailbox + ?Sized>(app: &mut AppState, client: &
         ActivePane::Folders => refresh_folders(app, client).await,
         ActivePane::Threads => refresh_messages(app, client).await,
         ActivePane::Messages => refresh_messages(app, client).await,
+        ActivePane::Details => refresh_detail(app, client).await,
         ActivePane::Attachments => refresh_attachments(app, client).await,
     }
 }
@@ -883,6 +973,7 @@ async fn refresh_after_selection_change<C: Mailbox + ?Sized>(app: &mut AppState,
         ActivePane::Folders => refresh_messages(app, client).await,
         ActivePane::Threads => refresh_detail(app, client).await,
         ActivePane::Messages => refresh_detail(app, client).await,
+        ActivePane::Details => refresh_detail(app, client).await,
         ActivePane::Attachments => refresh_attachment_preview(app, client).await,
     }
 }
@@ -1304,6 +1395,17 @@ mod tests {
         }
     }
 
+    fn detail_with_body(message_id: Uuid, body: &str) -> MessageDetail {
+        MessageDetail {
+            id: message_id,
+            subject: "Hello".into(),
+            from: "alice@example.com".into(),
+            snippet: "Preview".into(),
+            body: body.into(),
+            flags: Vec::new(),
+        }
+    }
+
     fn app_with_account_folder(account_id: Uuid, folder_id: Uuid) -> AppState {
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(account_id)]);
@@ -1539,6 +1641,170 @@ mod tests {
         assert!(!quit);
         assert_eq!(app.theme, ThemeName::Dark);
         assert_eq!(app.status, "Theme: dark");
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_details_shortcut_requires_loaded_detail() {
+        let mut app = AppState {
+            active: ActivePane::Messages,
+            ..Default::default()
+        };
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.active, ActivePane::Messages);
+        assert_eq!(app.status, "No message detail open");
+
+        app.apply_detail(Some(detail_with_body(Uuid::new_v4(), "body")));
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.active, ActivePane::Details);
+        assert_eq!(app.status, "Details");
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_details_navigation_selection_and_escape() {
+        let body = (1..=12)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = AppState {
+            active: ActivePane::Details,
+            ..Default::default()
+        };
+        app.apply_detail(Some(detail_with_body(Uuid::new_v4(), &body)));
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.detail_cursor_line_column(), (1, 0));
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.active, ActivePane::Details);
+        assert_eq!(app.detail_cursor_line_column(), (1, 2));
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.active, ActivePane::Details);
+        assert_eq!(app.detail_cursor_line_column(), (1, 1));
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.detail_cursor_line_column(), (1, 0));
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(
+            app.detail_cursor_line_column().0,
+            1 + DETAIL_KEY_VIEWPORT_LINES
+        );
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.detail_cursor_line_column(), (1, 0));
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.detail_selected_line_range(), Some(1..=1));
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.detail_selected_line_range(), Some(1..=2));
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.detail_selected_line_range(), None);
+        assert_eq!(app.active, ActivePane::Details);
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(
+            app.detail_cursor_line_column().0,
+            2 + DETAIL_KEY_VIEWPORT_LINES
+        );
     }
 
     #[tokio::test]

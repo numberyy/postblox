@@ -214,15 +214,18 @@ fn render_messages(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Th
 }
 
 fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    if app.detail.is_some() && app.error.is_none() {
+        render_detail_viewport(frame, area, app, theme);
+        return;
+    }
+
     let text = detail_text(app);
     let paragraph = Paragraph::new(text)
-        .block(
-            Block::default()
-                .title("Detail")
-                .borders(Borders::ALL)
-                .border_style(theme.pane)
-                .title_style(theme.pane),
-        )
+        .block(pane_block(
+            "Detail",
+            app.active == ActivePane::Details,
+            theme,
+        ))
         .style(if app.error.is_some() {
             theme.error
         } else {
@@ -230,6 +233,49 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
         })
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
+}
+
+fn render_detail_viewport(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    let active = app.active == ActivePane::Details;
+    let viewport_height = area.height.saturating_sub(2) as usize;
+    let lines = app.detail_lines();
+    let line_count = lines.len().max(1);
+    let scroll = app.detail_visible_scroll(viewport_height);
+    let (cursor_line, cursor_column) = app.detail_cursor_line_column();
+    let selection = app.detail_selected_line_range();
+    let visual_indicator = if selection.is_some() { " • VIS" } else { "" };
+    let title = format!(
+        "Detail Ln {}/{}{}",
+        cursor_line.saturating_add(1).min(line_count),
+        line_count,
+        visual_indicator
+    );
+    let visible_lines = lines
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(viewport_height.max(1))
+        .map(|(line_index, line)| {
+            if selection
+                .as_ref()
+                .is_some_and(|range| range.contains(&line_index))
+            {
+                let visible = if line.is_empty() { " " } else { line };
+                Line::styled(visible.to_string(), theme.selection)
+            } else {
+                Line::raw(line.clone())
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let paragraph = Paragraph::new(visible_lines)
+        .block(pane_block_owned(title, active, theme))
+        .style(theme.text);
+    frame.render_widget(paragraph, area);
+
+    if active && cursor_line >= scroll {
+        set_cursor_in_area(frame, area, cursor_column, cursor_line - scroll);
+    }
 }
 
 fn detail_text(app: &AppState) -> String {
@@ -492,9 +538,15 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
             } else {
                 app.status.clone()
             };
-            let text = format!(
-                " {status} | q quit • c compose • : command • ←/→ pane • Tab pane • ↑/↓ move • j/k move • Enter open • a attach • e export • o open • r refresh • s sync • u seen • f flag • t theme "
-            );
+            let text = if app.active == ActivePane::Details {
+                format!(
+                    " {status} | Details: Tab pane • d details • ↑/↓/j/k lines • PgUp/PgDn/Ctrl-U/D page • ←/→ cursor • Home/End line • v select • Esc clear VIS • a attach • q quit "
+                )
+            } else {
+                format!(
+                    " {status} | q quit • c compose • : command • ←/→ pane • Tab pane • ↑/↓ move • j/k move • Enter open • d details • a attach • e export • o open • r refresh • s sync • u seen • f flag • t theme "
+                )
+            };
             let style = if app.error.is_some() {
                 theme.error
             } else {
@@ -534,7 +586,7 @@ fn selection_state(len: usize, selected: usize) -> ListState {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::backend::TestBackend;
+    use ratatui::backend::{Backend, TestBackend};
     use ratatui::buffer::Buffer;
     use ratatui::style::Color;
     use ratatui::Terminal;
@@ -551,6 +603,14 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    fn render_to_buffer_and_cursor(app: &AppState) -> (Buffer, Position) {
+        let backend = TestBackend::new(140, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let cursor = terminal.backend_mut().get_cursor_position().unwrap();
+        (terminal.backend().buffer().clone(), cursor)
     }
 
     fn buffer_text(buffer: &Buffer) -> String {
@@ -765,13 +825,53 @@ mod tests {
             truncated: false,
             preview_bytes: 17,
         });
+        app.active = ActivePane::Details;
 
         let text = buffer_text(&render_to_buffer(&app));
 
+        assert!(text.contains("Detail Ln 1/5"));
         assert!(text.contains("Body beside attachments"));
         assert!(text.contains("Attachments"));
         assert!(text.contains("notes.txt"));
         assert!(text.contains("safe text preview"));
+    }
+
+    #[test]
+    fn test_render_long_details_viewport_indicator_cursor_and_selection() {
+        let mut app = AppState::default();
+        app.set_theme(ThemeName::HighContrast);
+        app.active = ActivePane::Details;
+        app.apply_detail(Some(MessageDetail {
+            id: Uuid::new_v4(),
+            subject: "Long detail".into(),
+            from: "alice@example.com".into(),
+            snippet: "Preview".into(),
+            body: (1..=20)
+                .map(|line| format!("detail line {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            flags: Vec::new(),
+        }));
+        app.detail_cursor = app.detail_line_start(15);
+        app.detail_scroll = 13;
+        app.detail_selection_anchor = Some(15);
+        app.detail_selection_focus = 16;
+
+        let (buffer, cursor) = render_to_buffer_and_cursor(&app);
+        let text = buffer_text(&buffer);
+
+        assert!(text.contains("Detail Ln 16/24"));
+        assert!(text.contains("VIS"));
+        assert!(text.contains("detail line 10"));
+        assert!(text.contains("detail line 12"));
+        assert!(text.contains("detail line 13"));
+        assert!(!text.contains("detail line 01"));
+        assert!(text.contains("d details"));
+
+        assert_eq!(cursor, Position::new(1, 16));
+        let selected = buffer.cell((1, 16)).unwrap().style();
+        assert_eq!(selected.fg, Some(Color::Black));
+        assert_eq!(selected.bg, Some(Color::Yellow));
     }
 
     #[test]

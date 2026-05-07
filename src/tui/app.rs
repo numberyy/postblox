@@ -16,6 +16,7 @@ pub enum ActivePane {
     Folders,
     Threads,
     Messages,
+    Details,
     Attachments,
 }
 
@@ -25,7 +26,8 @@ impl ActivePane {
             Self::Accounts => Self::Folders,
             Self::Folders => Self::Threads,
             Self::Threads => Self::Messages,
-            Self::Messages => Self::Attachments,
+            Self::Messages => Self::Details,
+            Self::Details => Self::Attachments,
             Self::Attachments => Self::Accounts,
         }
     }
@@ -36,7 +38,8 @@ impl ActivePane {
             Self::Folders => Self::Accounts,
             Self::Threads => Self::Folders,
             Self::Messages => Self::Threads,
-            Self::Attachments => Self::Messages,
+            Self::Details => Self::Messages,
+            Self::Attachments => Self::Details,
         }
     }
 }
@@ -657,6 +660,11 @@ pub struct AppState {
     pub threads: Vec<ThreadItem>,
     pub messages: Vec<MessageItem>,
     pub detail: Option<MessageDetail>,
+    pub detail_cursor: usize,
+    pub detail_scroll: usize,
+    pub detail_selection_anchor: Option<usize>,
+    pub detail_selection_focus: usize,
+    pub detail_preferred_column: Option<usize>,
     pub attachments: Vec<AttachmentItem>,
     pub attachment_preview: Option<AttachmentPreviewItem>,
     pub selected_account: usize,
@@ -683,6 +691,11 @@ impl Default for AppState {
             threads: Vec::new(),
             messages: Vec::new(),
             detail: None,
+            detail_cursor: 0,
+            detail_scroll: 0,
+            detail_selection_anchor: None,
+            detail_selection_focus: 0,
+            detail_preferred_column: None,
             attachments: Vec::new(),
             attachment_preview: None,
             selected_account: 0,
@@ -765,6 +778,7 @@ impl AppState {
                 }
                 changed
             }
+            ActivePane::Details => false,
             ActivePane::Attachments => {
                 if !self.attachments_pane_visible() {
                     self.normalize_active_pane();
@@ -825,6 +839,7 @@ impl AppState {
     }
 
     pub fn apply_detail(&mut self, detail: Option<MessageDetail>) {
+        let was_detail_focused = self.active == ActivePane::Details;
         let old_detail_id = self.detail.as_ref().map(|detail| detail.id);
         let new_detail_id = detail.as_ref().map(|detail| detail.id);
         if old_detail_id != new_detail_id {
@@ -852,6 +867,10 @@ impl AppState {
             }
         }
         self.detail = detail;
+        self.reset_detail_navigation_state();
+        if was_detail_focused && self.detail.is_some() {
+            self.active = ActivePane::Details;
+        }
         if self.detail.is_none() {
             self.clear_attachments();
         }
@@ -881,6 +900,194 @@ impl AppState {
 
     pub fn attachments_pane_visible(&self) -> bool {
         self.detail.is_some() && !self.attachments.is_empty()
+    }
+
+    pub fn detail_pane_visible(&self) -> bool {
+        self.detail.is_some()
+    }
+
+    pub fn focus_detail_pane(&mut self) -> bool {
+        if self.detail_pane_visible() {
+            self.active = ActivePane::Details;
+            true
+        } else {
+            self.normalize_active_pane();
+            false
+        }
+    }
+
+    pub fn detail_lines(&self) -> Vec<String> {
+        self.detail_text_content()
+            .map(|text| text.split('\n').map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn detail_line_count(&self) -> usize {
+        self.detail_line_bounds().len()
+    }
+
+    pub fn detail_line_start(&self, line: usize) -> usize {
+        let bounds = self.detail_line_bounds();
+        bounds
+            .get(line.min(bounds.len().saturating_sub(1)))
+            .map(|(start, _)| *start)
+            .unwrap_or(0)
+    }
+
+    pub fn detail_line_end(&self, line: usize) -> usize {
+        let bounds = self.detail_line_bounds();
+        bounds
+            .get(line.min(bounds.len().saturating_sub(1)))
+            .map(|(_, end)| *end)
+            .unwrap_or(0)
+    }
+
+    pub fn detail_cursor_line_column(&self) -> (usize, usize) {
+        let cursor = self.detail_cursor.min(self.detail_len());
+        let bounds = self.detail_line_bounds();
+        if bounds.is_empty() {
+            return (0, 0);
+        }
+        let line = line_for_cursor(&bounds, cursor);
+        let start = bounds.get(line).map(|(start, _)| *start).unwrap_or(0);
+        (line, cursor.saturating_sub(start))
+    }
+
+    pub fn detail_selected_line_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
+        let anchor = self.detail_selection_anchor?;
+        let max_line = self.detail_line_count().saturating_sub(1);
+        let start = anchor.min(self.detail_selection_focus).min(max_line);
+        let end = anchor.max(self.detail_selection_focus).min(max_line);
+        Some(start..=end)
+    }
+
+    pub fn detail_visible_scroll(&self, viewport_height: usize) -> usize {
+        let viewport_height = viewport_height.max(1);
+        let line_count = self.detail_line_count();
+        let max_scroll = line_count.saturating_sub(viewport_height);
+        let mut scroll = self.detail_scroll.min(max_scroll);
+        let cursor_line = self.detail_cursor_line_column().0;
+
+        if cursor_line < scroll {
+            scroll = cursor_line;
+        } else if cursor_line >= scroll.saturating_add(viewport_height) {
+            scroll = cursor_line
+                .saturating_add(1)
+                .saturating_sub(viewport_height);
+        }
+
+        scroll.min(max_scroll)
+    }
+
+    pub fn move_detail_cursor_left(&mut self) -> bool {
+        if !self.detail_pane_visible() {
+            return false;
+        }
+        let column = self.detail_cursor_line_column().1;
+        if column == 0 {
+            return false;
+        }
+        self.detail_cursor = self.detail_cursor.min(self.detail_len()).saturating_sub(1);
+        self.detail_preferred_column = None;
+        true
+    }
+
+    pub fn move_detail_cursor_right(&mut self) -> bool {
+        if !self.detail_pane_visible() {
+            return false;
+        }
+        let (line, column) = self.detail_cursor_line_column();
+        let line_len = self.detail_line_len(line);
+        if column >= line_len {
+            return false;
+        }
+        self.detail_cursor = self.detail_line_start(line) + column + 1;
+        self.detail_preferred_column = None;
+        true
+    }
+
+    pub fn detail_home(&mut self) -> bool {
+        if !self.detail_pane_visible() {
+            return false;
+        }
+        let line = self.detail_cursor_line_column().0;
+        self.set_detail_cursor(self.detail_line_start(line))
+    }
+
+    pub fn detail_end(&mut self) -> bool {
+        if !self.detail_pane_visible() {
+            return false;
+        }
+        let line = self.detail_cursor_line_column().0;
+        self.set_detail_cursor(self.detail_line_end(line))
+    }
+
+    pub fn move_detail_line(&mut self, delta: isize, viewport_height: usize) -> bool {
+        if self.active != ActivePane::Details || !self.detail_pane_visible() {
+            return false;
+        }
+
+        let old_cursor = self.detail_cursor;
+        let old_scroll = self.detail_scroll;
+        let old_selection_focus = self.detail_selection_focus;
+        let line_count = self.detail_line_count();
+        if line_count == 0 {
+            return false;
+        }
+        let max_line = line_count.saturating_sub(1);
+        let (line, column) = self.detail_cursor_line_column();
+        let preferred_column = self.detail_preferred_column.unwrap_or(column);
+        self.detail_preferred_column = Some(preferred_column);
+
+        let next_line = if delta < 0 {
+            line.saturating_sub(delta.unsigned_abs())
+        } else {
+            line.saturating_add(delta as usize).min(max_line)
+        };
+        let next_column = preferred_column.min(self.detail_line_len(next_line));
+        self.detail_cursor = self.detail_line_start(next_line) + next_column;
+        if self.detail_selection_anchor.is_some() {
+            self.detail_selection_focus = next_line;
+        }
+        self.ensure_detail_cursor_visible(viewport_height);
+
+        self.detail_cursor != old_cursor
+            || self.detail_scroll != old_scroll
+            || self.detail_selection_focus != old_selection_focus
+    }
+
+    pub fn toggle_detail_line_selection(&mut self) -> bool {
+        if self.active != ActivePane::Details || !self.detail_pane_visible() {
+            return false;
+        }
+        if self.detail_selection_anchor.is_some() {
+            self.clear_detail_selection()
+        } else {
+            let line = self.detail_cursor_line_column().0;
+            self.detail_selection_anchor = Some(line);
+            self.detail_selection_focus = line;
+            true
+        }
+    }
+
+    pub fn start_detail_line_selection(&mut self) -> bool {
+        if self.active != ActivePane::Details
+            || !self.detail_pane_visible()
+            || self.detail_selection_anchor.is_some()
+        {
+            return false;
+        }
+        let line = self.detail_cursor_line_column().0;
+        self.detail_selection_anchor = Some(line);
+        self.detail_selection_focus = line;
+        true
+    }
+
+    pub fn clear_detail_selection(&mut self) -> bool {
+        let changed = self.detail_selection_anchor.is_some();
+        self.detail_selection_anchor = None;
+        self.detail_selection_focus = self.detail_cursor_line_column().0;
+        changed
     }
 
     pub fn selected_attachment(&self) -> Option<&AttachmentItem> {
@@ -1253,8 +1460,17 @@ impl AppState {
                 ActivePane::Messages
             };
         }
-        if self.active == ActivePane::Attachments && !self.attachments_pane_visible() {
+        if self.active == ActivePane::Details && !self.detail_pane_visible() {
             self.active = if self.messages.is_empty() {
+                ActivePane::Folders
+            } else {
+                ActivePane::Messages
+            };
+        }
+        if self.active == ActivePane::Attachments && !self.attachments_pane_visible() {
+            self.active = if self.detail_pane_visible() {
+                ActivePane::Details
+            } else if self.messages.is_empty() {
                 ActivePane::Folders
             } else {
                 ActivePane::Messages
@@ -1264,7 +1480,7 @@ impl AppState {
 
     fn next_visible_pane(&self) -> ActivePane {
         let mut pane = self.active;
-        for _ in 0..5 {
+        for _ in 0..6 {
             pane = pane.next();
             if self.pane_visible(pane) {
                 return pane;
@@ -1275,7 +1491,7 @@ impl AppState {
 
     fn previous_visible_pane(&self) -> ActivePane {
         let mut pane = self.active;
-        for _ in 0..5 {
+        for _ in 0..6 {
             pane = pane.previous();
             if self.pane_visible(pane) {
                 return pane;
@@ -1287,6 +1503,7 @@ impl AppState {
     fn pane_visible(&self, pane: ActivePane) -> bool {
         match pane {
             ActivePane::Threads => self.threads_pane_visible(),
+            ActivePane::Details => self.detail_pane_visible(),
             ActivePane::Attachments => self.attachments_pane_visible(),
             ActivePane::Accounts | ActivePane::Folders | ActivePane::Messages => true,
         }
@@ -1294,6 +1511,7 @@ impl AppState {
 
     fn clear_detail_state(&mut self) {
         self.detail = None;
+        self.reset_detail_navigation_state();
         self.clear_attachments();
     }
 
@@ -1303,6 +1521,53 @@ impl AppState {
         self.selected_attachment = 0;
         self.pending_open_attachment = None;
         self.normalize_active_pane();
+    }
+
+    fn detail_text_content(&self) -> Option<String> {
+        self.detail.as_ref().map(|detail| {
+            format!(
+                "Subject: {}\nFrom: {}\nSnippet: {}\n\n{}",
+                detail.subject, detail.from, detail.snippet, detail.body
+            )
+        })
+    }
+
+    fn detail_line_bounds(&self) -> Vec<(usize, usize)> {
+        self.detail_text_content()
+            .map(|text| line_bounds(&text))
+            .unwrap_or_default()
+    }
+
+    fn detail_len(&self) -> usize {
+        self.detail_text_content()
+            .map(|text| char_count(&text))
+            .unwrap_or(0)
+    }
+
+    fn detail_line_len(&self, line: usize) -> usize {
+        self.detail_line_end(line)
+            .saturating_sub(self.detail_line_start(line))
+    }
+
+    fn set_detail_cursor(&mut self, next: usize) -> bool {
+        let len = self.detail_len();
+        let next = next.min(len);
+        let old = self.detail_cursor.min(len);
+        self.detail_cursor = next;
+        self.detail_preferred_column = None;
+        old != next
+    }
+
+    fn ensure_detail_cursor_visible(&mut self, viewport_height: usize) {
+        self.detail_scroll = self.detail_visible_scroll(viewport_height);
+    }
+
+    fn reset_detail_navigation_state(&mut self) {
+        self.detail_cursor = 0;
+        self.detail_scroll = 0;
+        self.detail_selection_anchor = None;
+        self.detail_selection_focus = 0;
+        self.detail_preferred_column = None;
     }
 }
 
@@ -1515,6 +1780,17 @@ mod tests {
             size_bytes: 12,
             disposition: "attachment".into(),
             storage_path: format!("/tmp/{filename}"),
+        }
+    }
+
+    fn detail(message_id: Uuid, body: &str) -> MessageDetail {
+        MessageDetail {
+            id: message_id,
+            subject: "hello".into(),
+            from: "alice@example.com".into(),
+            snippet: "snippet".into(),
+            body: body.into(),
+            flags: Vec::new(),
         }
     }
 
@@ -2105,24 +2381,21 @@ mod tests {
         assert_eq!(app.active, ActivePane::Accounts);
 
         let message_id = app.messages[0].id;
-        app.apply_detail(Some(MessageDetail {
-            id: message_id,
-            subject: "hello".into(),
-            from: "alice@example.com".into(),
-            snippet: "hello".into(),
-            body: "body".into(),
-            flags: Vec::new(),
-        }));
+        app.apply_detail(Some(detail(message_id, "body")));
         app.apply_attachments(vec![attachment("notes.txt")]);
 
         assert!(app.attachments_pane_visible());
         app.active = ActivePane::Messages;
+        app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Details);
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Attachments);
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
         app.cycle_active_pane_reverse();
         assert_eq!(app.active, ActivePane::Attachments);
+        app.cycle_active_pane_reverse();
+        assert_eq!(app.active, ActivePane::Details);
     }
 
     #[test]
@@ -2162,6 +2435,148 @@ mod tests {
         let preview = app.attachment_preview.as_ref().unwrap();
         assert_eq!(preview.attachment_id, second_id);
         assert_eq!(preview.text.as_deref(), Some("hello attachment"));
+    }
+
+    #[test]
+    fn test_detail_pane_visibility_cycle_and_direct_focus_require_detail() {
+        let mut app = AppState {
+            active: ActivePane::Messages,
+            ..Default::default()
+        };
+        app.apply_messages(vec![message("hello")]);
+
+        assert!(!app.detail_pane_visible());
+        assert!(!app.focus_detail_pane());
+        assert_eq!(app.active, ActivePane::Messages);
+        app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Accounts);
+
+        let message_id = app.messages[0].id;
+        app.apply_detail(Some(detail(message_id, "body")));
+        app.active = ActivePane::Messages;
+
+        assert!(app.detail_pane_visible());
+        app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Details);
+        app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Accounts);
+        app.cycle_active_pane_reverse();
+        assert_eq!(app.active, ActivePane::Details);
+
+        app.active = ActivePane::Accounts;
+        assert!(app.focus_detail_pane());
+        assert_eq!(app.active, ActivePane::Details);
+    }
+
+    #[test]
+    fn test_detail_cursor_line_navigation_and_horizontal_bounds() {
+        let mut app = AppState {
+            active: ActivePane::Details,
+            ..Default::default()
+        };
+        app.apply_detail(Some(detail(Uuid::new_v4(), "alpha\nb\nemoji café")));
+
+        assert_eq!(app.detail_cursor_line_column(), (0, 0));
+        assert!(!app.move_detail_cursor_left());
+
+        assert!(app.detail_end());
+        let subject_len = "Subject: hello".chars().count();
+        assert_eq!(app.detail_cursor_line_column(), (0, subject_len));
+        assert!(!app.move_detail_cursor_right());
+
+        assert!(app.move_detail_cursor_left());
+        assert_eq!(app.detail_cursor_line_column(), (0, subject_len - 1));
+        assert!(app.detail_home());
+        assert_eq!(app.detail_cursor_line_column(), (0, 0));
+
+        assert!(app.move_detail_line(4, 10));
+        assert_eq!(app.detail_cursor_line_column(), (4, 0));
+        for _ in 0.."alpha".chars().count() {
+            assert!(app.move_detail_cursor_right());
+        }
+        assert_eq!(app.detail_cursor_line_column(), (4, 5));
+        assert!(!app.move_detail_cursor_right());
+
+        assert!(app.move_detail_line(1, 10));
+        assert_eq!(app.detail_cursor_line_column(), (5, 1));
+        assert!(app.move_detail_line(-1, 10));
+        assert_eq!(app.detail_cursor_line_column(), (4, 5));
+    }
+
+    #[test]
+    fn test_detail_page_movement_updates_scroll_and_keeps_cursor_visible() {
+        let body = (1..=10)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = AppState {
+            active: ActivePane::Details,
+            ..Default::default()
+        };
+        app.apply_detail(Some(detail(Uuid::new_v4(), &body)));
+
+        assert!(app.move_detail_line(5, 3));
+        assert_eq!(app.detail_cursor_line_column().0, 5);
+        assert_eq!(app.detail_scroll, 3);
+        assert_eq!(app.detail_visible_scroll(3), 3);
+
+        assert!(app.move_detail_line(3, 3));
+        assert_eq!(app.detail_cursor_line_column().0, 8);
+        assert_eq!(app.detail_scroll, 6);
+        assert_eq!(app.detail_visible_scroll(3), 6);
+
+        assert!(app.move_detail_line(-6, 3));
+        assert_eq!(app.detail_cursor_line_column().0, 2);
+        assert_eq!(app.detail_scroll, 2);
+        assert_eq!(app.detail_visible_scroll(3), 2);
+    }
+
+    #[test]
+    fn test_detail_visual_line_selection_toggles_extends_and_clears() {
+        let mut app = AppState {
+            active: ActivePane::Details,
+            ..Default::default()
+        };
+        app.apply_detail(Some(detail(Uuid::new_v4(), "one\ntwo\nthree")));
+
+        assert!(app.toggle_detail_line_selection());
+        assert_eq!(app.detail_selected_line_range(), Some(0..=0));
+
+        assert!(app.move_detail_line(5, 10));
+        assert_eq!(app.detail_selected_line_range(), Some(0..=5));
+
+        assert!(app.toggle_detail_line_selection());
+        assert_eq!(app.detail_selected_line_range(), None);
+
+        assert!(app.start_detail_line_selection());
+        assert_eq!(app.detail_selected_line_range(), Some(5..=5));
+        assert!(app.move_detail_line(-1, 10));
+        assert_eq!(app.detail_selected_line_range(), Some(4..=5));
+
+        assert!(app.clear_detail_selection());
+        assert_eq!(app.detail_selected_line_range(), None);
+    }
+
+    #[test]
+    fn test_apply_detail_resets_detail_navigation_state() {
+        let mut app = AppState {
+            active: ActivePane::Details,
+            ..Default::default()
+        };
+        app.apply_detail(Some(detail(Uuid::new_v4(), "one\ntwo\nthree\nfour")));
+        assert!(app.move_detail_line(5, 2));
+        assert!(app.toggle_detail_line_selection());
+
+        assert_ne!(app.detail_cursor, 0);
+        assert_ne!(app.detail_scroll, 0);
+        assert!(app.detail_selected_line_range().is_some());
+
+        app.apply_detail(Some(detail(Uuid::new_v4(), "replacement")));
+
+        assert_eq!(app.detail_cursor, 0);
+        assert_eq!(app.detail_scroll, 0);
+        assert_eq!(app.detail_selected_line_range(), None);
+        assert_eq!(app.detail_cursor_line_column(), (0, 0));
     }
 
     #[test]
