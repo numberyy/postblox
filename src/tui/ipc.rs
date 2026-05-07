@@ -236,6 +236,17 @@ mod tests {
     }
 
     #[test]
+    fn test_message_item_from_preserves_thread_id() {
+        let mut original = message();
+        let thread_id = Uuid::new_v4();
+        original.thread_id = Some(thread_id);
+
+        let item = MessageItem::from(original);
+
+        assert_eq!(item.thread_id, Some(thread_id));
+    }
+
+    #[test]
     fn test_decode_response_preserves_server_error() {
         let response = Response::err(1, RpcError::bad_args("missing folder_id"));
 

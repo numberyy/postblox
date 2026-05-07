@@ -12,6 +12,7 @@ pub const MAX_COMMAND_CHARS: usize = 128;
 pub enum ActivePane {
     Accounts,
     Folders,
+    Threads,
     Messages,
 }
 
@@ -19,8 +20,18 @@ impl ActivePane {
     pub fn next(self) -> Self {
         match self {
             Self::Accounts => Self::Folders,
-            Self::Folders => Self::Messages,
+            Self::Folders => Self::Threads,
+            Self::Threads => Self::Messages,
             Self::Messages => Self::Accounts,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        match self {
+            Self::Accounts => Self::Messages,
+            Self::Folders => Self::Accounts,
+            Self::Threads => Self::Folders,
+            Self::Messages => Self::Threads,
         }
     }
 }
@@ -77,6 +88,7 @@ impl From<Folder> for FolderItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageItem {
     pub id: Uuid,
+    pub thread_id: Option<Uuid>,
     pub subject: String,
     pub from: String,
     pub date: String,
@@ -91,6 +103,7 @@ impl From<Message> for MessageItem {
         let flags = flags_from_value(&message.flags);
         Self {
             id: message.id,
+            thread_id: message.thread_id,
             subject,
             from: message.from_addr,
             date: message.internal_date.format("%Y-%m-%d %H:%M").to_string(),
@@ -108,6 +121,17 @@ impl MessageItem {
     pub fn with_flag(&self, flag: &str, enabled: bool) -> Vec<String> {
         set_flag_preserving(&self.flags, flag, enabled)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadItem {
+    pub key: Uuid,
+    pub thread_id: Option<Uuid>,
+    pub subject: String,
+    pub message_count: usize,
+    pub latest_date: String,
+    pub unread: bool,
+    pub flagged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,10 +172,13 @@ pub struct AppState {
     pub mode: InputMode,
     pub accounts: Vec<AccountItem>,
     pub folders: Vec<FolderItem>,
+    pub folder_messages: Vec<MessageItem>,
+    pub threads: Vec<ThreadItem>,
     pub messages: Vec<MessageItem>,
     pub detail: Option<MessageDetail>,
     pub selected_account: usize,
     pub selected_folder: usize,
+    pub selected_thread: usize,
     pub selected_message: usize,
     pub command_input: String,
     pub status: String,
@@ -166,10 +193,13 @@ impl Default for AppState {
             mode: InputMode::Normal,
             accounts: Vec::new(),
             folders: Vec::new(),
+            folder_messages: Vec::new(),
+            threads: Vec::new(),
             messages: Vec::new(),
             detail: None,
             selected_account: 0,
             selected_folder: 0,
+            selected_thread: 0,
             selected_message: 0,
             command_input: String::new(),
             status: "Connecting".into(),
@@ -184,15 +214,22 @@ impl AppState {
         self.active = self.active.next();
     }
 
+    pub fn cycle_active_pane_reverse(&mut self) {
+        self.active = self.active.previous();
+    }
+
     pub fn move_selection(&mut self, delta: isize) -> bool {
         match self.active {
             ActivePane::Accounts => {
                 let changed = move_index(&mut self.selected_account, self.accounts.len(), delta);
                 if changed {
                     self.folders.clear();
+                    self.folder_messages.clear();
+                    self.threads.clear();
                     self.messages.clear();
                     self.detail = None;
                     self.selected_folder = 0;
+                    self.selected_thread = 0;
                     self.selected_message = 0;
                 }
                 changed
@@ -200,9 +237,21 @@ impl AppState {
             ActivePane::Folders => {
                 let changed = move_index(&mut self.selected_folder, self.folders.len(), delta);
                 if changed {
+                    self.folder_messages.clear();
+                    self.threads.clear();
                     self.messages.clear();
                     self.detail = None;
+                    self.selected_thread = 0;
                     self.selected_message = 0;
+                }
+                changed
+            }
+            ActivePane::Threads => {
+                let changed = move_index(&mut self.selected_thread, self.threads.len(), delta);
+                if changed {
+                    self.selected_message = 0;
+                    self.refresh_visible_messages();
+                    self.detail = None;
                 }
                 changed
             }
@@ -220,17 +269,23 @@ impl AppState {
         self.accounts = accounts;
         clamp_index(&mut self.selected_account, self.accounts.len());
         self.folders.clear();
+        self.folder_messages.clear();
+        self.threads.clear();
         self.messages.clear();
         self.detail = None;
         self.selected_folder = 0;
+        self.selected_thread = 0;
         self.selected_message = 0;
     }
 
     pub fn apply_folders(&mut self, folders: Vec<FolderItem>) {
         self.folders = folders;
         clamp_index(&mut self.selected_folder, self.folders.len());
+        self.folder_messages.clear();
+        self.threads.clear();
         self.messages.clear();
         self.detail = None;
+        self.selected_thread = 0;
         self.selected_message = 0;
     }
 
@@ -240,14 +295,37 @@ impl AppState {
         self.detail = None;
     }
 
+    pub fn apply_folder_messages(&mut self, messages: Vec<MessageItem>) {
+        let previous_key = self.selected_thread().map(|thread| thread.key);
+        self.folder_messages = messages;
+        self.rebuild_threads(previous_key);
+        if self.selected_thread().map(|thread| thread.key) != previous_key {
+            self.selected_message = 0;
+        }
+        self.refresh_visible_messages();
+        self.detail = None;
+    }
+
     pub fn apply_detail(&mut self, detail: Option<MessageDetail>) {
         if let Some(detail) = &detail {
+            let selected_thread = self.selected_thread().map(|thread| thread.key);
+            if let Some(message) = self
+                .folder_messages
+                .iter_mut()
+                .find(|message| message.id == detail.id)
+            {
+                message.flags = detail.flags.clone();
+            }
             if let Some(message) = self
                 .messages
                 .iter_mut()
                 .find(|message| message.id == detail.id)
             {
                 message.flags = detail.flags.clone();
+            }
+            if !self.folder_messages.is_empty() {
+                self.rebuild_threads(selected_thread);
+                self.refresh_visible_messages();
             }
         }
         self.detail = detail;
@@ -283,6 +361,10 @@ impl AppState {
         self.messages.get(self.selected_message).map(|m| m.id)
     }
 
+    pub fn selected_thread(&self) -> Option<&ThreadItem> {
+        self.threads.get(self.selected_thread)
+    }
+
     pub fn selected_message(&self) -> Option<&MessageItem> {
         self.messages.get(self.selected_message)
     }
@@ -302,6 +384,14 @@ impl AppState {
     }
 
     pub fn apply_message_flags(&mut self, message_id: Uuid, flags: Vec<String>) {
+        let selected_thread = self.selected_thread().map(|thread| thread.key);
+        if let Some(message) = self
+            .folder_messages
+            .iter_mut()
+            .find(|message| message.id == message_id)
+        {
+            message.flags = flags.clone();
+        }
         if let Some(message) = self
             .messages
             .iter_mut()
@@ -313,6 +403,10 @@ impl AppState {
             if detail.id == message_id {
                 detail.flags = flags;
             }
+        }
+        if !self.folder_messages.is_empty() {
+            self.rebuild_threads(selected_thread);
+            self.refresh_visible_messages();
         }
     }
 
@@ -355,6 +449,84 @@ impl AppState {
     pub fn set_theme(&mut self, theme: ThemeName) {
         self.theme = theme;
     }
+
+    fn rebuild_threads(&mut self, selected_key: Option<Uuid>) {
+        self.threads = build_threads(&self.folder_messages);
+        if let Some(selected_key) = selected_key {
+            if let Some(index) = self
+                .threads
+                .iter()
+                .position(|thread| thread.key == selected_key)
+            {
+                self.selected_thread = index;
+                return;
+            }
+        }
+        clamp_index(&mut self.selected_thread, self.threads.len());
+    }
+
+    fn refresh_visible_messages(&mut self) {
+        if let Some(thread_key) = self.selected_thread().map(|thread| thread.key) {
+            self.messages = self
+                .folder_messages
+                .iter()
+                .filter(|message| message_thread_key(message) == thread_key)
+                .cloned()
+                .collect();
+            sort_messages_oldest_first(&mut self.messages);
+        } else {
+            self.messages.clear();
+        }
+        clamp_index(&mut self.selected_message, self.messages.len());
+    }
+}
+
+fn build_threads(messages: &[MessageItem]) -> Vec<ThreadItem> {
+    let mut threads = Vec::<ThreadItem>::new();
+
+    for message in messages {
+        let key = message_thread_key(message);
+        if let Some(thread) = threads.iter_mut().find(|thread| thread.key == key) {
+            thread.message_count += 1;
+            if message.date > thread.latest_date {
+                thread.latest_date = message.date.clone();
+                thread.subject = text_or_default(Some(&message.subject), "(no subject)");
+            }
+            thread.unread |= !message.has_flag(SEEN_FLAG);
+            thread.flagged |= message.has_flag(FLAGGED_FLAG);
+        } else {
+            threads.push(ThreadItem {
+                key,
+                thread_id: message.thread_id,
+                subject: text_or_default(Some(&message.subject), "(no subject)"),
+                message_count: 1,
+                latest_date: message.date.clone(),
+                unread: !message.has_flag(SEEN_FLAG),
+                flagged: message.has_flag(FLAGGED_FLAG),
+            });
+        }
+    }
+
+    threads.sort_by(|left, right| {
+        right
+            .latest_date
+            .cmp(&left.latest_date)
+            .then_with(|| left.subject.cmp(&right.subject))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    threads
+}
+
+fn message_thread_key(message: &MessageItem) -> Uuid {
+    message.thread_id.unwrap_or(message.id)
+}
+
+fn sort_messages_oldest_first(messages: &mut [MessageItem]) {
+    messages.sort_by(|left, right| {
+        left.date
+            .cmp(&right.date)
+            .then_with(|| left.id.cmp(&right.id))
+    });
 }
 
 fn text_or_default(value: Option<&str>, default: &str) -> String {
@@ -448,6 +620,7 @@ mod tests {
     fn message(subject: &str) -> MessageItem {
         MessageItem {
             id: Uuid::new_v4(),
+            thread_id: None,
             subject: subject.into(),
             from: "alice@example.com".into(),
             date: "2026-05-07 10:00".into(),
@@ -456,12 +629,26 @@ mod tests {
         }
     }
 
+    fn thread_message(thread_id: Uuid, subject: &str, date: &str, flags: &[&str]) -> MessageItem {
+        MessageItem {
+            id: Uuid::new_v4(),
+            thread_id: Some(thread_id),
+            subject: subject.into(),
+            from: "alice@example.com".into(),
+            date: date.into(),
+            snippet: "hello".into(),
+            flags: flags.iter().map(|flag| (*flag).to_string()).collect(),
+        }
+    }
+
     #[test]
-    fn test_cycle_active_pane_wraps_to_accounts() {
+    fn test_cycle_active_pane_includes_threads_and_wraps_to_accounts() {
         let mut app = AppState::default();
         assert_eq!(app.active, ActivePane::Accounts);
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Folders);
+        app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Threads);
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Messages);
         app.cycle_active_pane();
@@ -499,9 +686,12 @@ mod tests {
         assert!(app.move_selection(1));
 
         assert!(app.folders.is_empty());
+        assert!(app.folder_messages.is_empty());
+        assert!(app.threads.is_empty());
         assert!(app.messages.is_empty());
         assert!(app.detail.is_none());
         assert_eq!(app.selected_folder, 0);
+        assert_eq!(app.selected_thread, 0);
         assert_eq!(app.selected_message, 0);
     }
 
@@ -528,18 +718,61 @@ mod tests {
     }
 
     #[test]
+    fn test_move_thread_filters_messages_and_clears_stale_detail() {
+        let first_thread = Uuid::new_v4();
+        let second_thread = Uuid::new_v4();
+        let mut app = AppState {
+            active: ActivePane::Threads,
+            ..Default::default()
+        };
+        app.apply_folder_messages(vec![
+            thread_message(second_thread, "new", "2026-05-07 12:00", &[SEEN_FLAG]),
+            thread_message(first_thread, "old latest", "2026-05-07 11:00", &[SEEN_FLAG]),
+            thread_message(first_thread, "old first", "2026-05-07 09:00", &[SEEN_FLAG]),
+        ]);
+        app.apply_detail(Some(MessageDetail {
+            id: app.messages[0].id,
+            subject: "new".into(),
+            from: "alice@example.com".into(),
+            snippet: "hello".into(),
+            body: "body".into(),
+            flags: Vec::new(),
+        }));
+
+        assert!(app.move_selection(1));
+
+        assert_eq!(app.selected_thread().unwrap().thread_id, Some(first_thread));
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.messages[0].subject, "old first");
+        assert_eq!(app.messages[1].subject, "old latest");
+        assert!(app.detail.is_none());
+    }
+
+    #[test]
     fn test_apply_accounts_empty_resets_selection_and_children() {
         let mut app = AppState {
             selected_account: 3,
             ..Default::default()
         };
         app.folders.push(folder("INBOX"));
+        app.folder_messages.push(message("hello"));
+        app.threads.push(ThreadItem {
+            key: Uuid::new_v4(),
+            thread_id: None,
+            subject: "hello".into(),
+            message_count: 1,
+            latest_date: "2026-05-07 10:00".into(),
+            unread: true,
+            flagged: false,
+        });
         app.messages.push(message("hello"));
 
         app.apply_accounts(Vec::new());
 
         assert_eq!(app.selected_account, 0);
         assert!(app.folders.is_empty());
+        assert!(app.folder_messages.is_empty());
+        assert!(app.threads.is_empty());
         assert!(app.messages.is_empty());
         assert!(app.detail.is_none());
     }
@@ -555,6 +788,145 @@ mod tests {
 
         assert_eq!(app.selected_message, 0);
         assert_eq!(app.selected_message_id(), Some(app.messages[0].id));
+    }
+
+    #[test]
+    fn test_apply_folder_messages_groups_threads_with_counts_latest_and_indicators() {
+        let older_thread = Uuid::new_v4();
+        let latest_thread = Uuid::new_v4();
+        let single = message("single");
+        let single_id = single.id;
+        let mut app = AppState::default();
+
+        app.apply_folder_messages(vec![
+            thread_message(
+                older_thread,
+                "older reply",
+                "2026-05-07 09:00",
+                &[SEEN_FLAG],
+            ),
+            thread_message(latest_thread, "latest", "2026-05-07 12:00", &[FLAGGED_FLAG]),
+            single,
+            thread_message(
+                older_thread,
+                "older start",
+                "2026-05-07 08:00",
+                &[SEEN_FLAG],
+            ),
+        ]);
+
+        assert_eq!(app.threads.len(), 3);
+        assert_eq!(app.threads[0].thread_id, Some(latest_thread));
+        assert_eq!(app.threads[0].subject, "latest");
+        assert_eq!(app.threads[0].message_count, 1);
+        assert_eq!(app.threads[0].latest_date, "2026-05-07 12:00");
+        assert!(app.threads[0].unread);
+        assert!(app.threads[0].flagged);
+
+        assert_eq!(app.threads[1].key, single_id);
+        assert_eq!(app.threads[1].thread_id, None);
+        assert_eq!(app.threads[1].message_count, 1);
+
+        assert_eq!(app.threads[2].thread_id, Some(older_thread));
+        assert_eq!(app.threads[2].message_count, 2);
+        assert!(!app.threads[2].unread);
+        assert!(!app.threads[2].flagged);
+    }
+
+    #[test]
+    fn test_apply_folder_messages_filters_selected_thread_oldest_first() {
+        let first_thread = Uuid::new_v4();
+        let second_thread = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_folder_messages(vec![
+            thread_message(second_thread, "other", "2026-05-07 12:00", &[SEEN_FLAG]),
+            thread_message(first_thread, "reply", "2026-05-07 11:00", &[SEEN_FLAG]),
+            thread_message(first_thread, "start", "2026-05-07 09:00", &[SEEN_FLAG]),
+        ]);
+
+        app.active = ActivePane::Threads;
+        assert!(app.move_selection(1));
+
+        assert_eq!(app.selected_thread().unwrap().thread_id, Some(first_thread));
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.messages[0].subject, "start");
+        assert_eq!(app.messages[1].subject, "reply");
+    }
+
+    #[test]
+    fn test_apply_folder_messages_clamps_selection_when_thread_disappears() {
+        let first_thread = Uuid::new_v4();
+        let second_thread = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_folder_messages(vec![
+            thread_message(first_thread, "first", "2026-05-07 12:00", &[SEEN_FLAG]),
+            thread_message(second_thread, "second", "2026-05-07 11:00", &[SEEN_FLAG]),
+        ]);
+        app.selected_thread = 1;
+
+        app.apply_folder_messages(vec![thread_message(
+            first_thread,
+            "first",
+            "2026-05-07 13:00",
+            &[SEEN_FLAG],
+        )]);
+
+        assert_eq!(app.selected_thread, 0);
+        assert_eq!(app.selected_thread().unwrap().thread_id, Some(first_thread));
+        assert_eq!(app.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_apply_folder_messages_resets_selected_message_for_multi_message_replacement_thread() {
+        let top_thread = Uuid::new_v4();
+        let disappearing_thread = Uuid::new_v4();
+        let replacement_thread = Uuid::new_v4();
+        let mut app = AppState {
+            active: ActivePane::Threads,
+            ..Default::default()
+        };
+        app.apply_folder_messages(vec![
+            thread_message(top_thread, "top", "2026-05-07 13:00", &[SEEN_FLAG]),
+            thread_message(
+                disappearing_thread,
+                "gone latest",
+                "2026-05-07 12:00",
+                &[SEEN_FLAG],
+            ),
+            thread_message(
+                disappearing_thread,
+                "gone first",
+                "2026-05-07 10:00",
+                &[SEEN_FLAG],
+            ),
+        ]);
+        assert!(app.move_selection(1));
+        app.selected_message = 1;
+
+        app.apply_folder_messages(vec![
+            thread_message(
+                replacement_thread,
+                "replacement reply",
+                "2026-05-07 15:00",
+                &[SEEN_FLAG],
+            ),
+            thread_message(
+                replacement_thread,
+                "replacement first",
+                "2026-05-07 14:00",
+                &[SEEN_FLAG],
+            ),
+        ]);
+
+        assert_eq!(app.selected_thread, 0);
+        assert_eq!(
+            app.selected_thread().unwrap().thread_id,
+            Some(replacement_thread)
+        );
+        assert_eq!(app.selected_message, 0);
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.messages[0].subject, "replacement first");
+        assert_eq!(app.messages[1].subject, "replacement reply");
     }
 
     #[test]
@@ -675,5 +1047,45 @@ mod tests {
 
         assert_eq!(app.messages[0].flags, vec!["\\Flagged"]);
         assert_eq!(app.detail.as_ref().unwrap().flags, vec!["\\Flagged"]);
+    }
+
+    #[test]
+    fn test_apply_message_flags_updates_thread_indicators() {
+        let thread_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        let selected = thread_message(thread_id, "hello", "2026-05-07 10:00", &[SEEN_FLAG]);
+        let message_id = selected.id;
+        app.apply_folder_messages(vec![selected]);
+
+        assert!(!app.threads[0].unread);
+        assert!(!app.threads[0].flagged);
+
+        app.apply_message_flags(message_id, vec![FLAGGED_FLAG.into()]);
+
+        assert!(app.threads[0].unread);
+        assert!(app.threads[0].flagged);
+        assert_eq!(app.messages[0].flags, vec![FLAGGED_FLAG]);
+    }
+
+    #[test]
+    fn test_apply_detail_updates_thread_indicators_from_fresh_flags() {
+        let thread_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        let selected = thread_message(thread_id, "hello", "2026-05-07 10:00", &[SEEN_FLAG]);
+        let message_id = selected.id;
+        app.apply_folder_messages(vec![selected]);
+
+        app.apply_detail(Some(MessageDetail {
+            id: message_id,
+            subject: "hello".into(),
+            from: "alice@example.com".into(),
+            snippet: "hello".into(),
+            body: "body".into(),
+            flags: vec![FLAGGED_FLAG.into()],
+        }));
+
+        assert!(app.threads[0].unread);
+        assert!(app.threads[0].flagged);
+        assert_eq!(app.messages[0].flags, vec![FLAGGED_FLAG]);
     }
 }

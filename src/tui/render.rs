@@ -22,15 +22,17 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState) {
     let top = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(24),
-            Constraint::Percentage(24),
-            Constraint::Percentage(52),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(26),
+            Constraint::Percentage(34),
         ])
         .split(main[0]);
 
     render_accounts(frame, top[0], app, &theme);
     render_folders(frame, top[1], app, &theme);
-    render_messages(frame, top[2], app, &theme);
+    render_threads(frame, top[2], app, &theme);
+    render_messages(frame, top[3], app, &theme);
     render_detail(frame, main[1], app, &theme);
     render_status(frame, root[1], app, &theme);
 }
@@ -99,12 +101,59 @@ fn render_folders(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_messages(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
-    let items: Vec<ListItem<'_>> = if app.messages.is_empty() {
+fn render_threads(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    let items: Vec<ListItem<'_>> = if app.threads.is_empty() {
         let text = if app.folders.is_empty() {
             "Select a folder"
         } else {
-            "No messages"
+            "No threads"
+        };
+        vec![ListItem::new(text)]
+    } else {
+        app.threads
+            .iter()
+            .map(|thread| {
+                let subject_style = if thread.unread {
+                    theme.unread
+                } else {
+                    theme.text
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(if thread.unread { "● " } else { "  " }, theme.unread),
+                    Span::styled(if thread.flagged { "★ " } else { "  " }, theme.flagged),
+                    Span::styled(
+                        thread.subject.clone(),
+                        subject_style.add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!(" ({})", thread.message_count)),
+                    Span::styled(format!(" {}", thread.latest_date), theme.muted),
+                ]))
+            })
+            .collect()
+    };
+    let mut state = selection_state(app.threads.len(), app.selected_thread);
+    let list = List::new(items)
+        .block(pane_block(
+            "Threads",
+            app.active == ActivePane::Threads,
+            theme,
+        ))
+        .style(theme.text)
+        .highlight_style(theme.selection)
+        .highlight_symbol("› ");
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_messages(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    let items: Vec<ListItem<'_>> = if app.messages.is_empty() {
+        let text = if app.threads.is_empty() {
+            if app.folders.is_empty() {
+                "Select a folder"
+            } else {
+                "No messages in folder"
+            }
+        } else {
+            "No messages in thread"
         };
         vec![ListItem::new(text)]
     } else {
@@ -184,7 +233,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
                 app.status.clone()
             };
             let text = format!(
-                " {status} | q quit • : command • Tab pane • ↑/↓/j/k move • Enter open • r refresh • s sync • u seen • f flag • t theme "
+                " {status} | q quit • : command • ←/→ pane • Tab pane • ↑/↓ move • j/k move • Enter open • r refresh • s sync • u seen • f flag • t theme "
             );
             let style = if app.error.is_some() {
                 theme.error
@@ -255,6 +304,8 @@ mod tests {
 
         assert!(text.contains("No accounts yet"));
         assert!(text.contains("q quit"));
+        assert!(text.contains("←/→ pane"));
+        assert!(text.contains("↑/↓ move"));
         assert!(text.contains("Connected to /tmp/postblox.sock"));
     }
 
@@ -262,6 +313,7 @@ mod tests {
     fn test_render_loaded_state_shows_lists_and_detail() {
         let mut app = AppState::default();
         let message_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
         app.apply_accounts(vec![AccountItem {
             id: Uuid::new_v4(),
             label: "Work".into(),
@@ -273,13 +325,14 @@ mod tests {
             name: "INBOX".into(),
             role: "inbox".into(),
         }]);
-        app.apply_messages(vec![MessageItem {
+        app.apply_folder_messages(vec![MessageItem {
             id: message_id,
+            thread_id: Some(thread_id),
             subject: "Launch plan".into(),
             from: "alice@example.com".into(),
             date: "2026-05-07 10:00".into(),
             snippet: "Preview".into(),
-            flags: vec!["\\Seen".into(), "\\Flagged".into()],
+            flags: vec!["\\Flagged".into()],
         }]);
         app.apply_detail(Some(MessageDetail {
             id: message_id,
@@ -287,13 +340,16 @@ mod tests {
             from: "alice@example.com".into(),
             snippet: "Preview".into(),
             body: "Full launch details".into(),
-            flags: vec!["\\Seen".into(), "\\Flagged".into()],
+            flags: vec!["\\Flagged".into()],
         }));
 
         let text = buffer_text(&render_to_buffer(&app));
 
         assert!(text.contains("Work <work@example.com>"));
         assert!(text.contains("INBOX"));
+        assert!(text.contains("Threads"));
+        assert!(text.contains("(1)"));
+        assert!(text.contains("●"));
         assert!(text.contains("★"));
         assert!(text.contains("Launch plan"));
         assert!(text.contains("Full launch details"));

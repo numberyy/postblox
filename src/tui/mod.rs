@@ -203,8 +203,12 @@ async fn handle_key<C: Mailbox + ?Sized>(
             }
             false
         }
-        KeyCode::Tab => {
+        KeyCode::Right | KeyCode::Tab => {
             app.cycle_active_pane();
+            false
+        }
+        KeyCode::Left => {
+            app.cycle_active_pane_reverse();
             false
         }
         KeyCode::Char('r') => {
@@ -238,7 +242,12 @@ async fn handle_key<C: Mailbox + ?Sized>(
             false
         }
         KeyCode::Enter => {
-            refresh_after_selection_change(app, client).await;
+            if app.active == ActivePane::Threads {
+                app.active = ActivePane::Messages;
+                refresh_detail(app, client).await;
+            } else {
+                refresh_after_selection_change(app, client).await;
+            }
             false
         }
         _ => false,
@@ -438,6 +447,7 @@ async fn refresh_current_pane<C: Mailbox + ?Sized>(app: &mut AppState, client: &
     match app.active {
         ActivePane::Accounts => refresh_accounts(app, client).await,
         ActivePane::Folders => refresh_folders(app, client).await,
+        ActivePane::Threads => refresh_messages(app, client).await,
         ActivePane::Messages => refresh_messages(app, client).await,
     }
 }
@@ -446,6 +456,7 @@ async fn refresh_after_selection_change<C: Mailbox + ?Sized>(app: &mut AppState,
     match app.active {
         ActivePane::Accounts => refresh_folders(app, client).await,
         ActivePane::Folders => refresh_messages(app, client).await,
+        ActivePane::Threads => refresh_detail(app, client).await,
         ActivePane::Messages => refresh_detail(app, client).await,
     }
 }
@@ -494,7 +505,7 @@ async fn refresh_folders<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C
 
 async fn refresh_messages<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
     let Some(folder_id) = app.selected_folder_id() else {
-        app.apply_messages(Vec::new());
+        app.apply_folder_messages(Vec::new());
         app.set_status("No folder selected");
         return;
     };
@@ -502,13 +513,16 @@ async fn refresh_messages<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut 
     app.set_status("Loading messages");
     match client.list_messages(folder_id).await {
         Ok(messages) => {
-            let count = messages.len();
+            let message_count = messages.len();
             app.clear_error();
-            app.apply_messages(messages);
-            if count == 0 {
-                app.set_status("No messages in selected folder");
+            app.apply_folder_messages(messages);
+            let thread_count = app.threads.len();
+            if message_count == 0 {
+                app.set_status("No threads in selected folder");
             } else {
-                app.set_status(format!("Loaded {count} message(s)"));
+                app.set_status(format!(
+                    "Loaded {thread_count} thread(s), {message_count} message(s)"
+                ));
                 refresh_detail(app, client).await;
             }
         }
@@ -689,11 +703,40 @@ mod tests {
     fn message_item(id: Uuid, flags: Vec<&str>) -> MessageItem {
         MessageItem {
             id,
+            thread_id: None,
             subject: "Hello".into(),
             from: "alice@example.com".into(),
             date: "2026-05-07 10:00".into(),
             snippet: "Preview".into(),
             flags: flags.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    fn thread_message_item(
+        thread_id: Uuid,
+        subject: &str,
+        date: &str,
+        flags: Vec<&str>,
+    ) -> MessageItem {
+        MessageItem {
+            id: Uuid::new_v4(),
+            thread_id: Some(thread_id),
+            subject: subject.into(),
+            from: "alice@example.com".into(),
+            date: date.into(),
+            snippet: "Preview".into(),
+            flags: flags.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    fn detail_for(message: &MessageItem) -> MessageDetail {
+        MessageDetail {
+            id: message.id,
+            subject: message.subject.clone(),
+            from: message.from.clone(),
+            snippet: message.snippet.clone(),
+            body: "Body".into(),
+            flags: message.flags.clone(),
         }
     }
 
@@ -770,6 +813,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_refresh_messages_builds_thread_rows_and_loads_selected_message() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        let older = thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]);
+        let newer = thread_message_item(thread_id, "Reply", "2026-05-07 10:00", vec![]);
+        let mut client = MockMailbox {
+            messages: vec![newer, older.clone()],
+            detail: Some(detail_for(&older)),
+            ..Default::default()
+        };
+
+        refresh_messages(&mut app, &mut client).await;
+
+        assert_eq!(
+            client.calls,
+            vec![Call::ListMessages(folder_id), Call::GetMessage(older.id)]
+        );
+        assert_eq!(app.threads.len(), 1);
+        assert_eq!(app.threads[0].message_count, 2);
+        assert!(app.threads[0].unread);
+        assert_eq!(app.messages[0].id, older.id);
+        assert_eq!(app.detail.as_ref().unwrap().id, older.id);
+        assert_eq!(app.status, "Message loaded");
+    }
+
+    #[tokio::test]
     async fn test_execute_command_flag_error_keeps_local_flags_and_reports_daemon_error() {
         let account_id = Uuid::new_v4();
         let folder_id = Uuid::new_v4();
@@ -837,6 +908,201 @@ mod tests {
         assert!(!quit);
         assert_eq!(app.theme, ThemeName::Dark);
         assert_eq!(app.status, "Theme: dark");
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_tab_cycles_through_threads_pane() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        for expected in [
+            ActivePane::Folders,
+            ActivePane::Threads,
+            ActivePane::Messages,
+            ActivePane::Accounts,
+        ] {
+            assert!(
+                !handle_key(
+                    KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                    &mut app,
+                    &mut client,
+                )
+                .await
+            );
+            assert_eq!(app.active, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_right_cycles_to_next_pane_and_wraps() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        for expected in [
+            ActivePane::Folders,
+            ActivePane::Threads,
+            ActivePane::Messages,
+            ActivePane::Accounts,
+        ] {
+            assert!(
+                !handle_key(
+                    KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                    &mut app,
+                    &mut client,
+                )
+                .await
+            );
+            assert_eq!(app.active, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_left_cycles_to_previous_pane_and_wraps() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        for expected in [
+            ActivePane::Messages,
+            ActivePane::Threads,
+            ActivePane::Folders,
+            ActivePane::Accounts,
+        ] {
+            assert!(
+                !handle_key(
+                    KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+                    &mut app,
+                    &mut client,
+                )
+                .await
+            );
+            assert_eq!(app.active, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_up_down_move_selection_without_switching_panes() {
+        let first_thread = Uuid::new_v4();
+        let second_thread = Uuid::new_v4();
+        let mut app = AppState {
+            active: ActivePane::Threads,
+            ..Default::default()
+        };
+        app.apply_folder_messages(vec![
+            thread_message_item(first_thread, "First", "2026-05-07 12:00", vec!["\\Seen"]),
+            thread_message_item(second_thread, "Second", "2026-05-07 11:00", vec!["\\Seen"]),
+        ]);
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.active, ActivePane::Threads);
+        assert_eq!(app.selected_thread, 1);
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.active, ActivePane::Threads);
+        assert_eq!(app.selected_thread, 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_j_k_move_selection_without_switching_panes() {
+        let first_thread = Uuid::new_v4();
+        let second_thread = Uuid::new_v4();
+        let mut app = AppState {
+            active: ActivePane::Threads,
+            ..Default::default()
+        };
+        app.apply_folder_messages(vec![
+            thread_message_item(first_thread, "First", "2026-05-07 12:00", vec!["\\Seen"]),
+            thread_message_item(second_thread, "Second", "2026-05-07 11:00", vec!["\\Seen"]),
+        ]);
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.active, ActivePane::Threads);
+        assert_eq!(app.selected_thread, 1);
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.active, ActivePane::Threads);
+        assert_eq!(app.selected_thread, 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_command_mode_left_right_do_not_switch_panes() {
+        let mut app = AppState {
+            active: ActivePane::Folders,
+            ..Default::default()
+        };
+        app.enter_command_mode();
+        assert!(app.push_command_char('s'));
+        let mut client = MockMailbox::default();
+
+        for key in [KeyCode::Left, KeyCode::Right] {
+            assert!(
+                !handle_key(
+                    KeyEvent::new(key, KeyModifiers::NONE),
+                    &mut app,
+                    &mut client
+                )
+                .await
+            );
+            assert_eq!(app.active, ActivePane::Folders);
+            assert_eq!(app.command_input, "s");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_enter_on_thread_focuses_messages_and_loads_detail() {
+        let thread_id = Uuid::new_v4();
+        let selected = thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]);
+        let mut app = AppState {
+            active: ActivePane::Threads,
+            ..Default::default()
+        };
+        app.apply_folder_messages(vec![selected.clone()]);
+        let mut client = MockMailbox {
+            detail: Some(detail_for(&selected)),
+            ..Default::default()
+        };
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.active, ActivePane::Messages);
+        assert_eq!(client.calls, vec![Call::GetMessage(selected.id)]);
+        assert_eq!(app.detail.as_ref().unwrap().id, selected.id);
     }
 
     #[tokio::test]
