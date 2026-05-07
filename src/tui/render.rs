@@ -19,20 +19,35 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState) {
         .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
         .split(root[0]);
 
-    let top = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
-            Constraint::Percentage(26),
-            Constraint::Percentage(34),
-        ])
-        .split(main[0]);
+    if app.threads_pane_visible() {
+        let top = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
+                Constraint::Percentage(26),
+                Constraint::Percentage(34),
+            ])
+            .split(main[0]);
 
-    render_accounts(frame, top[0], app, &theme);
-    render_folders(frame, top[1], app, &theme);
-    render_threads(frame, top[2], app, &theme);
-    render_messages(frame, top[3], app, &theme);
+        render_accounts(frame, top[0], app, &theme);
+        render_folders(frame, top[1], app, &theme);
+        render_threads(frame, top[2], app, &theme);
+        render_messages(frame, top[3], app, &theme);
+    } else {
+        let top = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(50),
+            ])
+            .split(main[0]);
+
+        render_accounts(frame, top[0], app, &theme);
+        render_folders(frame, top[1], app, &theme);
+        render_messages(frame, top[2], app, &theme);
+    }
     render_detail(frame, main[1], app, &theme);
     render_status(frame, root[1], app, &theme);
 }
@@ -146,7 +161,7 @@ fn render_threads(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
 
 fn render_messages(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
     let items: Vec<ListItem<'_>> = if app.messages.is_empty() {
-        let text = if app.threads.is_empty() {
+        let text = if !app.threads_pane_visible() {
             if app.folders.is_empty() {
                 "Select a folder"
             } else {
@@ -312,7 +327,7 @@ mod tests {
     #[test]
     fn test_render_loaded_state_shows_lists_and_detail() {
         let mut app = AppState::default();
-        let message_id = Uuid::new_v4();
+        let selected_id = Uuid::new_v4();
         let thread_id = Uuid::new_v4();
         app.apply_accounts(vec![AccountItem {
             id: Uuid::new_v4(),
@@ -325,17 +340,28 @@ mod tests {
             name: "INBOX".into(),
             role: "inbox".into(),
         }]);
-        app.apply_folder_messages(vec![MessageItem {
-            id: message_id,
-            thread_id: Some(thread_id),
-            subject: "Launch plan".into(),
-            from: "alice@example.com".into(),
-            date: "2026-05-07 10:00".into(),
-            snippet: "Preview".into(),
-            flags: vec!["\\Flagged".into()],
-        }]);
+        app.apply_folder_messages(vec![
+            MessageItem {
+                id: Uuid::new_v4(),
+                thread_id: Some(thread_id),
+                subject: "Launch plan reply".into(),
+                from: "alice@example.com".into(),
+                date: "2026-05-07 11:00".into(),
+                snippet: "Preview".into(),
+                flags: vec!["\\Flagged".into()],
+            },
+            MessageItem {
+                id: selected_id,
+                thread_id: Some(thread_id),
+                subject: "Launch plan".into(),
+                from: "alice@example.com".into(),
+                date: "2026-05-07 10:00".into(),
+                snippet: "Preview".into(),
+                flags: vec!["\\Seen".into()],
+            },
+        ]);
         app.apply_detail(Some(MessageDetail {
-            id: message_id,
+            id: selected_id,
             subject: "Launch plan".into(),
             from: "alice@example.com".into(),
             snippet: "Preview".into(),
@@ -348,11 +374,36 @@ mod tests {
         assert!(text.contains("Work <work@example.com>"));
         assert!(text.contains("INBOX"));
         assert!(text.contains("Threads"));
-        assert!(text.contains("(1)"));
+        assert!(text.contains("(2)"));
         assert!(text.contains("●"));
         assert!(text.contains("★"));
         assert!(text.contains("Launch plan"));
         assert!(text.contains("Full launch details"));
+    }
+
+    #[test]
+    fn test_render_hides_threads_title_for_singleton_only_folder() {
+        let mut app = AppState::default();
+        app.apply_folders(vec![FolderItem {
+            id: Uuid::new_v4(),
+            name: "INBOX".into(),
+            role: "inbox".into(),
+        }]);
+        app.apply_folder_messages(vec![MessageItem {
+            id: Uuid::new_v4(),
+            thread_id: None,
+            subject: "Solo update".into(),
+            from: "alice@example.com".into(),
+            date: "2026-05-07 10:00".into(),
+            snippet: "Preview".into(),
+            flags: Vec::new(),
+        }]);
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(!text.contains("Threads"));
+        assert!(text.contains("Messages"));
+        assert!(text.contains("Solo update"));
     }
 
     #[test]

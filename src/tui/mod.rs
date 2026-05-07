@@ -518,11 +518,15 @@ async fn refresh_messages<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut 
             app.apply_folder_messages(messages);
             let thread_count = app.threads.len();
             if message_count == 0 {
-                app.set_status("No threads in selected folder");
+                app.set_status("No messages in selected folder");
             } else {
-                app.set_status(format!(
-                    "Loaded {thread_count} thread(s), {message_count} message(s)"
-                ));
+                if app.threads_pane_visible() {
+                    app.set_status(format!(
+                        "Loaded {thread_count} thread(s), {message_count} message(s)"
+                    ));
+                } else {
+                    app.set_status(format!("Loaded {message_count} message(s)"));
+                }
                 refresh_detail(app, client).await;
             }
         }
@@ -747,6 +751,16 @@ mod tests {
         app
     }
 
+    fn app_with_threaded_messages() -> AppState {
+        let thread_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_folder_messages(vec![
+            thread_message_item(thread_id, "Reply", "2026-05-07 11:00", vec!["\\Seen"]),
+            thread_message_item(thread_id, "Start", "2026-05-07 10:00", vec!["\\Seen"]),
+        ]);
+        app
+    }
+
     #[tokio::test]
     async fn test_execute_command_sync_calls_daemon_and_refreshes_messages() {
         let account_id = Uuid::new_v4();
@@ -841,6 +855,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_refresh_messages_moves_active_threads_to_messages_when_threads_hide() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        app.apply_folder_messages(vec![
+            thread_message_item(thread_id, "Reply", "2026-05-07 10:00", vec!["\\Seen"]),
+            thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]),
+        ]);
+        app.active = ActivePane::Threads;
+        let first = message_item(Uuid::new_v4(), vec!["\\Seen"]);
+        let second = message_item(Uuid::new_v4(), vec![]);
+        let mut client = MockMailbox {
+            messages: vec![first.clone(), second.clone()],
+            detail: Some(detail_for(&first)),
+            ..Default::default()
+        };
+
+        refresh_messages(&mut app, &mut client).await;
+
+        assert_eq!(
+            client.calls,
+            vec![Call::ListMessages(folder_id), Call::GetMessage(first.id)]
+        );
+        assert!(!app.threads_pane_visible());
+        assert_eq!(app.active, ActivePane::Messages);
+        assert_eq!(
+            app.messages
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![first.id, second.id]
+        );
+        assert_eq!(app.detail.as_ref().unwrap().id, first.id);
+    }
+
+    #[tokio::test]
     async fn test_execute_command_flag_error_keeps_local_flags_and_reports_daemon_error() {
         let account_id = Uuid::new_v4();
         let folder_id = Uuid::new_v4();
@@ -911,8 +962,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_tab_cycles_through_threads_pane() {
+    async fn test_handle_key_tab_skips_threads_pane_when_hidden() {
         let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        for expected in [
+            ActivePane::Folders,
+            ActivePane::Messages,
+            ActivePane::Accounts,
+            ActivePane::Folders,
+        ] {
+            assert!(
+                !handle_key(
+                    KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                    &mut app,
+                    &mut client,
+                )
+                .await
+            );
+            assert_eq!(app.active, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_tab_includes_threads_pane_when_visible() {
+        let mut app = app_with_threaded_messages();
         let mut client = MockMailbox::default();
 
         for expected in [
@@ -934,8 +1008,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_right_cycles_to_next_pane_and_wraps() {
+    async fn test_handle_key_right_skips_threads_pane_when_hidden() {
         let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        for expected in [
+            ActivePane::Folders,
+            ActivePane::Messages,
+            ActivePane::Accounts,
+            ActivePane::Folders,
+        ] {
+            assert!(
+                !handle_key(
+                    KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+                    &mut app,
+                    &mut client,
+                )
+                .await
+            );
+            assert_eq!(app.active, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_right_includes_threads_pane_when_visible() {
+        let mut app = app_with_threaded_messages();
         let mut client = MockMailbox::default();
 
         for expected in [
@@ -957,8 +1054,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_left_cycles_to_previous_pane_and_wraps() {
+    async fn test_handle_key_left_skips_threads_pane_when_hidden() {
         let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        for expected in [
+            ActivePane::Messages,
+            ActivePane::Folders,
+            ActivePane::Accounts,
+            ActivePane::Messages,
+        ] {
+            assert!(
+                !handle_key(
+                    KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+                    &mut app,
+                    &mut client,
+                )
+                .await
+            );
+            assert_eq!(app.active, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_left_includes_threads_pane_when_visible() {
+        let mut app = app_with_threaded_messages();
         let mut client = MockMailbox::default();
 
         for expected in [
@@ -989,6 +1109,12 @@ mod tests {
         };
         app.apply_folder_messages(vec![
             thread_message_item(first_thread, "First", "2026-05-07 12:00", vec!["\\Seen"]),
+            thread_message_item(
+                first_thread,
+                "First start",
+                "2026-05-07 10:00",
+                vec!["\\Seen"],
+            ),
             thread_message_item(second_thread, "Second", "2026-05-07 11:00", vec!["\\Seen"]),
         ]);
         let mut client = MockMailbox::default();
@@ -1026,6 +1152,12 @@ mod tests {
         };
         app.apply_folder_messages(vec![
             thread_message_item(first_thread, "First", "2026-05-07 12:00", vec!["\\Seen"]),
+            thread_message_item(
+                first_thread,
+                "First start",
+                "2026-05-07 10:00",
+                vec!["\\Seen"],
+            ),
             thread_message_item(second_thread, "Second", "2026-05-07 11:00", vec!["\\Seen"]),
         ]);
         let mut client = MockMailbox::default();
@@ -1081,11 +1213,12 @@ mod tests {
     async fn test_handle_key_enter_on_thread_focuses_messages_and_loads_detail() {
         let thread_id = Uuid::new_v4();
         let selected = thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]);
+        let reply = thread_message_item(thread_id, "Reply", "2026-05-07 10:00", vec!["\\Seen"]);
         let mut app = AppState {
             active: ActivePane::Threads,
             ..Default::default()
         };
-        app.apply_folder_messages(vec![selected.clone()]);
+        app.apply_folder_messages(vec![reply, selected.clone()]);
         let mut client = MockMailbox {
             detail: Some(detail_for(&selected)),
             ..Default::default()

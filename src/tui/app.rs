@@ -211,11 +211,19 @@ impl Default for AppState {
 
 impl AppState {
     pub fn cycle_active_pane(&mut self) {
-        self.active = self.active.next();
+        self.active = self.next_visible_pane();
     }
 
     pub fn cycle_active_pane_reverse(&mut self) {
-        self.active = self.active.previous();
+        self.active = self.previous_visible_pane();
+    }
+
+    pub fn has_threaded_conversations(&self) -> bool {
+        self.threads.iter().any(|thread| thread.message_count > 1)
+    }
+
+    pub fn threads_pane_visible(&self) -> bool {
+        self.has_threaded_conversations()
     }
 
     pub fn move_selection(&mut self, delta: isize) -> bool {
@@ -247,6 +255,10 @@ impl AppState {
                 changed
             }
             ActivePane::Threads => {
+                if !self.threads_pane_visible() {
+                    self.normalize_active_pane();
+                    return false;
+                }
                 let changed = move_index(&mut self.selected_thread, self.threads.len(), delta);
                 if changed {
                     self.selected_message = 0;
@@ -276,6 +288,7 @@ impl AppState {
         self.selected_folder = 0;
         self.selected_thread = 0;
         self.selected_message = 0;
+        self.normalize_active_pane();
     }
 
     pub fn apply_folders(&mut self, folders: Vec<FolderItem>) {
@@ -287,6 +300,7 @@ impl AppState {
         self.detail = None;
         self.selected_thread = 0;
         self.selected_message = 0;
+        self.normalize_active_pane();
     }
 
     pub fn apply_messages(&mut self, messages: Vec<MessageItem>) {
@@ -303,6 +317,7 @@ impl AppState {
             self.selected_message = 0;
         }
         self.refresh_visible_messages();
+        self.normalize_active_pane();
         self.detail = None;
     }
 
@@ -466,7 +481,9 @@ impl AppState {
     }
 
     fn refresh_visible_messages(&mut self) {
-        if let Some(thread_key) = self.selected_thread().map(|thread| thread.key) {
+        if !self.threads_pane_visible() {
+            self.messages = self.folder_messages.clone();
+        } else if let Some(thread_key) = self.selected_thread().map(|thread| thread.key) {
             self.messages = self
                 .folder_messages
                 .iter()
@@ -478,6 +495,42 @@ impl AppState {
             self.messages.clear();
         }
         clamp_index(&mut self.selected_message, self.messages.len());
+    }
+
+    fn normalize_active_pane(&mut self) {
+        if self.active == ActivePane::Threads && !self.threads_pane_visible() {
+            self.active = if self.messages.is_empty() {
+                ActivePane::Folders
+            } else {
+                ActivePane::Messages
+            };
+        }
+    }
+
+    fn next_visible_pane(&self) -> ActivePane {
+        let mut pane = self.active;
+        for _ in 0..4 {
+            pane = pane.next();
+            if self.pane_visible(pane) {
+                return pane;
+            }
+        }
+        self.active
+    }
+
+    fn previous_visible_pane(&self) -> ActivePane {
+        let mut pane = self.active;
+        for _ in 0..4 {
+            pane = pane.previous();
+            if self.pane_visible(pane) {
+                return pane;
+            }
+        }
+        self.active
+    }
+
+    fn pane_visible(&self, pane: ActivePane) -> bool {
+        pane != ActivePane::Threads || self.threads_pane_visible()
     }
 }
 
@@ -642,9 +695,27 @@ mod tests {
     }
 
     #[test]
-    fn test_cycle_active_pane_includes_threads_and_wraps_to_accounts() {
+    fn test_cycle_active_pane_skips_threads_when_hidden() {
         let mut app = AppState::default();
         assert_eq!(app.active, ActivePane::Accounts);
+        app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Folders);
+        app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Messages);
+        app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Accounts);
+    }
+
+    #[test]
+    fn test_cycle_active_pane_includes_threads_when_visible() {
+        let thread_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_folder_messages(vec![
+            thread_message(thread_id, "reply", "2026-05-07 11:00", &[SEEN_FLAG]),
+            thread_message(thread_id, "start", "2026-05-07 10:00", &[SEEN_FLAG]),
+        ]);
+
+        assert!(app.threads_pane_visible());
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Folders);
         app.cycle_active_pane();
@@ -815,6 +886,7 @@ mod tests {
             ),
         ]);
 
+        assert!(app.threads_pane_visible());
         assert_eq!(app.threads.len(), 3);
         assert_eq!(app.threads[0].thread_id, Some(latest_thread));
         assert_eq!(app.threads[0].subject, "latest");
@@ -831,6 +903,69 @@ mod tests {
         assert_eq!(app.threads[2].message_count, 2);
         assert!(!app.threads[2].unread);
         assert!(!app.threads[2].flagged);
+    }
+
+    #[test]
+    fn test_apply_folder_messages_singletons_hide_threads_and_show_all_messages() {
+        let mut newer = message("newer");
+        newer.date = "2026-05-07 12:00".into();
+        let newer_id = newer.id;
+        let mut older = message("older");
+        older.date = "2026-05-07 09:00".into();
+        let older_id = older.id;
+        let mut app = AppState::default();
+
+        app.apply_folder_messages(vec![newer, older]);
+
+        assert!(!app.threads_pane_visible());
+        assert_eq!(app.threads.len(), 2);
+        assert_eq!(
+            app.messages
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![newer_id, older_id]
+        );
+    }
+
+    #[test]
+    fn test_apply_folder_messages_moves_active_threads_when_pane_becomes_hidden() {
+        let thread_id = Uuid::new_v4();
+        let mut app = AppState {
+            active: ActivePane::Threads,
+            ..Default::default()
+        };
+        app.apply_folder_messages(vec![
+            thread_message(thread_id, "reply", "2026-05-07 11:00", &[SEEN_FLAG]),
+            thread_message(thread_id, "start", "2026-05-07 10:00", &[SEEN_FLAG]),
+        ]);
+        app.active = ActivePane::Threads;
+
+        app.apply_folder_messages(vec![message("single")]);
+
+        assert!(!app.threads_pane_visible());
+        assert_eq!(app.active, ActivePane::Messages);
+        assert_eq!(app.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_apply_folder_messages_moves_active_threads_to_folders_when_empty() {
+        let thread_id = Uuid::new_v4();
+        let mut app = AppState {
+            active: ActivePane::Threads,
+            ..Default::default()
+        };
+        app.apply_folder_messages(vec![
+            thread_message(thread_id, "reply", "2026-05-07 11:00", &[SEEN_FLAG]),
+            thread_message(thread_id, "start", "2026-05-07 10:00", &[SEEN_FLAG]),
+        ]);
+        app.active = ActivePane::Threads;
+
+        app.apply_folder_messages(Vec::new());
+
+        assert!(!app.threads_pane_visible());
+        assert_eq!(app.active, ActivePane::Folders);
+        assert!(app.messages.is_empty());
     }
 
     #[test]
@@ -1065,6 +1200,40 @@ mod tests {
         assert!(app.threads[0].unread);
         assert!(app.threads[0].flagged);
         assert_eq!(app.messages[0].flags, vec![FLAGGED_FLAG]);
+    }
+
+    #[test]
+    fn test_apply_message_flags_in_direct_message_mode_updates_messages_and_thread_state() {
+        let mut selected = message("selected");
+        selected.flags = vec![SEEN_FLAG.into()];
+        let message_id = selected.id;
+        let mut app = AppState::default();
+        app.apply_folder_messages(vec![selected, message("other")]);
+
+        assert!(!app.threads_pane_visible());
+
+        app.apply_message_flags(message_id, vec![SEEN_FLAG.into(), FLAGGED_FLAG.into()]);
+
+        let folder_message = app
+            .folder_messages
+            .iter()
+            .find(|message| message.id == message_id)
+            .expect("folder message");
+        let list_message = app
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+            .expect("list message");
+        let thread = app
+            .threads
+            .iter()
+            .find(|thread| thread.key == message_id)
+            .expect("thread group");
+
+        assert_eq!(folder_message.flags, vec![SEEN_FLAG, FLAGGED_FLAG]);
+        assert_eq!(list_message.flags, vec![SEEN_FLAG, FLAGGED_FLAG]);
+        assert!(thread.flagged);
+        assert!(!thread.unread);
     }
 
     #[test]
