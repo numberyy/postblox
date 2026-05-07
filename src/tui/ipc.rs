@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use serde::de::DeserializeOwned;
-use serde_json::json;
+use serde_json::{json, Value};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -89,6 +89,60 @@ impl MailboxClient {
         Ok(message.map(MessageDetail::from))
     }
 
+    pub async fn sync_folder(
+        &mut self,
+        account_id: Uuid,
+        folder_name: &str,
+    ) -> Result<Value, MailboxError> {
+        let response = self
+            .request(
+                "account.sync_folder",
+                account_folder_args(account_id, folder_name),
+            )
+            .await?;
+        decode_response("account.sync_folder", response)
+    }
+
+    pub async fn start_sync(
+        &mut self,
+        account_id: Uuid,
+        folder_name: &str,
+    ) -> Result<Value, MailboxError> {
+        let response = self
+            .request(
+                "account.start_sync",
+                account_folder_args(account_id, folder_name),
+            )
+            .await?;
+        decode_response("account.start_sync", response)
+    }
+
+    pub async fn stop_sync(
+        &mut self,
+        account_id: Uuid,
+        folder_name: &str,
+    ) -> Result<Value, MailboxError> {
+        let response = self
+            .request(
+                "account.stop_sync",
+                account_folder_args(account_id, folder_name),
+            )
+            .await?;
+        decode_response("account.stop_sync", response)
+    }
+
+    pub async fn set_flags(
+        &mut self,
+        message_id: Uuid,
+        flags: &[String],
+    ) -> Result<(), MailboxError> {
+        let response = self
+            .request("message.set_flags", set_flags_args(message_id, flags))
+            .await?;
+        let _: Value = decode_response("message.set_flags", response)?;
+        Ok(())
+    }
+
     async fn request(
         &mut self,
         op: &'static str,
@@ -118,6 +172,14 @@ where
     }
 
     serde_json::from_value(response.data).map_err(|source| MailboxError::Decode { op, source })
+}
+
+pub(crate) fn account_folder_args(account_id: Uuid, folder_name: &str) -> Value {
+    json!({ "account_id": account_id, "folder_name": folder_name })
+}
+
+pub(crate) fn set_flags_args(message_id: Uuid, flags: &[String]) -> Value {
+    json!({ "id": message_id, "flags": flags })
 }
 
 #[cfg(test)]
@@ -190,5 +252,36 @@ mod tests {
         let err = decode_response::<Vec<Message>>("message.list_by_folder", response).unwrap_err();
 
         assert!(err.to_string().contains("malformed data"));
+    }
+
+    #[test]
+    fn test_account_folder_args_match_daemon_write_ops() {
+        let account_id = Uuid::new_v4();
+
+        let args = account_folder_args(account_id, "INBOX");
+
+        assert_eq!(
+            args,
+            json!({
+                "account_id": account_id,
+                "folder_name": "INBOX",
+            })
+        );
+    }
+
+    #[test]
+    fn test_set_flags_args_serializes_complete_flag_list() {
+        let message_id = Uuid::new_v4();
+        let flags = vec!["\\Answered".to_string(), "\\Seen".to_string()];
+
+        let args = set_flags_args(message_id, &flags);
+
+        assert_eq!(
+            args,
+            json!({
+                "id": message_id,
+                "flags": ["\\Answered", "\\Seen"],
+            })
+        );
     }
 }

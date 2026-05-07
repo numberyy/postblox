@@ -1,6 +1,8 @@
 pub mod app;
+pub mod command;
 pub mod ipc;
 pub mod render;
+pub mod theme;
 
 use std::io::{self, Stdout};
 use std::path::PathBuf;
@@ -14,8 +16,10 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use thiserror::Error;
+use uuid::Uuid;
 
-use app::{ActivePane, AppState};
+use app::{ActivePane, AppState, InputMode, FLAGGED_FLAG, SEEN_FLAG};
+use command::{parse_command, Command};
 use ipc::MailboxClient;
 
 #[derive(Debug, Error)]
@@ -31,6 +35,103 @@ pub enum TuiError {
 }
 
 type CrosstermTerminal = Terminal<CrosstermBackend<Stdout>>;
+
+#[async_trait::async_trait(?Send)]
+trait Mailbox {
+    async fn list_accounts(&mut self) -> Result<Vec<app::AccountItem>, ipc::MailboxError>;
+    async fn list_folders(
+        &mut self,
+        account_id: Uuid,
+    ) -> Result<Vec<app::FolderItem>, ipc::MailboxError>;
+    async fn list_messages(
+        &mut self,
+        folder_id: Uuid,
+    ) -> Result<Vec<app::MessageItem>, ipc::MailboxError>;
+    async fn get_message(
+        &mut self,
+        message_id: Uuid,
+    ) -> Result<Option<app::MessageDetail>, ipc::MailboxError>;
+    async fn sync_folder(
+        &mut self,
+        account_id: Uuid,
+        folder_name: &str,
+    ) -> Result<serde_json::Value, ipc::MailboxError>;
+    async fn start_sync(
+        &mut self,
+        account_id: Uuid,
+        folder_name: &str,
+    ) -> Result<serde_json::Value, ipc::MailboxError>;
+    async fn stop_sync(
+        &mut self,
+        account_id: Uuid,
+        folder_name: &str,
+    ) -> Result<serde_json::Value, ipc::MailboxError>;
+    async fn set_flags(
+        &mut self,
+        message_id: Uuid,
+        flags: &[String],
+    ) -> Result<(), ipc::MailboxError>;
+}
+
+#[async_trait::async_trait(?Send)]
+impl Mailbox for MailboxClient {
+    async fn list_accounts(&mut self) -> Result<Vec<app::AccountItem>, ipc::MailboxError> {
+        MailboxClient::list_accounts(self).await
+    }
+
+    async fn list_folders(
+        &mut self,
+        account_id: Uuid,
+    ) -> Result<Vec<app::FolderItem>, ipc::MailboxError> {
+        MailboxClient::list_folders(self, account_id).await
+    }
+
+    async fn list_messages(
+        &mut self,
+        folder_id: Uuid,
+    ) -> Result<Vec<app::MessageItem>, ipc::MailboxError> {
+        MailboxClient::list_messages(self, folder_id).await
+    }
+
+    async fn get_message(
+        &mut self,
+        message_id: Uuid,
+    ) -> Result<Option<app::MessageDetail>, ipc::MailboxError> {
+        MailboxClient::get_message(self, message_id).await
+    }
+
+    async fn sync_folder(
+        &mut self,
+        account_id: Uuid,
+        folder_name: &str,
+    ) -> Result<serde_json::Value, ipc::MailboxError> {
+        MailboxClient::sync_folder(self, account_id, folder_name).await
+    }
+
+    async fn start_sync(
+        &mut self,
+        account_id: Uuid,
+        folder_name: &str,
+    ) -> Result<serde_json::Value, ipc::MailboxError> {
+        MailboxClient::start_sync(self, account_id, folder_name).await
+    }
+
+    async fn stop_sync(
+        &mut self,
+        account_id: Uuid,
+        folder_name: &str,
+    ) -> Result<serde_json::Value, ipc::MailboxError> {
+        MailboxClient::stop_sync(self, account_id, folder_name).await
+    }
+
+    async fn set_flags(
+        &mut self,
+        message_id: Uuid,
+        flags: &[String],
+    ) -> Result<(), ipc::MailboxError> {
+        MailboxClient::set_flags(self, message_id, flags).await
+    }
+}
 
 pub async fn run(socket_path: PathBuf) -> Result<(), TuiError> {
     let mut client = MailboxClient::connect(&socket_path)
@@ -75,8 +176,20 @@ async fn run_loop(
     Ok(())
 }
 
-async fn handle_key(key: KeyEvent, app: &mut AppState, client: &mut MailboxClient) -> bool {
+async fn handle_key<C: Mailbox + ?Sized>(
+    key: KeyEvent,
+    app: &mut AppState,
+    client: &mut C,
+) -> bool {
+    if app.mode == InputMode::Command {
+        return handle_command_key(key, app, client).await;
+    }
+
     match key.code {
+        KeyCode::Char(':') => {
+            app.enter_command_mode();
+            false
+        }
         KeyCode::Char('q') => true,
         KeyCode::Down | KeyCode::Char('j') => {
             if app.move_selection(1) {
@@ -98,6 +211,32 @@ async fn handle_key(key: KeyEvent, app: &mut AppState, client: &mut MailboxClien
             refresh_current_pane(app, client).await;
             false
         }
+        KeyCode::Char('s') => {
+            execute_command(Command::Sync, app, client).await;
+            false
+        }
+        KeyCode::Char('u') => {
+            let command = if app.selected_message_has_flag(SEEN_FLAG).unwrap_or(false) {
+                Command::Unseen
+            } else {
+                Command::Seen
+            };
+            execute_command(command, app, client).await;
+            false
+        }
+        KeyCode::Char('f') => {
+            let command = if app.selected_message_has_flag(FLAGGED_FLAG).unwrap_or(false) {
+                Command::Unflag
+            } else {
+                Command::Flag
+            };
+            execute_command(command, app, client).await;
+            false
+        }
+        KeyCode::Char('t') => {
+            execute_command(Command::ThemeNext, app, client).await;
+            false
+        }
         KeyCode::Enter => {
             refresh_after_selection_change(app, client).await;
             false
@@ -106,7 +245,196 @@ async fn handle_key(key: KeyEvent, app: &mut AppState, client: &mut MailboxClien
     }
 }
 
-async fn refresh_current_pane(app: &mut AppState, client: &mut MailboxClient) {
+async fn handle_command_key<C: Mailbox + ?Sized>(
+    key: KeyEvent,
+    app: &mut AppState,
+    client: &mut C,
+) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.cancel_command_mode();
+            false
+        }
+        KeyCode::Enter => {
+            let input = app.finish_command();
+            run_command_line(input, app, client).await;
+            false
+        }
+        KeyCode::Backspace => {
+            app.backspace_command();
+            false
+        }
+        KeyCode::Char(ch) => {
+            if !app.push_command_char(ch) {
+                app.set_error(format!(
+                    "command is limited to {} characters",
+                    app::MAX_COMMAND_CHARS
+                ));
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+async fn run_command_line<C: Mailbox + ?Sized>(input: String, app: &mut AppState, client: &mut C) {
+    match parse_command(&input) {
+        Ok(command) => execute_command(command, app, client).await,
+        Err(error) => record_command_parse_error(app, error.to_string()),
+    }
+}
+
+async fn execute_command<C: Mailbox + ?Sized>(
+    command: Command,
+    app: &mut AppState,
+    client: &mut C,
+) {
+    match command {
+        Command::Sync => run_folder_write(app, client, FolderWrite::Sync).await,
+        Command::StartSync => run_folder_write(app, client, FolderWrite::StartSync).await,
+        Command::StopSync => run_folder_write(app, client, FolderWrite::StopSync).await,
+        Command::Seen => run_flag_write(app, client, SEEN_FLAG, true, "Marked message seen").await,
+        Command::Unseen => {
+            run_flag_write(app, client, SEEN_FLAG, false, "Marked message unseen").await;
+        }
+        Command::Flag => {
+            run_flag_write(app, client, FLAGGED_FLAG, true, "Flagged message").await;
+        }
+        Command::Unflag => {
+            run_flag_write(app, client, FLAGGED_FLAG, false, "Unflagged message").await;
+        }
+        Command::ThemeNext => {
+            let theme = app.cycle_theme();
+            app.clear_error();
+            app.set_status(format!("Theme: {theme}"));
+        }
+        Command::Theme(theme) => {
+            app.set_theme(theme);
+            app.clear_error();
+            app.set_status(format!("Theme: {theme}"));
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FolderWrite {
+    Sync,
+    StartSync,
+    StopSync,
+}
+
+impl FolderWrite {
+    fn running_status(self, folder_name: &str) -> String {
+        match self {
+            Self::Sync => format!("Syncing {folder_name}"),
+            Self::StartSync => format!("Starting sync for {folder_name}"),
+            Self::StopSync => format!("Stopping sync for {folder_name}"),
+        }
+    }
+
+    fn success_status(self, folder_name: &str) -> String {
+        match self {
+            Self::Sync => format!("Synced {folder_name}"),
+            Self::StartSync => format!("Started sync for {folder_name}"),
+            Self::StopSync => format!("Stopped sync for {folder_name}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+enum CommandRunError {
+    #[error("No account selected")]
+    AccountNotSelected,
+    #[error("No folder selected")]
+    FolderUnavailable,
+    #[error("No message selected")]
+    MessageMissing,
+}
+
+async fn run_folder_write<C: Mailbox + ?Sized>(
+    app: &mut AppState,
+    client: &mut C,
+    op: FolderWrite,
+) {
+    let (account_id, folder_name) = match selected_account_folder(app) {
+        Ok(selection) => selection,
+        Err(error) => {
+            record_command_run_error(app, error);
+            return;
+        }
+    };
+
+    app.clear_error();
+    app.set_status(op.running_status(&folder_name));
+    let result = match op {
+        FolderWrite::Sync => client.sync_folder(account_id, &folder_name).await,
+        FolderWrite::StartSync => client.start_sync(account_id, &folder_name).await,
+        FolderWrite::StopSync => client.stop_sync(account_id, &folder_name).await,
+    };
+
+    match result {
+        Ok(_) => {
+            refresh_messages(app, client).await;
+            if app.error.is_none() {
+                app.set_status(op.success_status(&folder_name));
+            }
+        }
+        Err(error) => record_error(app, error),
+    }
+}
+
+async fn run_flag_write<C: Mailbox + ?Sized>(
+    app: &mut AppState,
+    client: &mut C,
+    flag: &str,
+    enabled: bool,
+    success: &'static str,
+) {
+    let (message_id, flags) = match app.selected_message_flag_update(flag, enabled) {
+        Some(update) => update,
+        None => {
+            record_command_run_error(app, CommandRunError::MessageMissing);
+            return;
+        }
+    };
+
+    app.clear_error();
+    app.set_status(success);
+    match client.set_flags(message_id, &flags).await {
+        Ok(()) => {
+            app.apply_message_flags(message_id, flags);
+            refresh_messages(app, client).await;
+            if app.error.is_none() {
+                app.set_status(success);
+            }
+        }
+        Err(error) => record_error(app, error),
+    }
+}
+
+fn selected_account_folder(app: &AppState) -> Result<(Uuid, String), CommandRunError> {
+    let account_id = app
+        .selected_account_id()
+        .ok_or(CommandRunError::AccountNotSelected)?;
+    let folder_name = app
+        .selected_folder_name()
+        .ok_or(CommandRunError::FolderUnavailable)?
+        .to_string();
+    Ok((account_id, folder_name))
+}
+
+fn record_command_parse_error(app: &mut AppState, message: String) {
+    app.set_status(message.clone());
+    app.set_error(message);
+}
+
+fn record_command_run_error(app: &mut AppState, error: CommandRunError) {
+    let message = error.to_string();
+    app.set_status(message.clone());
+    app.set_error(message);
+}
+
+async fn refresh_current_pane<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
     match app.active {
         ActivePane::Accounts => refresh_accounts(app, client).await,
         ActivePane::Folders => refresh_folders(app, client).await,
@@ -114,7 +442,7 @@ async fn refresh_current_pane(app: &mut AppState, client: &mut MailboxClient) {
     }
 }
 
-async fn refresh_after_selection_change(app: &mut AppState, client: &mut MailboxClient) {
+async fn refresh_after_selection_change<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
     match app.active {
         ActivePane::Accounts => refresh_folders(app, client).await,
         ActivePane::Folders => refresh_messages(app, client).await,
@@ -122,7 +450,7 @@ async fn refresh_after_selection_change(app: &mut AppState, client: &mut Mailbox
     }
 }
 
-async fn refresh_accounts(app: &mut AppState, client: &mut MailboxClient) {
+async fn refresh_accounts<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
     app.set_status("Loading accounts");
     match client.list_accounts().await {
         Ok(accounts) => {
@@ -140,7 +468,7 @@ async fn refresh_accounts(app: &mut AppState, client: &mut MailboxClient) {
     }
 }
 
-async fn refresh_folders(app: &mut AppState, client: &mut MailboxClient) {
+async fn refresh_folders<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
     let Some(account_id) = app.selected_account_id() else {
         app.apply_folders(Vec::new());
         app.set_status("No account selected");
@@ -164,7 +492,7 @@ async fn refresh_folders(app: &mut AppState, client: &mut MailboxClient) {
     }
 }
 
-async fn refresh_messages(app: &mut AppState, client: &mut MailboxClient) {
+async fn refresh_messages<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
     let Some(folder_id) = app.selected_folder_id() else {
         app.apply_messages(Vec::new());
         app.set_status("No folder selected");
@@ -188,7 +516,7 @@ async fn refresh_messages(app: &mut AppState, client: &mut MailboxClient) {
     }
 }
 
-async fn refresh_detail(app: &mut AppState, client: &mut MailboxClient) {
+async fn refresh_detail<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
     let Some(message_id) = app.selected_message_id() else {
         app.apply_detail(None);
         app.set_status("No message selected");
@@ -229,4 +557,322 @@ fn restore_terminal(terminal: &mut CrosstermTerminal) -> Result<(), TuiError> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    use serde_json::json;
+
+    use super::*;
+    use crate::tui::app::{AccountItem, FolderItem, MessageDetail, MessageItem};
+    use crate::tui::theme::ThemeName;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Call {
+        Sync(Uuid, String),
+        StartSync(Uuid, String),
+        StopSync(Uuid, String),
+        SetFlags(Uuid, Vec<String>),
+        ListMessages(Uuid),
+        GetMessage(Uuid),
+    }
+
+    #[derive(Default)]
+    struct MockMailbox {
+        calls: Vec<Call>,
+        messages: Vec<MessageItem>,
+        detail: Option<MessageDetail>,
+        fail_sync: bool,
+        fail_set_flags: bool,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl Mailbox for MockMailbox {
+        async fn list_accounts(&mut self) -> Result<Vec<AccountItem>, ipc::MailboxError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_folders(&mut self, _: Uuid) -> Result<Vec<FolderItem>, ipc::MailboxError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_messages(
+            &mut self,
+            folder_id: Uuid,
+        ) -> Result<Vec<MessageItem>, ipc::MailboxError> {
+            self.calls.push(Call::ListMessages(folder_id));
+            Ok(self.messages.clone())
+        }
+
+        async fn get_message(
+            &mut self,
+            message_id: Uuid,
+        ) -> Result<Option<MessageDetail>, ipc::MailboxError> {
+            self.calls.push(Call::GetMessage(message_id));
+            Ok(self.detail.clone())
+        }
+
+        async fn sync_folder(
+            &mut self,
+            account_id: Uuid,
+            folder_name: &str,
+        ) -> Result<serde_json::Value, ipc::MailboxError> {
+            self.calls
+                .push(Call::Sync(account_id, folder_name.to_string()));
+            if self.fail_sync {
+                Err(server_error("account.sync_folder"))
+            } else {
+                Ok(json!({"inserted": 0, "wiped": 0}))
+            }
+        }
+
+        async fn start_sync(
+            &mut self,
+            account_id: Uuid,
+            folder_name: &str,
+        ) -> Result<serde_json::Value, ipc::MailboxError> {
+            self.calls
+                .push(Call::StartSync(account_id, folder_name.to_string()));
+            Ok(json!({"ok": true, "started": true}))
+        }
+
+        async fn stop_sync(
+            &mut self,
+            account_id: Uuid,
+            folder_name: &str,
+        ) -> Result<serde_json::Value, ipc::MailboxError> {
+            self.calls
+                .push(Call::StopSync(account_id, folder_name.to_string()));
+            Ok(json!({"ok": true, "stopped": true}))
+        }
+
+        async fn set_flags(
+            &mut self,
+            message_id: Uuid,
+            flags: &[String],
+        ) -> Result<(), ipc::MailboxError> {
+            self.calls.push(Call::SetFlags(message_id, flags.to_vec()));
+            if self.fail_set_flags {
+                Err(server_error("message.set_flags"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn server_error(op: &'static str) -> ipc::MailboxError {
+        ipc::MailboxError::Server {
+            op,
+            code: "boom".into(),
+            message: "daemon rejected request".into(),
+        }
+    }
+
+    fn account_item(id: Uuid) -> AccountItem {
+        AccountItem {
+            id,
+            label: "Work".into(),
+            email: "work@example.com".into(),
+            status: "idle".into(),
+        }
+    }
+
+    fn folder_item(id: Uuid) -> FolderItem {
+        FolderItem {
+            id,
+            name: "INBOX".into(),
+            role: "inbox".into(),
+        }
+    }
+
+    fn message_item(id: Uuid, flags: Vec<&str>) -> MessageItem {
+        MessageItem {
+            id,
+            subject: "Hello".into(),
+            from: "alice@example.com".into(),
+            date: "2026-05-07 10:00".into(),
+            snippet: "Preview".into(),
+            flags: flags.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    fn app_with_account_folder(account_id: Uuid, folder_id: Uuid) -> AppState {
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        app.apply_folders(vec![folder_item(folder_id)]);
+        app
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_sync_calls_daemon_and_refreshes_messages() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        let mut client = MockMailbox::default();
+
+        execute_command(Command::Sync, &mut app, &mut client).await;
+
+        assert_eq!(
+            client.calls,
+            vec![
+                Call::Sync(account_id, "INBOX".into()),
+                Call::ListMessages(folder_id),
+            ]
+        );
+        assert_eq!(app.status, "Synced INBOX");
+        assert!(app.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_start_and_stop_sync_use_selected_folder() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        let mut client = MockMailbox::default();
+
+        execute_command(Command::StartSync, &mut app, &mut client).await;
+        execute_command(Command::StopSync, &mut app, &mut client).await;
+
+        assert_eq!(
+            client.calls,
+            vec![
+                Call::StartSync(account_id, "INBOX".into()),
+                Call::ListMessages(folder_id),
+                Call::StopSync(account_id, "INBOX".into()),
+                Call::ListMessages(folder_id),
+            ]
+        );
+        assert_eq!(app.status, "Stopped sync for INBOX");
+        assert!(app.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_seen_preserves_other_flags() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        app.apply_messages(vec![message_item(message_id, vec!["\\Answered"])]);
+        let mut client = MockMailbox::default();
+
+        execute_command(Command::Seen, &mut app, &mut client).await;
+
+        assert_eq!(
+            client.calls,
+            vec![
+                Call::SetFlags(message_id, vec!["\\Answered".into(), "\\Seen".into()]),
+                Call::ListMessages(folder_id),
+            ]
+        );
+        assert_eq!(app.status, "Marked message seen");
+        assert!(app.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_flag_error_keeps_local_flags_and_reports_daemon_error() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        app.apply_messages(vec![message_item(message_id, vec!["\\Seen"])]);
+        let mut client = MockMailbox {
+            fail_set_flags: true,
+            ..Default::default()
+        };
+
+        execute_command(Command::Flag, &mut app, &mut client).await;
+
+        assert_eq!(
+            client.calls,
+            vec![Call::SetFlags(
+                message_id,
+                vec!["\\Seen".into(), "\\Flagged".into()]
+            )]
+        );
+        assert_eq!(app.messages[0].flags, vec!["\\Seen"]);
+        assert!(app.error.as_deref().unwrap().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_reports_missing_selections_without_daemon_call() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        execute_command(Command::Sync, &mut app, &mut client).await;
+        assert_eq!(app.error.as_deref(), Some("No account selected"));
+
+        app.clear_error();
+        execute_command(Command::Seen, &mut app, &mut client).await;
+        assert_eq!(app.error.as_deref(), Some("No message selected"));
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_command_line_reports_parse_errors() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        run_command_line("theme solarized".into(), &mut app, &mut client).await;
+
+        assert_eq!(
+            app.error.as_deref(),
+            Some("usage: theme next|default|dark|high-contrast")
+        );
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_theme_shortcut_cycles_theme() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        let quit = handle_key(
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert!(!quit);
+        assert_eq!(app.theme, ThemeName::Dark);
+        assert_eq!(app.status, "Theme: dark");
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_command_mode_cancel_does_not_quit_on_q() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.mode, InputMode::Command);
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.command_input, "q");
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.command_input.is_empty());
+        assert_eq!(app.status, "Command cancelled");
+    }
 }
