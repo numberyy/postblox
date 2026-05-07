@@ -168,6 +168,12 @@ pub async fn reconcile_folder(
 
         let new = build_message_row(account_id, folder.id, thread_id, fetched, &parsed);
         let row: Message = db::messages::create(pool, &new).await?;
+        if let Err(error) =
+            crate::attachments::persist_parsed_for_message(pool, row.id, &parsed.attachments).await
+        {
+            let _ = db::messages::delete(pool, row.id).await;
+            return Err(error.into());
+        }
         db::threads::touch_last_message_at(
             pool,
             thread_id,

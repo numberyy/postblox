@@ -8,7 +8,7 @@ use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -71,6 +71,31 @@ trait Mailbox {
         message_id: Uuid,
         flags: &[String],
     ) -> Result<(), ipc::MailboxError>;
+    async fn list_attachments(
+        &mut self,
+        message_id: Uuid,
+    ) -> Result<Vec<app::AttachmentItem>, ipc::MailboxError>;
+    async fn preview_attachment(
+        &mut self,
+        attachment_id: Uuid,
+    ) -> Result<app::AttachmentPreviewItem, ipc::MailboxError>;
+    async fn export_attachment(
+        &mut self,
+        attachment_id: Uuid,
+        destination_path: &std::path::Path,
+    ) -> Result<ipc::AttachmentExportResult, ipc::MailboxError>;
+    async fn create_draft(&mut self, draft: &app::ComposerDraft)
+        -> Result<Uuid, ipc::MailboxError>;
+    async fn update_draft(
+        &mut self,
+        draft_id: Uuid,
+        draft: &app::ComposerDraft,
+    ) -> Result<Uuid, ipc::MailboxError>;
+    async fn send_draft(
+        &mut self,
+        account_id: Uuid,
+        draft_id: Uuid,
+    ) -> Result<String, ipc::MailboxError>;
 }
 
 #[async_trait::async_trait(?Send)]
@@ -131,6 +156,51 @@ impl Mailbox for MailboxClient {
     ) -> Result<(), ipc::MailboxError> {
         MailboxClient::set_flags(self, message_id, flags).await
     }
+
+    async fn list_attachments(
+        &mut self,
+        message_id: Uuid,
+    ) -> Result<Vec<app::AttachmentItem>, ipc::MailboxError> {
+        MailboxClient::list_attachments(self, message_id).await
+    }
+
+    async fn preview_attachment(
+        &mut self,
+        attachment_id: Uuid,
+    ) -> Result<app::AttachmentPreviewItem, ipc::MailboxError> {
+        MailboxClient::preview_attachment(self, attachment_id).await
+    }
+
+    async fn export_attachment(
+        &mut self,
+        attachment_id: Uuid,
+        destination_path: &std::path::Path,
+    ) -> Result<ipc::AttachmentExportResult, ipc::MailboxError> {
+        MailboxClient::export_attachment(self, attachment_id, destination_path).await
+    }
+
+    async fn create_draft(
+        &mut self,
+        draft: &app::ComposerDraft,
+    ) -> Result<Uuid, ipc::MailboxError> {
+        MailboxClient::create_draft(self, draft).await
+    }
+
+    async fn update_draft(
+        &mut self,
+        draft_id: Uuid,
+        draft: &app::ComposerDraft,
+    ) -> Result<Uuid, ipc::MailboxError> {
+        MailboxClient::update_draft(self, draft_id, draft).await
+    }
+
+    async fn send_draft(
+        &mut self,
+        account_id: Uuid,
+        draft_id: Uuid,
+    ) -> Result<String, ipc::MailboxError> {
+        MailboxClient::send_draft(self, account_id, draft_id).await
+    }
 }
 
 pub async fn run(socket_path: PathBuf) -> Result<(), TuiError> {
@@ -181,13 +251,28 @@ async fn handle_key<C: Mailbox + ?Sized>(
     app: &mut AppState,
     client: &mut C,
 ) -> bool {
-    if app.mode == InputMode::Command {
-        return handle_command_key(key, app, client).await;
+    if app.pending_open_attachment.is_some() {
+        return handle_open_confirmation_key(key, app);
+    }
+
+    match app.mode {
+        InputMode::Command => return handle_command_key(key, app, client).await,
+        InputMode::Compose | InputMode::ConfirmDiscard => {
+            return handle_composer_key(key, app, client).await;
+        }
+        InputMode::Normal => {}
     }
 
     match key.code {
         KeyCode::Char(':') => {
             app.enter_command_mode();
+            false
+        }
+        KeyCode::Char('c') => {
+            match app.selected_account_id() {
+                Some(account_id) => app.enter_composer(account_id),
+                None => record_command_run_error(app, CommandRunError::AccountNotSelected),
+            }
             false
         }
         KeyCode::Char('q') => true,
@@ -241,12 +326,121 @@ async fn handle_key<C: Mailbox + ?Sized>(
             execute_command(Command::ThemeNext, app, client).await;
             false
         }
+        KeyCode::Char('a') => {
+            if app.toggle_attachment_focus() {
+                app.set_status("Attachments");
+            } else {
+                app.set_status("No attachments for message");
+            }
+            false
+        }
+        KeyCode::Char('e') => {
+            export_selected_attachment(app, client).await;
+            false
+        }
+        KeyCode::Char('o') => {
+            if app.begin_open_attachment_confirmation() {
+                let filename = app
+                    .pending_open_attachment
+                    .as_ref()
+                    .map(|attachment| attachment.filename.clone())
+                    .unwrap_or_else(|| "attachment".into());
+                app.set_status(format!("Open {filename} with xdg-open? y/n"));
+            } else {
+                app.set_status("No attachment selected");
+            }
+            false
+        }
         KeyCode::Enter => {
             if app.active == ActivePane::Threads {
                 app.active = ActivePane::Messages;
                 refresh_detail(app, client).await;
+            } else if app.active == ActivePane::Attachments {
+                refresh_attachment_preview(app, client).await;
             } else {
                 refresh_after_selection_change(app, client).await;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn handle_open_confirmation_key(key: KeyEvent, app: &mut AppState) -> bool {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            if let Some(attachment) = app.take_pending_open_attachment() {
+                open_attachment_with_xdg(app, &attachment);
+            }
+            false
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.cancel_open_attachment_confirmation();
+            app.set_status("Open cancelled");
+            false
+        }
+        _ => false,
+    }
+}
+
+async fn handle_composer_key<C: Mailbox + ?Sized>(
+    key: KeyEvent,
+    app: &mut AppState,
+    client: &mut C,
+) -> bool {
+    if app.mode == InputMode::ConfirmDiscard {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => app.discard_composer(),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.cancel_discard_composer_confirmation();
+            }
+            _ => {}
+        }
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            save_composer(app, client).await;
+            false
+        }
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            send_composer(app, client).await;
+            false
+        }
+        KeyCode::Esc => {
+            if app.composer_needs_discard_confirmation() {
+                app.begin_discard_composer_confirmation();
+            } else {
+                app.exit_composer();
+                app.set_status("Composer closed");
+            }
+            false
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            app.next_composer_field();
+            false
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            app.previous_composer_field();
+            false
+        }
+        KeyCode::Enter => {
+            if !app.composer_enter() {
+                app.set_error(format!(
+                    "body is limited to {} characters",
+                    app::MAX_COMPOSE_BODY_CHARS
+                ));
+            }
+            false
+        }
+        KeyCode::Backspace => {
+            app.backspace_composer();
+            false
+        }
+        KeyCode::Char(ch) => {
+            if !key.modifiers.contains(KeyModifiers::CONTROL) && !app.push_composer_char(ch) {
+                app.set_error("compose field is at its limit");
             }
             false
         }
@@ -421,6 +615,143 @@ async fn run_flag_write<C: Mailbox + ?Sized>(
     }
 }
 
+async fn save_composer<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) -> Option<Uuid> {
+    let Some(draft) = app.composer_draft() else {
+        app.set_status("No composer open");
+        return None;
+    };
+
+    app.clear_error();
+    app.set_status("Saving draft");
+    let result = if let Some(draft_id) = app.composer_draft_id() {
+        client.update_draft(draft_id, &draft).await
+    } else {
+        client.create_draft(&draft).await
+    };
+
+    match result {
+        Ok(draft_id) => {
+            app.mark_composer_saved(draft_id);
+            app.set_status(format!("Draft saved {draft_id}"));
+            Some(draft_id)
+        }
+        Err(error) => {
+            record_error(app, error);
+            None
+        }
+    }
+}
+
+async fn send_composer<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
+    let Some(account_id) = app.composer_account_id() else {
+        app.set_status("No composer open");
+        return;
+    };
+
+    let draft_id = if app.composer_draft_id().is_none() || app.composer_is_dirty() {
+        match save_composer(app, client).await {
+            Some(draft_id) => draft_id,
+            None => return,
+        }
+    } else {
+        app.composer_draft_id().expect("checked above")
+    };
+
+    app.clear_error();
+    app.set_status("Sending message");
+    match client.send_draft(account_id, draft_id).await {
+        Ok(message_id) => {
+            app.exit_composer();
+            app.set_status(format!("Sent message {message_id}"));
+        }
+        Err(error) => record_error(app, error),
+    }
+}
+
+async fn export_selected_attachment<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
+    let Some(attachment) = app.selected_attachment().cloned() else {
+        app.set_status("No attachment selected");
+        return;
+    };
+    let destination = match default_export_path(&attachment.filename) {
+        Ok(path) => path,
+        Err(error) => {
+            app.set_error(format!("export path: {error}"));
+            return;
+        }
+    };
+
+    app.clear_error();
+    app.set_status(format!("Exporting {}", attachment.filename));
+    match client.export_attachment(attachment.id, &destination).await {
+        Ok(exported) => app.set_status(format!(
+            "Exported attachment to {}",
+            exported.destination_path
+        )),
+        Err(error) => record_error(app, error),
+    }
+}
+
+fn open_attachment_with_xdg(app: &mut AppState, attachment: &app::AttachmentItem) {
+    match std::process::Command::new("xdg-open")
+        .arg(&attachment.storage_path)
+        .status()
+    {
+        Ok(status) if status.success() => {
+            app.set_status(format!("Opened {} with xdg-open", attachment.filename));
+        }
+        Ok(status) => {
+            app.set_error(format!("xdg-open failed with status {status}"));
+        }
+        Err(error) => {
+            app.set_error(format!("xdg-open failed: {error}"));
+        }
+    }
+}
+
+fn default_export_path(filename: &str) -> std::io::Result<PathBuf> {
+    let directory = std::env::current_dir()?;
+    let filename = safe_export_filename(filename);
+    let first = directory.join(&filename);
+    if !first.exists() {
+        return Ok(first);
+    }
+
+    let path = std::path::Path::new(&filename);
+    let stem = path
+        .file_stem()
+        .and_then(|part| part.to_str())
+        .unwrap_or("attachment");
+    let extension = path.extension().and_then(|part| part.to_str());
+    for index in 1..1000 {
+        let candidate = match extension {
+            Some(extension) => directory.join(format!("{stem} ({index}).{extension}")),
+            None => directory.join(format!("{stem} ({index})")),
+        };
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "no collision-free export path available",
+    ))
+}
+
+fn safe_export_filename(filename: &str) -> String {
+    let leaf = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("attachment.bin");
+    let safe = leaf.trim_matches(['.', ' ']);
+    if safe.is_empty() {
+        "attachment.bin".into()
+    } else {
+        safe.to_string()
+    }
+}
+
 fn selected_account_folder(app: &AppState) -> Result<(Uuid, String), CommandRunError> {
     let account_id = app
         .selected_account_id()
@@ -449,6 +780,7 @@ async fn refresh_current_pane<C: Mailbox + ?Sized>(app: &mut AppState, client: &
         ActivePane::Folders => refresh_folders(app, client).await,
         ActivePane::Threads => refresh_messages(app, client).await,
         ActivePane::Messages => refresh_messages(app, client).await,
+        ActivePane::Attachments => refresh_attachments(app, client).await,
     }
 }
 
@@ -458,6 +790,7 @@ async fn refresh_after_selection_change<C: Mailbox + ?Sized>(app: &mut AppState,
         ActivePane::Folders => refresh_messages(app, client).await,
         ActivePane::Threads => refresh_detail(app, client).await,
         ActivePane::Messages => refresh_detail(app, client).await,
+        ActivePane::Attachments => refresh_attachment_preview(app, client).await,
     }
 }
 
@@ -551,6 +884,49 @@ async fn refresh_detail<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C)
                 app.set_status("Message no longer exists");
             }
             app.apply_detail(detail);
+            if app.detail.is_some() {
+                refresh_attachments(app, client).await;
+            }
+        }
+        Err(error) => record_error(app, error),
+    }
+}
+
+async fn refresh_attachments<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
+    let Some(message_id) = app.detail.as_ref().map(|detail| detail.id) else {
+        app.apply_attachments(Vec::new());
+        return;
+    };
+
+    match client.list_attachments(message_id).await {
+        Ok(attachments) => {
+            let count = attachments.len();
+            app.apply_attachments(attachments);
+            if count == 0 {
+                app.set_status("Message loaded");
+            } else {
+                refresh_attachment_preview(app, client).await;
+                if app.error.is_none() {
+                    app.set_status(format!("Message loaded • {count} attachment(s)"));
+                }
+            }
+        }
+        Err(error) => record_error(app, error),
+    }
+}
+
+async fn refresh_attachment_preview<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
+    let Some(attachment_id) = app.selected_attachment_id() else {
+        app.attachment_preview = None;
+        app.set_status("No attachment selected");
+        return;
+    };
+
+    match client.preview_attachment(attachment_id).await {
+        Ok(preview) => {
+            app.clear_error();
+            app.apply_attachment_preview(preview);
+            app.set_status("Attachment preview loaded");
         }
         Err(error) => record_error(app, error),
     }
@@ -594,6 +970,12 @@ mod tests {
         SetFlags(Uuid, Vec<String>),
         ListMessages(Uuid),
         GetMessage(Uuid),
+        ListAttachments(Uuid),
+        PreviewAttachment(Uuid),
+        ExportAttachment(Uuid, PathBuf),
+        CreateDraft(app::ComposerDraft),
+        UpdateDraft(Uuid, app::ComposerDraft),
+        SendDraft(Uuid, Uuid),
     }
 
     #[derive(Default)]
@@ -601,8 +983,14 @@ mod tests {
         calls: Vec<Call>,
         messages: Vec<MessageItem>,
         detail: Option<MessageDetail>,
+        attachments: Vec<app::AttachmentItem>,
+        preview: Option<app::AttachmentPreviewItem>,
+        draft_id: Option<Uuid>,
+        send_message_id: Option<String>,
         fail_sync: bool,
         fail_set_flags: bool,
+        fail_draft: bool,
+        fail_send: bool,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -677,6 +1065,85 @@ mod tests {
                 Ok(())
             }
         }
+
+        async fn list_attachments(
+            &mut self,
+            message_id: Uuid,
+        ) -> Result<Vec<app::AttachmentItem>, ipc::MailboxError> {
+            self.calls.push(Call::ListAttachments(message_id));
+            Ok(self.attachments.clone())
+        }
+
+        async fn preview_attachment(
+            &mut self,
+            attachment_id: Uuid,
+        ) -> Result<app::AttachmentPreviewItem, ipc::MailboxError> {
+            self.calls.push(Call::PreviewAttachment(attachment_id));
+            Ok(self.preview.clone().unwrap_or(app::AttachmentPreviewItem {
+                attachment_id,
+                text: None,
+                message: "No inline preview".into(),
+                truncated: false,
+                preview_bytes: 0,
+            }))
+        }
+
+        async fn export_attachment(
+            &mut self,
+            attachment_id: Uuid,
+            destination_path: &std::path::Path,
+        ) -> Result<ipc::AttachmentExportResult, ipc::MailboxError> {
+            self.calls.push(Call::ExportAttachment(
+                attachment_id,
+                destination_path.into(),
+            ));
+            Ok(ipc::AttachmentExportResult {
+                attachment_id,
+                destination_path: destination_path.display().to_string(),
+                bytes_copied: 12,
+            })
+        }
+
+        async fn create_draft(
+            &mut self,
+            draft: &app::ComposerDraft,
+        ) -> Result<uuid::Uuid, ipc::MailboxError> {
+            self.calls.push(Call::CreateDraft(draft.clone()));
+            if self.fail_draft {
+                Err(server_error("draft.create"))
+            } else {
+                Ok(self.draft_id.unwrap_or_else(Uuid::new_v4))
+            }
+        }
+
+        async fn update_draft(
+            &mut self,
+            draft_id: Uuid,
+            draft: &app::ComposerDraft,
+        ) -> Result<uuid::Uuid, ipc::MailboxError> {
+            self.calls.push(Call::UpdateDraft(draft_id, draft.clone()));
+            if self.fail_draft {
+                Err(server_error("draft.update"))
+            } else {
+                Ok(draft_id)
+            }
+        }
+
+        async fn send_draft(
+            &mut self,
+            account_id: Uuid,
+            draft_id: Uuid,
+        ) -> Result<String, ipc::MailboxError> {
+            self.calls.push(Call::SendDraft(account_id, draft_id));
+            if self.fail_send {
+                Err(server_error("message.send"))
+            } else {
+                Ok(self
+                    .send_message_id
+                    .clone()
+                    .unwrap_or_else(|| "<sent@postblox.local>".into()))
+            }
+        }
     }
 
     fn server_error(op: &'static str) -> ipc::MailboxError {
@@ -749,6 +1216,18 @@ mod tests {
         app.apply_accounts(vec![account_item(account_id)]);
         app.apply_folders(vec![folder_item(folder_id)]);
         app
+    }
+
+    fn attachment_item(id: Uuid, message_id: Uuid) -> app::AttachmentItem {
+        app::AttachmentItem {
+            id,
+            message_id,
+            filename: "notes.txt".into(),
+            content_type: "text/plain".into(),
+            size_bytes: 12,
+            disposition: "attachment".into(),
+            storage_path: "/tmp/notes.txt".into(),
+        }
     }
 
     fn app_with_threaded_messages() -> AppState {
@@ -844,7 +1323,11 @@ mod tests {
 
         assert_eq!(
             client.calls,
-            vec![Call::ListMessages(folder_id), Call::GetMessage(older.id)]
+            vec![
+                Call::ListMessages(folder_id),
+                Call::GetMessage(older.id),
+                Call::ListAttachments(older.id),
+            ]
         );
         assert_eq!(app.threads.len(), 1);
         assert_eq!(app.threads[0].message_count, 2);
@@ -877,7 +1360,11 @@ mod tests {
 
         assert_eq!(
             client.calls,
-            vec![Call::ListMessages(folder_id), Call::GetMessage(first.id)]
+            vec![
+                Call::ListMessages(folder_id),
+                Call::GetMessage(first.id),
+                Call::ListAttachments(first.id),
+            ]
         );
         assert!(!app.threads_pane_visible());
         assert_eq!(app.active, ActivePane::Messages);
@@ -1234,7 +1721,13 @@ mod tests {
         );
 
         assert_eq!(app.active, ActivePane::Messages);
-        assert_eq!(client.calls, vec![Call::GetMessage(selected.id)]);
+        assert_eq!(
+            client.calls,
+            vec![
+                Call::GetMessage(selected.id),
+                Call::ListAttachments(selected.id),
+            ]
+        );
         assert_eq!(app.detail.as_ref().unwrap().id, selected.id);
     }
 
@@ -1273,5 +1766,220 @@ mod tests {
         assert_eq!(app.mode, InputMode::Normal);
         assert!(app.command_input.is_empty());
         assert_eq!(app.status, "Command cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_refresh_detail_loads_attachments_and_first_preview() {
+        let message_id = Uuid::new_v4();
+        let attachment_id = Uuid::new_v4();
+        let selected = message_item(message_id, vec![]);
+        let mut app = AppState::default();
+        app.apply_messages(vec![selected.clone()]);
+        let mut client = MockMailbox {
+            detail: Some(detail_for(&selected)),
+            attachments: vec![attachment_item(attachment_id, message_id)],
+            preview: Some(app::AttachmentPreviewItem {
+                attachment_id,
+                text: Some("preview text".into()),
+                message: "Inline preview".into(),
+                truncated: false,
+                preview_bytes: 12,
+            }),
+            ..Default::default()
+        };
+
+        refresh_detail(&mut app, &mut client).await;
+
+        assert_eq!(
+            client.calls,
+            vec![
+                Call::GetMessage(message_id),
+                Call::ListAttachments(message_id),
+                Call::PreviewAttachment(attachment_id),
+            ]
+        );
+        assert_eq!(app.attachments.len(), 1);
+        assert_eq!(
+            app.attachment_preview
+                .as_ref()
+                .and_then(|p| p.text.as_deref()),
+            Some("preview text")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_attachment_focus_and_selection_refresh_preview() {
+        let message_id = Uuid::new_v4();
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_detail(Some(MessageDetail {
+            id: message_id,
+            subject: "hello".into(),
+            from: "alice@example.com".into(),
+            snippet: "hello".into(),
+            body: "body".into(),
+            flags: Vec::new(),
+        }));
+        app.apply_attachments(vec![
+            attachment_item(first_id, message_id),
+            attachment_item(second_id, message_id),
+        ]);
+        let mut client = MockMailbox {
+            preview: Some(app::AttachmentPreviewItem {
+                attachment_id: second_id,
+                text: Some("second preview".into()),
+                message: "Inline preview".into(),
+                truncated: false,
+                preview_bytes: 14,
+            }),
+            ..Default::default()
+        };
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.active, ActivePane::Attachments);
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.selected_attachment_id(), Some(second_id));
+        assert_eq!(client.calls, vec![Call::PreviewAttachment(second_id)]);
+        assert_eq!(
+            app.attachment_preview
+                .as_ref()
+                .and_then(|p| p.text.as_deref()),
+            Some("second preview")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_composer_ctrl_s_creates_then_updates_draft() {
+        let account_id = Uuid::new_v4();
+        let draft_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        let mut client = MockMailbox {
+            draft_id: Some(draft_id),
+            ..Default::default()
+        };
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        for ch in "to@example.com".chars() {
+            assert!(
+                !handle_key(
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    &mut app,
+                    &mut client,
+                )
+                .await
+            );
+        }
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.composer.as_ref().unwrap().draft_id, Some(draft_id));
+        assert!(!app.composer.as_ref().unwrap().dirty);
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(client.calls.len(), 2);
+        assert!(matches!(client.calls[0], Call::CreateDraft(_)));
+        assert!(matches!(client.calls[1], Call::UpdateDraft(id, _) if id == draft_id));
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_composer_ctrl_x_saves_sends_and_exits() {
+        let account_id = Uuid::new_v4();
+        let draft_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        let mut client = MockMailbox {
+            draft_id: Some(draft_id),
+            send_message_id: Some("<sent-1@postblox.local>".into()),
+            ..Default::default()
+        };
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        for ch in "to@example.com".chars() {
+            handle_key(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await;
+        }
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(
+            client.calls,
+            vec![
+                Call::CreateDraft(app::ComposerDraft {
+                    account_id,
+                    in_reply_to_msg: None,
+                    to_addrs: vec!["to@example.com".into()],
+                    cc_addrs: vec![],
+                    bcc_addrs: vec![],
+                    subject: None,
+                    text_body: None,
+                    html_body: None,
+                }),
+                Call::SendDraft(account_id, draft_id),
+            ]
+        );
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.composer.is_none());
+        assert!(app.status.contains("<sent-1@postblox.local>"));
     }
 }

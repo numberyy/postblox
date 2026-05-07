@@ -7,9 +7,24 @@ use uuid::Uuid;
 
 use crate::ipc::client::{Client, ClientError};
 use crate::ipc::{Response, RpcError};
-use crate::models::{Account, Folder, Message};
+use crate::models::{Account, Attachment, Draft, Folder, Message};
 
-use super::app::{AccountItem, FolderItem, MessageDetail, MessageItem};
+use super::app::{
+    AccountItem, AttachmentItem, AttachmentPreviewItem, ComposerDraft, FolderItem, MessageDetail,
+    MessageItem,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct AttachmentExportResult {
+    pub attachment_id: Uuid,
+    pub destination_path: String,
+    pub bytes_copied: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct SendResult {
+    message_id: String,
+}
 
 #[derive(Debug, Error)]
 pub enum MailboxError {
@@ -143,6 +158,81 @@ impl MailboxClient {
         Ok(())
     }
 
+    pub async fn list_attachments(
+        &mut self,
+        message_id: Uuid,
+    ) -> Result<Vec<AttachmentItem>, MailboxError> {
+        let response = self
+            .request("attachment.list", attachment_list_args(message_id))
+            .await?;
+        let attachments: Vec<Attachment> = decode_response("attachment.list", response)?;
+        Ok(attachments.into_iter().map(AttachmentItem::from).collect())
+    }
+
+    pub async fn preview_attachment(
+        &mut self,
+        attachment_id: Uuid,
+    ) -> Result<AttachmentPreviewItem, MailboxError> {
+        let response = self
+            .request("attachment.preview", attachment_preview_args(attachment_id))
+            .await?;
+        let preview: crate::attachments::AttachmentPreview =
+            decode_response("attachment.preview", response)?;
+        Ok(AttachmentPreviewItem::from(preview))
+    }
+
+    pub async fn export_attachment(
+        &mut self,
+        attachment_id: Uuid,
+        destination_path: &Path,
+    ) -> Result<AttachmentExportResult, MailboxError> {
+        let response = self
+            .request(
+                "attachment.export",
+                attachment_export_args(attachment_id, destination_path),
+            )
+            .await?;
+        decode_response("attachment.export", response)
+    }
+
+    pub async fn create_draft(&mut self, draft: &ComposerDraft) -> Result<Uuid, MailboxError> {
+        let response = self
+            .request("draft.create", draft_create_args(draft))
+            .await?;
+        let draft: Draft = decode_response("draft.create", response)?;
+        Ok(draft.id)
+    }
+
+    pub async fn update_draft(
+        &mut self,
+        draft_id: Uuid,
+        draft: &ComposerDraft,
+    ) -> Result<Uuid, MailboxError> {
+        let response = self
+            .request("draft.update", draft_update_args(draft_id, draft))
+            .await?;
+        let draft: Option<Draft> = decode_response("draft.update", response)?;
+        draft
+            .map(|draft| draft.id)
+            .ok_or_else(|| MailboxError::Server {
+                op: "draft.update",
+                code: "not_found".into(),
+                message: "draft no longer exists".into(),
+            })
+    }
+
+    pub async fn send_draft(
+        &mut self,
+        account_id: Uuid,
+        draft_id: Uuid,
+    ) -> Result<String, MailboxError> {
+        let response = self
+            .request("message.send", message_send_args(account_id, draft_id))
+            .await?;
+        let sent: SendResult = decode_response("message.send", response)?;
+        Ok(sent.message_id)
+    }
+
     async fn request(
         &mut self,
         op: &'static str,
@@ -180,6 +270,50 @@ pub(crate) fn account_folder_args(account_id: Uuid, folder_name: &str) -> Value 
 
 pub(crate) fn set_flags_args(message_id: Uuid, flags: &[String]) -> Value {
     json!({ "id": message_id, "flags": flags })
+}
+
+pub(crate) fn attachment_list_args(message_id: Uuid) -> Value {
+    json!({ "message_id": message_id })
+}
+
+pub(crate) fn attachment_preview_args(attachment_id: Uuid) -> Value {
+    json!({ "id": attachment_id })
+}
+
+pub(crate) fn attachment_export_args(attachment_id: Uuid, destination_path: &Path) -> Value {
+    json!({
+        "id": attachment_id,
+        "destination_path": destination_path.display().to_string(),
+    })
+}
+
+pub(crate) fn draft_create_args(draft: &ComposerDraft) -> Value {
+    json!({
+        "account_id": draft.account_id,
+        "in_reply_to_msg": draft.in_reply_to_msg,
+        "to_addrs": &draft.to_addrs,
+        "cc_addrs": &draft.cc_addrs,
+        "bcc_addrs": &draft.bcc_addrs,
+        "subject": &draft.subject,
+        "text_body": &draft.text_body,
+        "html_body": &draft.html_body,
+    })
+}
+
+pub(crate) fn draft_update_args(draft_id: Uuid, draft: &ComposerDraft) -> Value {
+    json!({
+        "id": draft_id,
+        "to_addrs": &draft.to_addrs,
+        "cc_addrs": &draft.cc_addrs,
+        "bcc_addrs": &draft.bcc_addrs,
+        "subject": &draft.subject,
+        "text_body": &draft.text_body,
+        "html_body": &draft.html_body,
+    })
+}
+
+pub(crate) fn message_send_args(account_id: Uuid, draft_id: Uuid) -> Value {
+    json!({ "account_id": account_id, "draft_id": draft_id })
 }
 
 #[cfg(test)]
@@ -293,6 +427,71 @@ mod tests {
                 "id": message_id,
                 "flags": ["\\Answered", "\\Seen"],
             })
+        );
+    }
+
+    #[test]
+    fn test_attachment_args_match_daemon_ops() {
+        let message_id = Uuid::new_v4();
+        let attachment_id = Uuid::new_v4();
+
+        assert_eq!(
+            attachment_list_args(message_id),
+            json!({ "message_id": message_id })
+        );
+        assert_eq!(
+            attachment_preview_args(attachment_id),
+            json!({ "id": attachment_id })
+        );
+        assert_eq!(
+            attachment_export_args(attachment_id, Path::new("/tmp/report.txt")),
+            json!({ "id": attachment_id, "destination_path": "/tmp/report.txt" })
+        );
+    }
+
+    #[test]
+    fn test_draft_and_send_args_match_daemon_payloads() {
+        let account_id = Uuid::new_v4();
+        let draft_id = Uuid::new_v4();
+        let draft = super::super::app::ComposerDraft {
+            account_id,
+            in_reply_to_msg: None,
+            to_addrs: vec!["to@example.com".into()],
+            cc_addrs: vec!["copy@example.com".into()],
+            bcc_addrs: vec!["blind@example.com".into()],
+            subject: Some("Hello".into()),
+            text_body: Some("Body".into()),
+            html_body: None,
+        };
+
+        assert_eq!(
+            draft_create_args(&draft),
+            json!({
+                "account_id": account_id,
+                "in_reply_to_msg": null,
+                "to_addrs": ["to@example.com"],
+                "cc_addrs": ["copy@example.com"],
+                "bcc_addrs": ["blind@example.com"],
+                "subject": "Hello",
+                "text_body": "Body",
+                "html_body": null,
+            })
+        );
+        assert_eq!(
+            draft_update_args(draft_id, &draft),
+            json!({
+                "id": draft_id,
+                "to_addrs": ["to@example.com"],
+                "cc_addrs": ["copy@example.com"],
+                "bcc_addrs": ["blind@example.com"],
+                "subject": "Hello",
+                "text_body": "Body",
+                "html_body": null,
+            })
+        );
+        assert_eq!(
+            message_send_args(account_id, draft_id),
+            json!({ "account_id": account_id, "draft_id": draft_id })
         );
     }
 }

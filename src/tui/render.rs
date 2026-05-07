@@ -4,11 +4,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{ActivePane, AppState, InputMode, FLAGGED_FLAG, SEEN_FLAG};
+use super::app::{ActivePane, AppState, ComposeField, InputMode, FLAGGED_FLAG, SEEN_FLAG};
 use super::theme::Theme;
 
 pub fn render(frame: &mut Frame<'_>, app: &AppState) {
     let theme = app.theme.theme();
+    if app.composer.is_some() {
+        render_composer(frame, app, &theme);
+        return;
+    }
+
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(5), Constraint::Length(1)])
@@ -48,7 +53,11 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState) {
         render_folders(frame, top[1], app, &theme);
         render_messages(frame, top[2], app, &theme);
     }
-    render_detail(frame, main[1], app, &theme);
+    if app.attachments_pane_visible() {
+        render_detail_with_attachments(frame, main[1], app, &theme);
+    } else {
+        render_detail(frame, main[1], app, &theme);
+    }
     render_status(frame, root[1], app, &theme);
 }
 
@@ -205,19 +214,7 @@ fn render_messages(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Th
 }
 
 fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
-    let text = if let Some(error) = &app.error {
-        format!("Error: {error}")
-    } else if let Some(detail) = &app.detail {
-        format!(
-            "Subject: {}\nFrom: {}\nSnippet: {}\n\n{}",
-            detail.subject, detail.from, detail.snippet, detail.body
-        )
-    } else if app.messages.is_empty() {
-        "No message selected".into()
-    } else {
-        "Press Enter to open the selected message".into()
-    };
-
+    let text = detail_text(app);
     let paragraph = Paragraph::new(text)
         .block(
             Block::default()
@@ -235,10 +232,192 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
     frame.render_widget(paragraph, area);
 }
 
+fn detail_text(app: &AppState) -> String {
+    if let Some(error) = &app.error {
+        format!("Error: {error}")
+    } else if let Some(detail) = &app.detail {
+        format!(
+            "Subject: {}\nFrom: {}\nSnippet: {}\n\n{}",
+            detail.subject, detail.from, detail.snippet, detail.body
+        )
+    } else if app.messages.is_empty() {
+        "No message selected".into()
+    } else {
+        "Press Enter to open the selected message".into()
+    }
+}
+
+fn render_detail_with_attachments(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &AppState,
+    theme: &Theme,
+) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(area);
+    render_detail(frame, columns[0], app, theme);
+
+    let attachment_columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(columns[1]);
+    render_attachment_list(frame, attachment_columns[0], app, theme);
+    render_attachment_preview(frame, attachment_columns[1], app, theme);
+}
+
+fn render_attachment_list(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    let items: Vec<ListItem<'_>> = app
+        .attachments
+        .iter()
+        .map(|attachment| {
+            ListItem::new(Line::from(vec![
+                Span::raw(attachment.filename.clone()),
+                Span::styled(
+                    format!(
+                        " [{} • {} bytes]",
+                        attachment.content_type, attachment.size_bytes
+                    ),
+                    theme.muted,
+                ),
+            ]))
+        })
+        .collect();
+    let mut state = selection_state(app.attachments.len(), app.selected_attachment);
+    let list = List::new(items)
+        .block(pane_block(
+            "Attachments",
+            app.active == ActivePane::Attachments,
+            theme,
+        ))
+        .style(theme.text)
+        .highlight_style(theme.selection)
+        .highlight_symbol("› ");
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_attachment_preview(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    let text = if let Some(preview) = &app.attachment_preview {
+        let mut text = preview.message.clone();
+        if let Some(body) = &preview.text {
+            text.push_str("\n\n");
+            text.push_str(body);
+        }
+        if preview.truncated {
+            text.push_str("\n\n[truncated]");
+        }
+        text
+    } else {
+        "Select an attachment".into()
+    };
+    let paragraph = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title("Preview")
+                .borders(Borders::ALL)
+                .border_style(theme.pane)
+                .title_style(theme.pane),
+        )
+        .style(theme.text)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+fn render_composer(frame: &mut Frame<'_>, app: &AppState, theme: &Theme) {
+    let root = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(1)])
+        .split(frame.area());
+    let Some(composer) = &app.composer else {
+        render_status(frame, root[1], app, theme);
+        return;
+    };
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(5),
+        ])
+        .split(root[0]);
+
+    render_composer_field(
+        frame,
+        rows[0],
+        "To",
+        &composer.to,
+        composer.focused == ComposeField::To,
+        theme,
+    );
+    render_composer_field(
+        frame,
+        rows[1],
+        "Cc",
+        &composer.cc,
+        composer.focused == ComposeField::Cc,
+        theme,
+    );
+    render_composer_field(
+        frame,
+        rows[2],
+        "Bcc",
+        &composer.bcc,
+        composer.focused == ComposeField::Bcc,
+        theme,
+    );
+    render_composer_field(
+        frame,
+        rows[3],
+        "Subject",
+        &composer.subject,
+        composer.focused == ComposeField::Subject,
+        theme,
+    );
+    render_composer_field(
+        frame,
+        rows[4],
+        "Body",
+        &composer.body,
+        composer.focused == ComposeField::Body,
+        theme,
+    );
+    render_status(frame, root[1], app, theme);
+}
+
+fn render_composer_field(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &'static str,
+    text: &str,
+    active: bool,
+    theme: &Theme,
+) {
+    let paragraph = Paragraph::new(text.to_string())
+        .block(pane_block(title, active, theme))
+        .style(theme.text)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
 fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
     let (text, style) = match app.mode {
         InputMode::Command => (
             format!(" :{} | Enter run • Esc cancel ", app.command_input),
+            theme.command,
+        ),
+        InputMode::Compose => (
+            format!(
+                " {} | Tab/↑/↓ fields • Enter next/newline • Ctrl-S save • Ctrl-X send • Esc cancel ",
+                app.status
+            ),
+            theme.command,
+        ),
+        InputMode::ConfirmDiscard => (
+            " Discard unsaved compose? y/n ".to_string(),
             theme.command,
         ),
         InputMode::Normal => {
@@ -248,7 +427,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
                 app.status.clone()
             };
             let text = format!(
-                " {status} | q quit • : command • ←/→ pane • Tab pane • ↑/↓ move • j/k move • Enter open • r refresh • s sync • u seen • f flag • t theme "
+                " {status} | q quit • c compose • : command • ←/→ pane • Tab pane • ↑/↓ move • j/k move • Enter open • a attach • e export • o open • r refresh • s sync • u seen • f flag • t theme "
             );
             let style = if app.error.is_some() {
                 theme.error
@@ -292,7 +471,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::tui::app::{AccountItem, FolderItem, MessageDetail, MessageItem};
+    use crate::tui::app::{
+        AccountItem, AttachmentItem, AttachmentPreviewItem, FolderItem, MessageDetail, MessageItem,
+    };
     use crate::tui::theme::ThemeName;
 
     fn render_to_buffer(app: &AppState) -> Buffer {
@@ -474,5 +655,83 @@ mod tests {
 
         assert_eq!(selected.fg, Some(Color::Black));
         assert_eq!(selected.bg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn test_render_attachment_split_preview() {
+        let mut app = AppState::default();
+        let message_id = Uuid::new_v4();
+        let attachment_id = Uuid::new_v4();
+        app.apply_folder_messages(vec![MessageItem {
+            id: message_id,
+            thread_id: None,
+            subject: "With attachment".into(),
+            from: "alice@example.com".into(),
+            date: "2026-05-07 10:00".into(),
+            snippet: "Preview".into(),
+            flags: Vec::new(),
+        }]);
+        app.apply_detail(Some(MessageDetail {
+            id: message_id,
+            subject: "With attachment".into(),
+            from: "alice@example.com".into(),
+            snippet: "Preview".into(),
+            body: "Body beside attachments".into(),
+            flags: Vec::new(),
+        }));
+        app.apply_attachments(vec![AttachmentItem {
+            id: attachment_id,
+            message_id,
+            filename: "notes.txt".into(),
+            content_type: "text/plain".into(),
+            size_bytes: 18,
+            disposition: "attachment".into(),
+            storage_path: "/tmp/notes.txt".into(),
+        }]);
+        app.apply_attachment_preview(AttachmentPreviewItem {
+            attachment_id,
+            text: Some("safe text preview".into()),
+            message: "Inline preview".into(),
+            truncated: false,
+            preview_bytes: 17,
+        });
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(text.contains("Body beside attachments"));
+        assert!(text.contains("Attachments"));
+        assert!(text.contains("notes.txt"));
+        assert!(text.contains("safe text preview"));
+    }
+
+    #[test]
+    fn test_render_full_screen_composer() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        for ch in "bob@example.com".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+        app.next_composer_field();
+        app.next_composer_field();
+        app.next_composer_field();
+        for ch in "Hello".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+        app.next_composer_field();
+        for ch in "Composer body".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(text.contains("Compose"));
+        assert!(text.contains("To"));
+        assert!(text.contains("bob@example.com"));
+        assert!(text.contains("Subject"));
+        assert!(text.contains("Hello"));
+        assert!(text.contains("Composer body"));
+        assert!(text.contains("Ctrl-S save"));
+        assert!(!text.contains("Accounts"));
+        assert!(!text.contains("Messages"));
     }
 }

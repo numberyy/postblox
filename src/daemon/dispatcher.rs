@@ -3,6 +3,7 @@
 //! Maps wire op names to `db::*` calls and publishes events on the
 //! [`Hub`] for write ops. No IMAP/SMTP yet — that wires in R3b.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -323,6 +324,8 @@ impl Dispatcher for DaemonDispatcher {
             "message.list_by_folder" => op_messages_by_folder(&self.pool, args).await,
             "message.list_by_thread" => op_messages_by_thread(&self.pool, args).await,
             "message.get" => op_message_get(&self.pool, args).await,
+            "attachment.list" => op_attachment_list(&self.pool, args).await,
+            "attachment.preview" => op_attachment_preview(&self.pool, args).await,
             "search" => op_search(&self.pool, args).await,
             "audit.list_recent" => op_audit_list(&self.pool, args).await,
 
@@ -343,6 +346,7 @@ impl Dispatcher for DaemonDispatcher {
             "draft.create" => op_draft_create(&self.pool, args).await,
             "draft.update" => op_draft_update(&self.pool, args).await,
             "draft.delete" => op_draft_delete(&self.pool, args).await,
+            "attachment.export" => op_attachment_export(&self.pool, args).await,
             "message.send" => {
                 op_message_send(
                     &self.pool,
@@ -460,6 +464,26 @@ async fn op_messages_by_thread(pool: &SqlitePool, args: Value) -> Result<Value, 
 async fn op_message_get(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
     let id = parse_uuid(&args, "id")?;
     encode(db::messages::get(pool, id).await, "messages::get")
+}
+
+async fn op_attachment_list(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let message_id = parse_uuid(&args, "message_id")?;
+    encode(
+        db::attachments::list_for_message(pool, message_id).await,
+        "attachments::list_for_message",
+    )
+}
+
+async fn op_attachment_preview(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let id = parse_uuid(&args, "id")?;
+    let attachment = db::attachments::get(pool, id)
+        .await
+        .map_err(|e| RpcError::internal(format!("attachments::get: {e}")))?
+        .ok_or_else(|| RpcError::bad_args("unknown attachment id"))?;
+    let preview = crate::attachments::preview_attachment(attachment)
+        .await
+        .map_err(|e| RpcError::internal(format!("attachment preview: {e}")))?;
+    encode_one(&preview)
 }
 
 async fn op_search(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
@@ -790,6 +814,37 @@ async fn op_draft_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
     )
     .await;
     Ok(json!({"removed": removed}))
+}
+
+async fn op_attachment_export(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let actor = actor_from_args(&args);
+    let id = parse_uuid(&args, "id")?;
+    let destination_path = parse_str(&args, "destination_path")?;
+    let attachment = db::attachments::get(pool, id)
+        .await
+        .map_err(|e| RpcError::internal(format!("attachments::get: {e}")))?
+        .ok_or_else(|| RpcError::bad_args("unknown attachment id"))?;
+    let exported = crate::attachments::export_attachment(&attachment, Path::new(destination_path))
+        .await
+        .map_err(map_attachment_export_error)?;
+    audit_actor(
+        pool,
+        &actor,
+        "attachment.export",
+        Some(&id.to_string()),
+        &json!({"destination_path": exported.destination_path}),
+    )
+    .await;
+    encode_one(&exported)
+}
+
+fn map_attachment_export_error(err: std::io::Error) -> RpcError {
+    match err.kind() {
+        std::io::ErrorKind::AlreadyExists => RpcError::bad_args(err.to_string()),
+        std::io::ErrorKind::NotFound => RpcError::bad_args(err.to_string()),
+        std::io::ErrorKind::InvalidInput => RpcError::bad_args(err.to_string()),
+        _ => RpcError::internal(format!("attachment export: {err}")),
+    }
 }
 
 async fn op_message_send(

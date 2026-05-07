@@ -10,11 +10,11 @@ use tokio::time::{timeout, Duration};
 
 use postblox::auth::{CredentialKind, MailCredential};
 use postblox::daemon::{worker_manager_with_idle_config, DaemonDispatcher, DaemonServices};
-use postblox::db::{accounts, connect, folders, messages, threads};
+use postblox::db::{accounts, attachments as db_attachments, connect, folders, messages, threads};
 use postblox::imap::{FetchedMessage, FolderInfo, FolderSync, ImapAuth, ImapError, ImapSync};
 use postblox::ipc::client::Client;
 use postblox::ipc::{listen, Hub, Topic};
-use postblox::models::{ApprovalState, AuthKind, FolderRole};
+use postblox::models::{ApprovalState, AttachmentDisposition, AuthKind, FolderRole};
 use postblox::oauth::google::{
     self, GoogleOAuth, GoogleOAuthConfig, GoogleOAuthError, GoogleOAuthToken,
 };
@@ -1615,6 +1615,33 @@ fn rfc822(msg_id: &str, in_reply_to: Option<&str>, subject: &str, body: &str) ->
     s.into_bytes()
 }
 
+fn rfc822_with_text_attachment(msg_id: &str, filename: &str, attachment_text: &str) -> Vec<u8> {
+    use base64::Engine;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(attachment_text.as_bytes());
+    format!(
+        "Message-ID: <{msg_id}>\r\n\
+From: alice@example.com\r\n\
+To: bob@example.com\r\n\
+Subject: Attachment\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"b\"\r\n\
+\r\n\
+--b\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Body\r\n\
+--b\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+Content-Disposition: attachment; filename=\"{filename}\"\r\n\
+Content-Transfer-Encoding: base64\r\n\
+\r\n\
+{encoded}\r\n\
+--b--\r\n"
+    )
+    .into_bytes()
+}
+
 async fn setup_account_with_secret(h: &Harness) -> uuid::Uuid {
     let id = make_account(h, "u@example.com").await;
     folders::upsert(
@@ -2038,6 +2065,169 @@ async fn account_sync_folder_inserts_new_messages_and_publishes_events() {
     })
     .await
     .expect("mail.new events");
+}
+
+#[tokio::test]
+async fn attachment_list_preview_export_round_trip_over_socket() {
+    let h = make_harness().await;
+    let account_id = make_account(&h, "attachments@example.com").await;
+    let folder = folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id,
+            name: "INBOX".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Inbox,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+    let thread = threads::create(&h.pool, account_id, None, Some("attached"))
+        .await
+        .unwrap();
+    let msg = messages::create(
+        &h.pool,
+        &messages::NewMessage {
+            account_id,
+            folder_id: folder.id,
+            thread_id: Some(thread.id),
+            uid: 99,
+            message_id_header: Some("attachment-list@example.com".into()),
+            in_reply_to: None,
+            references_header: None,
+            from_addr: "alice@example.com".into(),
+            to_addrs: json!(["bob@example.com"]),
+            cc_addrs: json!([]),
+            bcc_addrs: json!([]),
+            reply_to: None,
+            subject: Some("attached".into()),
+            snippet: Some("body".into()),
+            text_body: Some("body".into()),
+            html_body: None,
+            raw_size: 12,
+            flags: json!([]),
+            internal_date: chrono::Utc::now(),
+            sent_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    let source = h._db_dir.path().join("source-note.txt");
+    tokio::fs::write(&source, b"hello safe preview")
+        .await
+        .unwrap();
+    let attachment = db_attachments::create(
+        &h.pool,
+        &db_attachments::NewAttachment {
+            message_id: msg.id,
+            filename: "source-note.txt".into(),
+            content_type: "text/plain".into(),
+            content_id: None,
+            size_bytes: 18,
+            disposition: AttachmentDisposition::Attachment,
+            storage_path: source.display().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let listed = c
+        .request("attachment.list", json!({"message_id": msg.id}))
+        .await
+        .unwrap();
+    assert!(listed.ok, "{:?}", listed.error);
+    assert_eq!(listed.data.as_array().unwrap().len(), 1);
+    assert_eq!(listed.data[0]["id"], attachment.id.to_string());
+
+    let preview = c
+        .request("attachment.preview", json!({"id": attachment.id}))
+        .await
+        .unwrap();
+    assert!(preview.ok, "{:?}", preview.error);
+    assert_eq!(preview.data["inline_text"], "hello safe preview");
+    assert_eq!(preview.data["truncated"], false);
+
+    let exported_path = h._db_dir.path().join("exported-note.txt");
+    let exported = c
+        .request(
+            "attachment.export",
+            json!({"id": attachment.id, "destination_path": exported_path}),
+        )
+        .await
+        .unwrap();
+    assert!(exported.ok, "{:?}", exported.error);
+    assert_eq!(
+        tokio::fs::read(&exported_path).await.unwrap(),
+        b"hello safe preview"
+    );
+
+    let overwrite = c
+        .request(
+            "attachment.export",
+            json!({"id": attachment.id, "destination_path": exported_path}),
+        )
+        .await
+        .unwrap();
+    assert!(!overwrite.ok);
+    assert_eq!(
+        overwrite.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+}
+
+#[tokio::test]
+async fn account_sync_folder_persists_attachment_bytes_for_safe_preview() {
+    let attachment_text = "sync attachment preview text";
+    let msgs = vec![FetchedMessage {
+        uid: 55,
+        flags: vec![],
+        internal_date: Some(chrono::Utc::now()),
+        raw: rfc822_with_text_attachment("sync-attachment@x", "sync.txt", attachment_text),
+    }];
+    let h = make_harness_with_sync(Arc::new(ScriptedSync::new(1, 56, msgs))).await;
+    let account_id = setup_account_with_secret(&h).await;
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "account.sync_folder",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp.error);
+    assert_eq!(resp.data["inserted"], json!(1));
+
+    let folder = folders::get_by_name(&h.pool, account_id, "INBOX")
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = messages::list_by_folder(&h.pool, folder.id, 100, 0)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+
+    let listed = c
+        .request("attachment.list", json!({"message_id": rows[0].id}))
+        .await
+        .unwrap();
+    assert!(listed.ok, "{:?}", listed.error);
+    let attachment_id = listed.data[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(listed.data[0]["filename"], "sync.txt");
+    let storage_path = listed.data[0]["storage_path"].as_str().unwrap();
+    assert_eq!(
+        tokio::fs::read_to_string(storage_path).await.unwrap(),
+        attachment_text
+    );
+
+    let preview = c
+        .request("attachment.preview", json!({"id": attachment_id}))
+        .await
+        .unwrap();
+    assert!(preview.ok, "{:?}", preview.error);
+    assert_eq!(preview.data["inline_text"], attachment_text);
 }
 
 #[tokio::test]
