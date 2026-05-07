@@ -268,10 +268,19 @@ pub struct ComposerState {
     pub draft_id: Option<Uuid>,
     pub focused: ComposeField,
     pub to: String,
+    pub to_cursor: usize,
     pub cc: String,
+    pub cc_cursor: usize,
     pub bcc: String,
+    pub bcc_cursor: usize,
     pub subject: String,
+    pub subject_cursor: usize,
     pub body: String,
+    pub body_cursor: usize,
+    pub body_scroll: usize,
+    pub body_selection_anchor: Option<usize>,
+    pub body_selection_focus: usize,
+    pub body_preferred_column: Option<usize>,
     pub dirty: bool,
 }
 
@@ -282,32 +291,45 @@ impl ComposerState {
             draft_id: None,
             focused: ComposeField::To,
             to: String::new(),
+            to_cursor: 0,
             cc: String::new(),
+            cc_cursor: 0,
             bcc: String::new(),
+            bcc_cursor: 0,
             subject: String::new(),
+            subject_cursor: 0,
             body: String::new(),
+            body_cursor: 0,
+            body_scroll: 0,
+            body_selection_anchor: None,
+            body_selection_focus: 0,
+            body_preferred_column: None,
             dirty: false,
         }
     }
 
-    fn field_mut(&mut self) -> &mut String {
+    fn focused_text(&self) -> &str {
         match self.focused {
-            ComposeField::To => &mut self.to,
-            ComposeField::Cc => &mut self.cc,
-            ComposeField::Bcc => &mut self.bcc,
-            ComposeField::Subject => &mut self.subject,
-            ComposeField::Body => &mut self.body,
+            ComposeField::To => &self.to,
+            ComposeField::Cc => &self.cc,
+            ComposeField::Bcc => &self.bcc,
+            ComposeField::Subject => &self.subject,
+            ComposeField::Body => &self.body,
+        }
+    }
+
+    fn focused_text_and_cursor_mut(&mut self) -> (&mut String, &mut usize) {
+        match self.focused {
+            ComposeField::To => (&mut self.to, &mut self.to_cursor),
+            ComposeField::Cc => (&mut self.cc, &mut self.cc_cursor),
+            ComposeField::Bcc => (&mut self.bcc, &mut self.bcc_cursor),
+            ComposeField::Subject => (&mut self.subject, &mut self.subject_cursor),
+            ComposeField::Body => (&mut self.body, &mut self.body_cursor),
         }
     }
 
     fn field_len(&self) -> usize {
-        match self.focused {
-            ComposeField::To => self.to.chars().count(),
-            ComposeField::Cc => self.cc.chars().count(),
-            ComposeField::Bcc => self.bcc.chars().count(),
-            ComposeField::Subject => self.subject.chars().count(),
-            ComposeField::Body => self.body.chars().count(),
-        }
+        self.focused_text().chars().count()
     }
 
     fn field_limit(&self) -> usize {
@@ -333,6 +355,294 @@ impl ComposerState {
             subject: non_empty_string(&self.subject),
             text_body: non_empty_string(&self.body),
             html_body: None,
+        }
+    }
+
+    pub fn focused_cursor(&self) -> usize {
+        match self.focused {
+            ComposeField::To => self.to_cursor.min(char_count(&self.to)),
+            ComposeField::Cc => self.cc_cursor.min(char_count(&self.cc)),
+            ComposeField::Bcc => self.bcc_cursor.min(char_count(&self.bcc)),
+            ComposeField::Subject => self.subject_cursor.min(char_count(&self.subject)),
+            ComposeField::Body => self.body_cursor.min(char_count(&self.body)),
+        }
+    }
+
+    pub fn body_lines(&self) -> Vec<&str> {
+        self.body.split('\n').collect()
+    }
+
+    pub fn body_line_count(&self) -> usize {
+        line_bounds(&self.body).len()
+    }
+
+    pub fn body_line_start(&self, line: usize) -> usize {
+        let bounds = line_bounds(&self.body);
+        bounds
+            .get(line.min(bounds.len().saturating_sub(1)))
+            .map(|(start, _)| *start)
+            .unwrap_or(0)
+    }
+
+    pub fn body_line_end(&self, line: usize) -> usize {
+        let bounds = line_bounds(&self.body);
+        bounds
+            .get(line.min(bounds.len().saturating_sub(1)))
+            .map(|(_, end)| *end)
+            .unwrap_or(0)
+    }
+
+    pub fn body_cursor_line_column(&self) -> (usize, usize) {
+        let cursor = self.body_cursor.min(char_count(&self.body));
+        let bounds = line_bounds(&self.body);
+        let line = line_for_cursor(&bounds, cursor);
+        let start = bounds.get(line).map(|(start, _)| *start).unwrap_or(0);
+        (line, cursor.saturating_sub(start))
+    }
+
+    pub fn body_selected_line_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
+        let anchor = self.body_selection_anchor?;
+        let max_line = self.body_line_count().saturating_sub(1);
+        let start = anchor.min(self.body_selection_focus).min(max_line);
+        let end = anchor.max(self.body_selection_focus).min(max_line);
+        Some(start..=end)
+    }
+
+    pub fn body_visible_scroll(&self, viewport_height: usize) -> usize {
+        let viewport_height = viewport_height.max(1);
+        let line_count = self.body_line_count();
+        let max_scroll = line_count.saturating_sub(viewport_height);
+        let mut scroll = self.body_scroll.min(max_scroll);
+        let cursor_line = self.body_cursor_line_column().0;
+
+        if cursor_line < scroll {
+            scroll = cursor_line;
+        } else if cursor_line >= scroll.saturating_add(viewport_height) {
+            scroll = cursor_line
+                .saturating_add(1)
+                .saturating_sub(viewport_height);
+        }
+
+        scroll.min(max_scroll)
+    }
+
+    fn ensure_body_cursor_visible(&mut self, viewport_height: usize) {
+        self.body_scroll = self.body_visible_scroll(viewport_height);
+    }
+
+    fn move_focused_cursor_left(&mut self) -> bool {
+        let changed = {
+            let (_, cursor) = self.focused_text_and_cursor_mut();
+            if *cursor == 0 {
+                false
+            } else {
+                *cursor -= 1;
+                true
+            }
+        };
+        if changed {
+            self.reset_body_navigation_state();
+        }
+        changed
+    }
+
+    fn move_focused_cursor_right(&mut self) -> bool {
+        let len = self.field_len();
+        let changed = {
+            let (_, cursor) = self.focused_text_and_cursor_mut();
+            let old = (*cursor).min(len);
+            if old >= len {
+                *cursor = len;
+                false
+            } else {
+                *cursor = old + 1;
+                true
+            }
+        };
+        if changed {
+            self.reset_body_navigation_state();
+        }
+        changed
+    }
+
+    fn move_focused_cursor_home(&mut self) -> bool {
+        let next = if self.focused == ComposeField::Body {
+            let line = self.body_cursor_line_column().0;
+            self.body_line_start(line)
+        } else {
+            0
+        };
+        self.set_focused_cursor(next)
+    }
+
+    fn move_focused_cursor_end(&mut self) -> bool {
+        let next = if self.focused == ComposeField::Body {
+            let line = self.body_cursor_line_column().0;
+            self.body_line_end(line)
+        } else {
+            self.field_len()
+        };
+        self.set_focused_cursor(next)
+    }
+
+    fn set_focused_cursor(&mut self, next: usize) -> bool {
+        let len = self.field_len();
+        let next = next.min(len);
+        let changed = {
+            let (_, cursor) = self.focused_text_and_cursor_mut();
+            let old = (*cursor).min(len);
+            *cursor = next;
+            old != next
+        };
+        if changed {
+            self.reset_body_navigation_state();
+        }
+        changed
+    }
+
+    fn move_body_line(&mut self, delta: isize, viewport_height: usize) -> bool {
+        if self.focused != ComposeField::Body {
+            return false;
+        }
+
+        let old_cursor = self.body_cursor;
+        let old_scroll = self.body_scroll;
+        let old_selection_focus = self.body_selection_focus;
+        let line_count = self.body_line_count();
+        let max_line = line_count.saturating_sub(1);
+        let (line, column) = self.body_cursor_line_column();
+        let preferred_column = self.body_preferred_column.unwrap_or(column);
+        self.body_preferred_column = Some(preferred_column);
+
+        let next_line = if delta < 0 {
+            line.saturating_sub(delta.unsigned_abs())
+        } else {
+            line.saturating_add(delta as usize).min(max_line)
+        };
+        let next_column = preferred_column.min(self.body_line_len(next_line));
+        self.body_cursor = self.body_line_start(next_line) + next_column;
+        if self.body_selection_anchor.is_some() {
+            self.body_selection_focus = next_line;
+        }
+        self.ensure_body_cursor_visible(viewport_height);
+
+        self.body_cursor != old_cursor
+            || self.body_scroll != old_scroll
+            || self.body_selection_focus != old_selection_focus
+    }
+
+    fn body_line_len(&self, line: usize) -> usize {
+        self.body_line_end(line)
+            .saturating_sub(self.body_line_start(line))
+    }
+
+    fn insert_focused_char(&mut self, ch: char) {
+        {
+            let (text, cursor) = self.focused_text_and_cursor_mut();
+            let current = (*cursor).min(char_count(text));
+            let byte_index = char_to_byte_index(text, current);
+            text.insert(byte_index, ch);
+            *cursor = current + 1;
+        }
+        self.after_text_edit();
+    }
+
+    fn insert_body_newline(&mut self) {
+        {
+            let current = self.body_cursor.min(char_count(&self.body));
+            let byte_index = char_to_byte_index(&self.body, current);
+            self.body.insert(byte_index, '\n');
+            self.body_cursor = current + 1;
+        }
+        self.after_text_edit();
+    }
+
+    fn delete_before_focused_cursor(&mut self) -> bool {
+        let changed = {
+            let (text, cursor) = self.focused_text_and_cursor_mut();
+            let current = (*cursor).min(char_count(text));
+            if current == 0 {
+                *cursor = 0;
+                false
+            } else {
+                let start = char_to_byte_index(text, current - 1);
+                let end = char_to_byte_index(text, current);
+                text.replace_range(start..end, "");
+                *cursor = current - 1;
+                true
+            }
+        };
+        if changed {
+            self.after_text_edit();
+        }
+        changed
+    }
+
+    fn delete_at_focused_cursor(&mut self) -> bool {
+        let changed = {
+            let (text, cursor) = self.focused_text_and_cursor_mut();
+            let current = (*cursor).min(char_count(text));
+            let len = char_count(text);
+            if current >= len {
+                *cursor = len;
+                false
+            } else {
+                let start = char_to_byte_index(text, current);
+                let end = char_to_byte_index(text, current + 1);
+                text.replace_range(start..end, "");
+                *cursor = current;
+                true
+            }
+        };
+        if changed {
+            self.after_text_edit();
+        }
+        changed
+    }
+
+    fn toggle_body_line_selection(&mut self) -> bool {
+        if self.focused != ComposeField::Body {
+            return false;
+        }
+        if self.body_selection_anchor.is_some() {
+            self.clear_body_selection()
+        } else {
+            let line = self.body_cursor_line_column().0;
+            self.body_selection_anchor = Some(line);
+            self.body_selection_focus = line;
+            true
+        }
+    }
+
+    fn start_body_line_selection(&mut self) -> bool {
+        if self.focused != ComposeField::Body || self.body_selection_anchor.is_some() {
+            return false;
+        }
+        let line = self.body_cursor_line_column().0;
+        self.body_selection_anchor = Some(line);
+        self.body_selection_focus = line;
+        true
+    }
+
+    fn clear_body_selection(&mut self) -> bool {
+        let changed = self.body_selection_anchor.is_some();
+        self.body_selection_anchor = None;
+        self.body_selection_focus = self.body_cursor_line_column().0;
+        changed
+    }
+
+    fn reset_body_navigation_state(&mut self) {
+        if self.focused == ComposeField::Body {
+            self.body_preferred_column = None;
+            self.clear_body_selection();
+        }
+    }
+
+    fn after_text_edit(&mut self) {
+        if self.focused == ComposeField::Body {
+            self.body_preferred_column = None;
+            self.clear_body_selection();
+            self.ensure_body_cursor_visible(1);
         }
     }
 }
@@ -785,12 +1095,14 @@ impl AppState {
     pub fn next_composer_field(&mut self) {
         if let Some(composer) = &mut self.composer {
             composer.focused = composer.focused.next();
+            composer.body_preferred_column = None;
         }
     }
 
     pub fn previous_composer_field(&mut self) {
         if let Some(composer) = &mut self.composer {
             composer.focused = composer.focused.previous();
+            composer.body_preferred_column = None;
         }
     }
 
@@ -801,7 +1113,7 @@ impl AppState {
         if ch.is_control() || composer.field_len() >= composer.field_limit() {
             return false;
         }
-        composer.field_mut().push(ch);
+        composer.insert_focused_char(ch);
         composer.dirty = true;
         true
     }
@@ -810,11 +1122,70 @@ impl AppState {
         let Some(composer) = &mut self.composer else {
             return false;
         };
-        let changed = composer.field_mut().pop().is_some();
+        let changed = composer.delete_before_focused_cursor();
         if changed {
             composer.dirty = true;
         }
         changed
+    }
+
+    pub fn delete_composer(&mut self) -> bool {
+        let Some(composer) = &mut self.composer else {
+            return false;
+        };
+        let changed = composer.delete_at_focused_cursor();
+        if changed {
+            composer.dirty = true;
+        }
+        changed
+    }
+
+    pub fn move_composer_cursor_left(&mut self) -> bool {
+        self.composer
+            .as_mut()
+            .is_some_and(ComposerState::move_focused_cursor_left)
+    }
+
+    pub fn move_composer_cursor_right(&mut self) -> bool {
+        self.composer
+            .as_mut()
+            .is_some_and(ComposerState::move_focused_cursor_right)
+    }
+
+    pub fn composer_home(&mut self) -> bool {
+        self.composer
+            .as_mut()
+            .is_some_and(ComposerState::move_focused_cursor_home)
+    }
+
+    pub fn composer_end(&mut self) -> bool {
+        self.composer
+            .as_mut()
+            .is_some_and(ComposerState::move_focused_cursor_end)
+    }
+
+    pub fn move_composer_body_line(&mut self, delta: isize, viewport_height: usize) -> bool {
+        self.composer
+            .as_mut()
+            .is_some_and(|composer| composer.move_body_line(delta, viewport_height))
+    }
+
+    pub fn toggle_composer_body_line_selection(&mut self) -> bool {
+        self.composer
+            .as_mut()
+            .is_some_and(ComposerState::toggle_body_line_selection)
+    }
+
+    pub fn start_composer_body_line_selection(&mut self) -> bool {
+        self.composer
+            .as_mut()
+            .is_some_and(ComposerState::start_body_line_selection)
+    }
+
+    pub fn clear_composer_body_selection(&mut self) -> bool {
+        self.composer
+            .as_mut()
+            .is_some_and(ComposerState::clear_body_selection)
     }
 
     pub fn composer_enter(&mut self) -> bool {
@@ -825,7 +1196,7 @@ impl AppState {
             if composer.body.chars().count() >= MAX_COMPOSE_BODY_CHARS {
                 return false;
             }
-            composer.body.push('\n');
+            composer.insert_body_newline();
             composer.dirty = true;
         } else {
             composer.focused = composer.focused.next();
@@ -992,11 +1363,10 @@ fn text_or_default(value: Option<&str>, default: &str) -> String {
 }
 
 fn non_empty_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
+    if value.trim().is_empty() {
         None
     } else {
-        Some(trimmed.to_string())
+        Some(value.to_string())
     }
 }
 
@@ -1007,6 +1377,41 @@ fn split_addresses(value: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+fn char_count(value: &str) -> usize {
+    value.chars().count()
+}
+
+fn char_to_byte_index(value: &str, char_index: usize) -> usize {
+    if char_index == 0 {
+        return 0;
+    }
+    value
+        .char_indices()
+        .nth(char_index)
+        .map(|(index, _)| index)
+        .unwrap_or(value.len())
+}
+
+fn line_bounds(value: &str) -> Vec<(usize, usize)> {
+    let mut bounds = Vec::new();
+    let mut start = 0;
+    for (index, ch) in value.chars().enumerate() {
+        if ch == '\n' {
+            bounds.push((start, index));
+            start = index + 1;
+        }
+    }
+    bounds.push((start, value.chars().count()));
+    bounds
+}
+
+fn line_for_cursor(bounds: &[(usize, usize)], cursor: usize) -> usize {
+    bounds
+        .iter()
+        .position(|(_, end)| cursor <= *end)
+        .unwrap_or_else(|| bounds.len().saturating_sub(1))
 }
 
 fn move_index(index: &mut usize, len: usize, delta: isize) -> bool {
@@ -1798,6 +2203,156 @@ mod tests {
         assert_eq!(draft.subject.as_deref(), Some("Status"));
         assert_eq!(draft.text_body.as_deref(), Some("Line one\nLine two"));
         assert!(app.composer.as_ref().unwrap().dirty);
+    }
+
+    #[test]
+    fn test_composer_inserts_at_cursor_in_header_and_body() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+
+        for ch in "ac".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+        assert!(app.move_composer_cursor_left());
+        assert!(app.push_composer_char('b'));
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.to, "abc");
+        assert_eq!(composer.to_cursor, 2);
+
+        app.composer.as_mut().unwrap().focused = ComposeField::Body;
+        for ch in "wy".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+        assert!(app.move_composer_cursor_left());
+        assert!(app.push_composer_char('x'));
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.body, "wxy");
+        assert_eq!(composer.body_cursor, 2);
+    }
+
+    #[test]
+    fn test_composer_cursor_editing_keys_handle_boundaries() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        for ch in "abcd".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+
+        assert!(app.move_composer_cursor_left());
+        assert!(app.move_composer_cursor_left());
+        assert!(app.backspace_composer());
+        assert!(app.delete_composer());
+        assert_eq!(app.composer.as_ref().unwrap().to, "ad");
+        assert_eq!(app.composer.as_ref().unwrap().to_cursor, 1);
+
+        assert!(app.composer_home());
+        assert!(!app.backspace_composer());
+        assert_eq!(app.composer.as_ref().unwrap().to_cursor, 0);
+
+        assert!(app.composer_end());
+        assert!(!app.delete_composer());
+        assert_eq!(app.composer.as_ref().unwrap().to_cursor, 2);
+    }
+
+    #[test]
+    fn test_composer_body_line_navigation_preserves_column() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        let composer = app.composer.as_mut().unwrap();
+        composer.focused = ComposeField::Body;
+        composer.body = "abcde\nxy\nwxyz".into();
+        composer.body_cursor = 5;
+
+        assert!(app.move_composer_body_line(1, 10));
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.body_cursor, 8);
+        assert_eq!(composer.body_cursor_line_column(), (1, 2));
+
+        assert!(app.move_composer_body_line(1, 10));
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.body_cursor, 13);
+        assert_eq!(composer.body_cursor_line_column(), (2, 4));
+
+        assert!(app.move_composer_body_line(-1, 10));
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.body_cursor, 8);
+        assert_eq!(composer.body_cursor_line_column(), (1, 2));
+    }
+
+    #[test]
+    fn test_composer_body_scroll_keeps_cursor_visible() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        let composer = app.composer.as_mut().unwrap();
+        composer.focused = ComposeField::Body;
+        composer.body = "one\ntwo\nthree\nfour\nfive\nsix".into();
+
+        for _ in 0..4 {
+            assert!(app.move_composer_body_line(1, 2));
+        }
+
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.body_cursor_line_column().0, 4);
+        assert_eq!(composer.body_scroll, 3);
+
+        assert!(app.move_composer_body_line(-1, 2));
+        assert_eq!(app.composer.as_ref().unwrap().body_scroll, 3);
+        assert!(app.move_composer_body_line(-1, 2));
+        assert_eq!(app.composer.as_ref().unwrap().body_scroll, 2);
+    }
+
+    #[test]
+    fn test_composer_visual_line_selection_toggles_updates_and_clears() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        let composer = app.composer.as_mut().unwrap();
+        composer.focused = ComposeField::Body;
+        composer.body = "one\ntwo\nthree".into();
+
+        assert!(app.toggle_composer_body_line_selection());
+        assert_eq!(
+            app.composer.as_ref().unwrap().body_selected_line_range(),
+            Some(0..=0)
+        );
+
+        assert!(app.move_composer_body_line(1, 5));
+        assert!(app.move_composer_body_line(1, 5));
+        assert_eq!(
+            app.composer.as_ref().unwrap().body_selected_line_range(),
+            Some(0..=2)
+        );
+
+        assert!(app.clear_composer_body_selection());
+        assert_eq!(
+            app.composer.as_ref().unwrap().body_selected_line_range(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_composer_draft_payload_preserves_edited_multiline_body() {
+        let account_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.enter_composer(account_id);
+        app.composer.as_mut().unwrap().focused = ComposeField::Body;
+
+        for ch in "Line 1".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+        assert!(app.composer_enter());
+        for ch in "Line 3".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+        assert!(app.move_composer_body_line(-1, 10));
+        app.composer_end();
+        assert!(app.composer_enter());
+        for ch in "Line 2".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+
+        let draft = app.composer_draft().unwrap();
+        assert_eq!(draft.account_id, account_id);
+        assert_eq!(draft.text_body.as_deref(), Some("Line 1\nLine 2\nLine 3"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
@@ -350,6 +350,7 @@ fn render_composer(frame: &mut Frame<'_>, app: &AppState, theme: &Theme) {
         rows[0],
         "To",
         &composer.to,
+        composer.to_cursor,
         composer.focused == ComposeField::To,
         theme,
     );
@@ -358,6 +359,7 @@ fn render_composer(frame: &mut Frame<'_>, app: &AppState, theme: &Theme) {
         rows[1],
         "Cc",
         &composer.cc,
+        composer.cc_cursor,
         composer.focused == ComposeField::Cc,
         theme,
     );
@@ -366,6 +368,7 @@ fn render_composer(frame: &mut Frame<'_>, app: &AppState, theme: &Theme) {
         rows[2],
         "Bcc",
         &composer.bcc,
+        composer.bcc_cursor,
         composer.focused == ComposeField::Bcc,
         theme,
     );
@@ -374,15 +377,15 @@ fn render_composer(frame: &mut Frame<'_>, app: &AppState, theme: &Theme) {
         rows[3],
         "Subject",
         &composer.subject,
+        composer.subject_cursor,
         composer.focused == ComposeField::Subject,
         theme,
     );
-    render_composer_field(
+    render_composer_body(
         frame,
         rows[4],
-        "Body",
-        &composer.body,
         composer.focused == ComposeField::Body,
+        composer,
         theme,
     );
     render_status(frame, root[1], app, theme);
@@ -393,6 +396,7 @@ fn render_composer_field(
     area: Rect,
     title: &'static str,
     text: &str,
+    cursor: usize,
     active: bool,
     theme: &Theme,
 ) {
@@ -401,6 +405,68 @@ fn render_composer_field(
         .style(theme.text)
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
+    if active {
+        set_cursor_in_area(frame, area, cursor.min(text.chars().count()), 0);
+    }
+}
+
+fn render_composer_body(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    active: bool,
+    composer: &super::app::ComposerState,
+    theme: &Theme,
+) {
+    let viewport_height = area.height.saturating_sub(2) as usize;
+    let lines = composer.body_lines();
+    let line_count = lines.len().max(1);
+    let scroll = composer.body_visible_scroll(viewport_height);
+    let (cursor_line, cursor_column) = composer.body_cursor_line_column();
+    let selection = composer.body_selected_line_range();
+    let visual_indicator = if selection.is_some() { " • VIS" } else { "" };
+    let title = format!(
+        "Body Ln {}/{}{}",
+        cursor_line.saturating_add(1).min(line_count),
+        line_count,
+        visual_indicator
+    );
+    let visible_lines = lines
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(viewport_height.max(1))
+        .map(|(line_index, line)| {
+            if selection
+                .as_ref()
+                .is_some_and(|range| range.contains(&line_index))
+            {
+                let visible = if line.is_empty() { " " } else { line };
+                Line::styled(visible.to_string(), theme.selection)
+            } else {
+                Line::raw((*line).to_string())
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let paragraph = Paragraph::new(visible_lines)
+        .block(pane_block_owned(title, active, theme))
+        .style(theme.text);
+    frame.render_widget(paragraph, area);
+
+    if active && cursor_line >= scroll {
+        set_cursor_in_area(frame, area, cursor_column, cursor_line - scroll);
+    }
+}
+
+fn set_cursor_in_area(frame: &mut Frame<'_>, area: Rect, column: usize, row: usize) {
+    let inner_width = area.width.saturating_sub(2);
+    let inner_height = area.height.saturating_sub(2);
+    if inner_width == 0 || inner_height == 0 {
+        return;
+    }
+    let x = area.x + 1 + (column as u16).min(inner_width - 1);
+    let y = area.y + 1 + (row as u16).min(inner_height - 1);
+    frame.set_cursor_position(Position::new(x, y));
 }
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
@@ -411,7 +477,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
         ),
         InputMode::Compose => (
             format!(
-                " {} | Tab/↑/↓ fields • Enter next/newline • Ctrl-S save • Ctrl-X send • Esc cancel ",
+                " {} | Tab fields • arrows/Home/End edit • Enter next/newline • PgUp/PgDn body • v select • Ctrl-S save • Ctrl-X send • Esc cancel ",
                 app.status
             ),
             theme.command,
@@ -441,6 +507,10 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
 }
 
 fn pane_block(title: &'static str, active: bool, theme: &Theme) -> Block<'static> {
+    pane_block_owned(title.to_string(), active, theme)
+}
+
+fn pane_block_owned(title: String, active: bool, theme: &Theme) -> Block<'static> {
     let chrome = if active {
         theme.active_pane
     } else {
@@ -733,5 +803,38 @@ mod tests {
         assert!(text.contains("Ctrl-S save"));
         assert!(!text.contains("Accounts"));
         assert!(!text.contains("Messages"));
+    }
+
+    #[test]
+    fn test_render_long_composer_body_scroll_indicator_cursor_and_selection() {
+        let mut app = AppState::default();
+        app.set_theme(ThemeName::HighContrast);
+        app.enter_composer(Uuid::new_v4());
+        let composer = app.composer.as_mut().unwrap();
+        composer.focused = ComposeField::Body;
+        composer.body = (1..=20)
+            .map(|line| format!("body line {line:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        composer.body_cursor = composer.body_line_start(15);
+        composer.body_scroll = 13;
+        composer.body_selection_anchor = Some(15);
+        composer.body_selection_focus = 16;
+
+        let buffer = render_to_buffer(&app);
+        let text = buffer_text(&buffer);
+
+        assert!(text.contains("Body Ln 16/20"));
+        assert!(text.contains("VIS"));
+        assert!(text.contains("body line 14"));
+        assert!(text.contains("body line 16"));
+        assert!(text.contains("body line 17"));
+        assert!(!text.contains("body line 01"));
+        assert!(text.contains("PgUp/PgDn"));
+        assert!(text.contains("v select"));
+
+        let selected = buffer.cell((1, 17)).unwrap().style();
+        assert_eq!(selected.fg, Some(Color::Black));
+        assert_eq!(selected.bg, Some(Color::Yellow));
     }
 }

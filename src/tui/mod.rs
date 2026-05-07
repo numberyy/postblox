@@ -22,6 +22,8 @@ use app::{ActivePane, AppState, InputMode, FLAGGED_FLAG, SEEN_FLAG};
 use command::{parse_command, Command};
 use ipc::MailboxClient;
 
+const COMPOSER_BODY_KEY_VIEWPORT_LINES: usize = 3;
+
 #[derive(Debug, Error)]
 pub enum TuiError {
     #[error("unable to connect to daemon socket {path}: {source}")]
@@ -399,6 +401,11 @@ async fn handle_composer_key<C: Mailbox + ?Sized>(
         return false;
     }
 
+    let composer_body_focused = app
+        .composer
+        .as_ref()
+        .is_some_and(|composer| composer.focused == app::ComposeField::Body);
+
     match key.code {
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             save_composer(app, client).await;
@@ -409,7 +416,9 @@ async fn handle_composer_key<C: Mailbox + ?Sized>(
             false
         }
         KeyCode::Esc => {
-            if app.composer_needs_discard_confirmation() {
+            if app.clear_composer_body_selection() {
+                app.set_status("Body selection cleared");
+            } else if app.composer_needs_discard_confirmation() {
                 app.begin_discard_composer_confirmation();
             } else {
                 app.exit_composer();
@@ -417,12 +426,86 @@ async fn handle_composer_key<C: Mailbox + ?Sized>(
             }
             false
         }
-        KeyCode::Tab | KeyCode::Down => {
+        KeyCode::Tab => {
             app.next_composer_field();
             false
         }
-        KeyCode::BackTab | KeyCode::Up => {
+        KeyCode::BackTab => {
             app.previous_composer_field();
+            false
+        }
+        KeyCode::Down => {
+            if composer_body_focused {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    app.start_composer_body_line_selection();
+                }
+                app.move_composer_body_line(1, COMPOSER_BODY_KEY_VIEWPORT_LINES);
+            } else {
+                app.next_composer_field();
+            }
+            false
+        }
+        KeyCode::Up => {
+            if composer_body_focused {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    app.start_composer_body_line_selection();
+                }
+                app.move_composer_body_line(-1, COMPOSER_BODY_KEY_VIEWPORT_LINES);
+            } else {
+                app.previous_composer_field();
+            }
+            false
+        }
+        KeyCode::PageDown => {
+            if composer_body_focused {
+                app.move_composer_body_line(
+                    COMPOSER_BODY_KEY_VIEWPORT_LINES as isize,
+                    COMPOSER_BODY_KEY_VIEWPORT_LINES,
+                );
+            }
+            false
+        }
+        KeyCode::PageUp => {
+            if composer_body_focused {
+                app.move_composer_body_line(
+                    -(COMPOSER_BODY_KEY_VIEWPORT_LINES as isize),
+                    COMPOSER_BODY_KEY_VIEWPORT_LINES,
+                );
+            }
+            false
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if composer_body_focused {
+                app.move_composer_body_line(
+                    COMPOSER_BODY_KEY_VIEWPORT_LINES as isize,
+                    COMPOSER_BODY_KEY_VIEWPORT_LINES,
+                );
+            }
+            false
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if composer_body_focused {
+                app.move_composer_body_line(
+                    -(COMPOSER_BODY_KEY_VIEWPORT_LINES as isize),
+                    COMPOSER_BODY_KEY_VIEWPORT_LINES,
+                );
+            }
+            false
+        }
+        KeyCode::Left => {
+            app.move_composer_cursor_left();
+            false
+        }
+        KeyCode::Right => {
+            app.move_composer_cursor_right();
+            false
+        }
+        KeyCode::Home => {
+            app.composer_home();
+            false
+        }
+        KeyCode::End => {
+            app.composer_end();
             false
         }
         KeyCode::Enter => {
@@ -436,6 +519,16 @@ async fn handle_composer_key<C: Mailbox + ?Sized>(
         }
         KeyCode::Backspace => {
             app.backspace_composer();
+            false
+        }
+        KeyCode::Delete => {
+            app.delete_composer();
+            false
+        }
+        KeyCode::Char('v')
+            if composer_body_focused && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            app.toggle_composer_body_line_selection();
             false
         }
         KeyCode::Char(ch) => {
@@ -1924,6 +2017,152 @@ mod tests {
         assert_eq!(client.calls.len(), 2);
         assert!(matches!(client.calls[0], Call::CreateDraft(_)));
         assert!(matches!(client.calls[1], Call::UpdateDraft(id, _) if id == draft_id));
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_composer_arrows_insert_and_delete_at_cursor() {
+        let account_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.enter_composer(account_id);
+        let mut client = MockMailbox::default();
+
+        for ch in "abc".chars() {
+            assert!(
+                !handle_key(
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    &mut app,
+                    &mut client,
+                )
+                .await
+            );
+        }
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.to, "aX");
+        assert_eq!(composer.to_cursor, 2);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_composer_body_page_selection_and_escape() {
+        let account_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.enter_composer(account_id);
+        let composer = app.composer.as_mut().unwrap();
+        composer.focused = app::ComposeField::Body;
+        composer.body = "one\ntwo\nthree\nfour\nfive".into();
+        composer.dirty = true;
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(
+            app.composer.as_ref().unwrap().body_cursor_line_column().0,
+            3
+        );
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(
+            app.composer.as_ref().unwrap().body_selected_line_range(),
+            Some(3..=3)
+        );
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(
+            app.composer.as_ref().unwrap().body_selected_line_range(),
+            Some(2..=3)
+        );
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(
+            app.composer.as_ref().unwrap().body_selected_line_range(),
+            None
+        );
+        assert_eq!(app.mode, InputMode::Compose);
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert_eq!(app.mode, InputMode::ConfirmDiscard);
     }
 
     #[tokio::test]
