@@ -15,6 +15,9 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::TlsConnector;
 use tokio_util::sync::CancellationToken;
 
+use crate::auth::{CredentialKind, MailCredential};
+use crate::oauth::google::xoauth2_sasl_string;
+
 use super::error::ImapError;
 
 /// A connected, authenticated IMAP session. Generic over the transport
@@ -92,6 +95,17 @@ pub async fn connect<C: Connector>(
     username: &str,
     password: &str,
 ) -> Result<Session<C::Stream>, ImapError> {
+    let credential = MailCredential::password(password);
+    connect_with_credential(connector, host, port, username, &credential).await
+}
+
+pub async fn connect_with_credential<C: Connector>(
+    connector: &C,
+    host: &str,
+    port: u16,
+    username: &str,
+    credential: &MailCredential,
+) -> Result<Session<C::Stream>, ImapError> {
     let stream = connector.connect(host, port).await?;
     let mut client = async_imap::Client::new(stream);
     let greeting = client
@@ -100,10 +114,35 @@ pub async fn connect<C: Connector>(
         .map_err(ImapError::from)?
         .ok_or_else(|| ImapError::Protocol("server closed connection before greeting".into()))?;
     drop(greeting);
-    client
-        .login(username, password)
-        .await
-        .map_err(|(e, _)| ImapError::from(e))
+    match credential.kind() {
+        CredentialKind::Password => client
+            .login(username, credential.secret())
+            .await
+            .map_err(|(e, _)| ImapError::from(e)),
+        CredentialKind::OAuth2Bearer => {
+            let auth = Xoauth2 {
+                username,
+                access_token: credential.secret(),
+            };
+            client
+                .authenticate("XOAUTH2", auth)
+                .await
+                .map_err(|(e, _)| ImapError::from(e))
+        }
+    }
+}
+
+struct Xoauth2<'a> {
+    username: &'a str,
+    access_token: &'a str,
+}
+
+impl async_imap::Authenticator for Xoauth2<'_> {
+    type Response = String;
+
+    fn process(&mut self, _: &[u8]) -> Self::Response {
+        xoauth2_sasl_string(self.username, self.access_token)
+    }
 }
 
 /// Fetch the list of mailboxes on the server. Equivalent to `LIST "" "*"`.
@@ -174,7 +213,7 @@ pub struct IdleRequest<'a> {
     pub host: &'a str,
     pub port: u16,
     pub username: &'a str,
-    pub password: &'a str,
+    pub credential: &'a MailCredential,
     pub folder: &'a str,
     pub timeout: Duration,
     pub cancel: CancellationToken,
@@ -269,12 +308,12 @@ pub async fn wait_for_idle_change<C: Connector>(
         host,
         port,
         username,
-        password,
+        credential,
         folder,
         timeout,
         cancel,
     } = request;
-    let mut session = connect(connector, host, port, username, password).await?;
+    let mut session = connect_with_credential(connector, host, port, username, credential).await?;
     let capabilities = session.capabilities().await.map_err(ImapError::from)?;
     let supports_idle = capabilities
         .iter()
@@ -324,6 +363,18 @@ mod tests {
             selectable: true,
         };
         assert_eq!(f.name, "INBOX");
+    }
+
+    #[test]
+    fn test_xoauth2_authenticator_returns_sasl_payload() {
+        let mut auth = Xoauth2 {
+            username: "me@example.com",
+            access_token: "token",
+        };
+        assert_eq!(
+            async_imap::Authenticator::process(&mut auth, b""),
+            "user=me@example.com\x01auth=Bearer token\x01\x01"
+        );
     }
 
     #[tokio::test]

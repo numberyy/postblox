@@ -9,13 +9,97 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
+use crate::auth::MailCredential;
 use crate::db;
-use crate::imap::{self, ImapAuth, ImapSync};
+use crate::imap::{self, ImapAuth, ImapIdle, ImapSync};
 use crate::ipc::{Dispatcher, Hub, RpcError, Topic};
-use crate::models::{ApprovalState, FolderRole, GateAction};
+use crate::models::{Account, ApprovalState, AuthKind, FolderRole, GateAction};
+use crate::oauth::google::{
+    self, GoogleOAuth, GoogleOAuthConfig, GoogleOAuthError, GoogleOAuthHttpClient,
+};
 use crate::secrets::SecretStore;
 use crate::smtp::{self, SmtpError, SmtpServer, SmtpSubmitRequest, SmtpSubmitter};
 use crate::sync;
+
+#[derive(Clone)]
+pub struct DaemonServices {
+    smtp: Arc<dyn SmtpSubmitter>,
+    oauth: Arc<dyn GoogleOAuth>,
+}
+
+impl DaemonServices {
+    pub fn new(smtp: Arc<dyn SmtpSubmitter>, oauth: Arc<dyn GoogleOAuth>) -> Self {
+        Self { smtp, oauth }
+    }
+
+    pub fn with_smtp(smtp: Arc<dyn SmtpSubmitter>) -> Self {
+        Self::new(smtp, Arc::new(GoogleOAuthHttpClient::new()))
+    }
+}
+
+impl Default for DaemonServices {
+    fn default() -> Self {
+        Self::with_smtp(Arc::new(smtp::LettreSmtpSubmitter::new()))
+    }
+}
+
+struct DaemonCredentialResolver {
+    pool: SqlitePool,
+    secrets: Arc<dyn SecretStore>,
+    oauth: Arc<dyn GoogleOAuth>,
+}
+
+#[async_trait::async_trait]
+impl sync::WorkerCredentialResolver for DaemonCredentialResolver {
+    async fn resolve(&self, account_id: uuid::Uuid) -> Result<MailCredential, sync::SyncError> {
+        let account = db::accounts::get(&self.pool, account_id)
+            .await?
+            .ok_or(sync::SyncError::UnknownAccount)?;
+        credential_for_account(self.secrets.as_ref(), self.oauth.as_ref(), &account)
+            .await
+            .map_err(|err| {
+                if err.code == "missing_secret" {
+                    sync::SyncError::MissingCredentials
+                } else {
+                    sync::SyncError::Credential(format!("{}: {}", err.code, err.message))
+                }
+            })
+    }
+}
+
+fn daemon_credential_resolver(
+    pool: &SqlitePool,
+    secrets: &Arc<dyn SecretStore>,
+    oauth: &Arc<dyn GoogleOAuth>,
+) -> Arc<dyn sync::WorkerCredentialResolver> {
+    Arc::new(DaemonCredentialResolver {
+        pool: pool.clone(),
+        secrets: secrets.clone(),
+        oauth: oauth.clone(),
+    })
+}
+
+pub fn worker_manager_with_idle_config(
+    pool: &SqlitePool,
+    hub: &Arc<Hub>,
+    imap_sync: Arc<dyn ImapSync>,
+    idle: Option<Arc<dyn ImapIdle>>,
+    secrets: &Arc<dyn SecretStore>,
+    services: &DaemonServices,
+    config: sync::WorkerConfig,
+) -> Arc<sync::WorkerManager> {
+    let credential_resolver = daemon_credential_resolver(pool, secrets, &services.oauth);
+    Arc::new(
+        sync::WorkerManager::with_idle_config_and_credential_resolver(
+            pool.clone(),
+            hub.clone(),
+            imap_sync,
+            idle,
+            config,
+            credential_resolver,
+        ),
+    )
+}
 
 #[derive(Clone)]
 pub struct DaemonDispatcher {
@@ -24,6 +108,7 @@ pub struct DaemonDispatcher {
     imap: Arc<dyn ImapAuth>,
     imap_sync: Arc<dyn ImapSync>,
     secrets: Arc<dyn SecretStore>,
+    oauth: Arc<dyn GoogleOAuth>,
     smtp: Arc<dyn SmtpSubmitter>,
     worker_manager: Arc<sync::WorkerManager>,
 }
@@ -35,14 +120,25 @@ impl DaemonDispatcher {
         let imap_sync = imap::default_sync().expect("rustls platform verifier init");
         let imap_idle = imap::default_idle().expect("rustls platform verifier init");
         let smtp = Arc::new(smtp::LettreSmtpSubmitter::new());
-        let worker_manager = Arc::new(sync::WorkerManager::with_idle_config(
-            pool.clone(),
-            hub.clone(),
+        let services = DaemonServices::with_smtp(smtp);
+        let worker_manager = worker_manager_with_idle_config(
+            &pool,
+            &hub,
             imap_sync.clone(),
             Some(imap_idle),
+            &secrets,
+            &services,
             sync::WorkerConfig::default(),
-        ));
-        Self::with_imap_smtp_and_manager(pool, hub, imap, imap_sync, secrets, smtp, worker_manager)
+        );
+        Self::with_imap_smtp_oauth_and_manager(
+            pool,
+            hub,
+            imap,
+            imap_sync,
+            secrets,
+            services,
+            worker_manager,
+        )
     }
 
     /// Test/customisation constructor: bring your own IMAP impls.
@@ -65,12 +161,25 @@ impl DaemonDispatcher {
         secrets: Arc<dyn SecretStore>,
         smtp: Arc<dyn SmtpSubmitter>,
     ) -> Self {
-        let worker_manager = Arc::new(sync::WorkerManager::new(
-            pool.clone(),
-            hub.clone(),
+        let services = DaemonServices::with_smtp(smtp);
+        let worker_manager = worker_manager_with_idle_config(
+            &pool,
+            &hub,
             imap_sync.clone(),
-        ));
-        Self::with_imap_smtp_and_manager(pool, hub, imap, imap_sync, secrets, smtp, worker_manager)
+            None,
+            &secrets,
+            &services,
+            sync::WorkerConfig::default(),
+        );
+        Self::with_imap_smtp_oauth_and_manager(
+            pool,
+            hub,
+            imap,
+            imap_sync,
+            secrets,
+            services,
+            worker_manager,
+        )
     }
 
     pub fn with_imap_and_sync_config(
@@ -94,13 +203,54 @@ impl DaemonDispatcher {
         smtp: Arc<dyn SmtpSubmitter>,
         worker_config: sync::WorkerConfig,
     ) -> Self {
-        let worker_manager = Arc::new(sync::WorkerManager::with_config(
-            pool.clone(),
-            hub.clone(),
+        let services = DaemonServices::with_smtp(smtp);
+        let worker_manager = worker_manager_with_idle_config(
+            &pool,
+            &hub,
             imap_sync.clone(),
+            None,
+            &secrets,
+            &services,
             worker_config,
-        ));
-        Self::with_imap_smtp_and_manager(pool, hub, imap, imap_sync, secrets, smtp, worker_manager)
+        );
+        Self::with_imap_smtp_oauth_and_manager(
+            pool,
+            hub,
+            imap,
+            imap_sync,
+            secrets,
+            services,
+            worker_manager,
+        )
+    }
+
+    pub fn with_imap_sync_smtp_oauth_config(
+        pool: SqlitePool,
+        hub: Arc<Hub>,
+        imap: Arc<dyn ImapAuth>,
+        imap_sync: Arc<dyn ImapSync>,
+        secrets: Arc<dyn SecretStore>,
+        services: DaemonServices,
+        worker_config: sync::WorkerConfig,
+    ) -> Self {
+        let worker_manager = worker_manager_with_idle_config(
+            &pool,
+            &hub,
+            imap_sync.clone(),
+            None,
+            &secrets,
+            &services,
+            worker_config,
+        );
+        Self::with_imap_smtp_oauth_and_manager(
+            pool,
+            hub,
+            imap,
+            imap_sync,
+            secrets,
+            services,
+            worker_manager,
+        )
     }
 
     pub fn with_imap_and_manager(
@@ -124,13 +274,35 @@ impl DaemonDispatcher {
         smtp: Arc<dyn SmtpSubmitter>,
         worker_manager: Arc<sync::WorkerManager>,
     ) -> Self {
+        let services = DaemonServices::with_smtp(smtp);
+        Self::with_imap_smtp_oauth_and_manager(
+            pool,
+            hub,
+            imap,
+            imap_sync,
+            secrets,
+            services,
+            worker_manager,
+        )
+    }
+
+    pub fn with_imap_smtp_oauth_and_manager(
+        pool: SqlitePool,
+        hub: Arc<Hub>,
+        imap: Arc<dyn ImapAuth>,
+        imap_sync: Arc<dyn ImapSync>,
+        secrets: Arc<dyn SecretStore>,
+        services: DaemonServices,
+        worker_manager: Arc<sync::WorkerManager>,
+    ) -> Self {
         Self {
             pool,
             hub,
             imap,
             imap_sync,
             secrets,
-            smtp,
+            oauth: services.oauth,
+            smtp: services.smtp,
             worker_manager,
         }
     }
@@ -172,12 +344,26 @@ impl Dispatcher for DaemonDispatcher {
             "draft.update" => op_draft_update(&self.pool, args).await,
             "draft.delete" => op_draft_delete(&self.pool, args).await,
             "message.send" => {
-                op_message_send(&self.pool, self.secrets.as_ref(), self.smtp.as_ref(), args).await
+                op_message_send(
+                    &self.pool,
+                    self.secrets.as_ref(),
+                    self.oauth.as_ref(),
+                    self.smtp.as_ref(),
+                    args,
+                )
+                .await
             }
 
             // -- network ops --
             "account.test_login" => {
-                op_account_test_login(&self.pool, self.imap.as_ref(), args).await
+                op_account_test_login(
+                    &self.pool,
+                    self.imap.as_ref(),
+                    self.secrets.as_ref(),
+                    self.oauth.as_ref(),
+                    args,
+                )
+                .await
             }
             "account.sync_folder" => {
                 op_account_sync_folder(
@@ -185,6 +371,7 @@ impl Dispatcher for DaemonDispatcher {
                     &self.hub,
                     self.imap_sync.as_ref(),
                     self.secrets.as_ref(),
+                    self.oauth.as_ref(),
                     args,
                 )
                 .await
@@ -193,6 +380,7 @@ impl Dispatcher for DaemonDispatcher {
                 op_account_start_sync(
                     &self.pool,
                     self.secrets.as_ref(),
+                    self.oauth.as_ref(),
                     self.worker_manager.as_ref(),
                     args,
                 )
@@ -208,6 +396,18 @@ impl Dispatcher for DaemonDispatcher {
             }
             "account.delete_secret" => {
                 op_account_delete_secret(&self.pool, self.secrets.as_ref(), args).await
+            }
+
+            // -- OAuth ops --
+            "oauth.google.auth_url" => op_oauth_google_auth_url(&self.pool, args).await,
+            "oauth.google.complete" => {
+                op_oauth_google_complete(
+                    &self.pool,
+                    self.secrets.as_ref(),
+                    self.oauth.as_ref(),
+                    args,
+                )
+                .await
             }
 
             other => Err(RpcError::unknown_op(other)),
@@ -595,6 +795,7 @@ async fn op_draft_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
 async fn op_message_send(
     pool: &SqlitePool,
     secrets: &dyn SecretStore,
+    oauth: &dyn GoogleOAuth,
     smtp: &dyn SmtpSubmitter,
     args: Value,
 ) -> Result<Value, RpcError> {
@@ -621,11 +822,7 @@ async fn op_message_send(
     let smtp_port =
         u16::try_from(account.smtp_port).map_err(|_| RpcError::bad_args("bad smtp_port"))?;
 
-    let secret = secrets
-        .get(account_id)
-        .await
-        .map_err(|e| RpcError::internal(format!("secrets::get: {e}")))?
-        .ok_or_else(|| RpcError::new("missing_secret", "no stored secret for account"))?;
+    let credential = credential_for_account(secrets, oauth, &account).await?;
 
     let message_id = format!("<{}@postblox.local>", uuid::Uuid::new_v4());
     let subject = draft.subject.clone().unwrap_or_default();
@@ -647,7 +844,7 @@ async fn op_message_send(
             starttls: account.smtp_starttls,
         },
         username: account.email.clone(),
-        password: secret,
+        credential,
         from: account.email.clone(),
         recipients,
         mime,
@@ -718,25 +915,33 @@ fn map_smtp_error(err: SmtpError) -> RpcError {
 async fn op_account_test_login(
     pool: &SqlitePool,
     imap: &dyn ImapAuth,
+    secrets: &dyn SecretStore,
+    oauth: &dyn GoogleOAuth,
     args: Value,
 ) -> Result<Value, RpcError> {
     let account_id = parse_uuid(&args, "account_id")?;
-    let password = args
-        .get("password")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| RpcError::bad_args("missing 'password'"))?;
 
     let account = db::accounts::get(pool, account_id)
         .await
         .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
         .ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
+    let credential = match account.auth_kind {
+        AuthKind::Password => {
+            let password = args
+                .get("password")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| RpcError::bad_args("missing 'password'"))?;
+            MailCredential::password(password)
+        }
+        AuthKind::OAuth2Google => credential_for_account(secrets, oauth, &account).await?,
+    };
 
     let folders = imap
         .test_login(
             &account.imap_host,
             account.imap_port as u16,
             &account.email,
-            password,
+            &credential,
         )
         .await
         .map_err(|e| match e {
@@ -794,6 +999,7 @@ async fn op_account_sync_folder(
     hub: &Arc<Hub>,
     imap_sync: &dyn ImapSync,
     secrets: &dyn SecretStore,
+    oauth: &dyn GoogleOAuth,
     args: Value,
 ) -> Result<Value, RpcError> {
     let account_id = parse_uuid(&args, "account_id")?;
@@ -802,13 +1008,13 @@ async fn op_account_sync_folder(
         .and_then(|v| v.as_str())
         .ok_or_else(|| RpcError::bad_args("missing 'folder_name'"))?;
 
-    let secret = secrets
-        .get(account_id)
+    let account = db::accounts::get(pool, account_id)
         .await
-        .map_err(|e| RpcError::internal(format!("secrets::get: {e}")))?
-        .ok_or_else(|| RpcError::new("missing_secret", "no stored secret for account"))?;
+        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
+    let credential = credential_for_account(secrets, oauth, &account).await?;
 
-    let report = sync::reconcile_folder(pool, hub, imap_sync, account_id, folder_name, &secret)
+    let report = sync::reconcile_folder(pool, hub, imap_sync, account_id, folder_name, &credential)
         .await
         .map_err(|e| match e {
             sync::SyncError::Imap(crate::imap::ImapError::Auth(m)) => {
@@ -840,6 +1046,7 @@ async fn op_account_sync_folder(
 async fn op_account_start_sync(
     pool: &SqlitePool,
     secrets: &dyn SecretStore,
+    oauth: &dyn GoogleOAuth,
     manager: &sync::WorkerManager,
     args: Value,
 ) -> Result<Value, RpcError> {
@@ -851,14 +1058,14 @@ async fn op_account_start_sync(
 
     ensure_account_folder(pool, account_id, folder_name).await?;
 
-    let secret = secrets
-        .get(account_id)
+    let account = db::accounts::get(pool, account_id)
         .await
-        .map_err(|e| RpcError::internal(format!("secrets::get: {e}")))?
-        .ok_or_else(|| RpcError::new("missing_secret", "no stored secret for account"))?;
+        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
+    let credential = credential_for_account(secrets, oauth, &account).await?;
 
     let started = manager
-        .start(account_id, folder_name.to_string(), secret)
+        .start(account_id, folder_name.to_string(), credential)
         .await;
     audit(
         pool,
@@ -937,14 +1144,20 @@ async fn op_account_set_secret(
     let account = db::accounts::get(pool, account_id)
         .await
         .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?;
-    if account.is_none() {
-        return Err(RpcError::bad_args("unknown account_id"));
+    let account = account.ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
+    if account.auth_kind != AuthKind::Password {
+        return Err(RpcError::bad_args(
+            "account.set_secret only supports password accounts",
+        ));
     }
 
     secrets
         .put(account_id, zeroize::Zeroizing::new(password.to_string()))
         .await
         .map_err(|e| RpcError::internal(format!("secrets::put: {e}")))?;
+    db::accounts::set_secret_ref(pool, account_id, Some(&secrets.secret_ref(account_id)))
+        .await
+        .map_err(|e| RpcError::internal(format!("accounts::set_secret_ref: {e}")))?;
 
     audit(
         pool,
@@ -966,6 +1179,9 @@ async fn op_account_delete_secret(
         .delete(account_id)
         .await
         .map_err(|e| RpcError::internal(format!("secrets::delete: {e}")))?;
+    db::accounts::set_secret_ref(pool, account_id, None)
+        .await
+        .map_err(|e| RpcError::internal(format!("accounts::set_secret_ref: {e}")))?;
     audit(
         pool,
         "account.delete_secret",
@@ -974,6 +1190,178 @@ async fn op_account_delete_secret(
     )
     .await;
     Ok(json!({"ok": true}))
+}
+
+// ---------- OAuth ops -------------------------------------------------------
+
+async fn op_oauth_google_auth_url(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let account_id = parse_uuid(&args, "account_id")?;
+    let client_id = parse_str(&args, "client_id")?;
+    let redirect_uri = parse_str(&args, "redirect_uri")?;
+    let state = parse_str(&args, "state")?;
+    ensure_oauth_google_account(pool, account_id).await?;
+    ensure_requested_scopes_are_gmail(&args)?;
+
+    let config = GoogleOAuthConfig::gmail(client_id, "", redirect_uri);
+    let url = google::authorization_url(&config, state).map_err(map_oauth_error)?;
+    audit(
+        pool,
+        "oauth.google.auth_url",
+        Some(&account_id.to_string()),
+        &json!({}),
+    )
+    .await;
+    Ok(json!({"authorization_url": url}))
+}
+
+async fn op_oauth_google_complete(
+    pool: &SqlitePool,
+    secrets: &dyn SecretStore,
+    oauth: &dyn GoogleOAuth,
+    args: Value,
+) -> Result<Value, RpcError> {
+    let account_id = parse_uuid(&args, "account_id")?;
+    let client_id = parse_str(&args, "client_id")?;
+    let client_secret = parse_str(&args, "client_secret")?;
+    let redirect_uri = parse_str(&args, "redirect_uri")?;
+    let code = parse_str(&args, "code")?;
+    let state = parse_str(&args, "state")?;
+    let expected_state = parse_str(&args, "expected_state")?;
+    if state != expected_state {
+        return Err(RpcError::bad_args(
+            "'state' does not match 'expected_state'",
+        ));
+    }
+    ensure_oauth_google_account(pool, account_id).await?;
+    ensure_requested_scopes_are_gmail(&args)?;
+
+    let config = GoogleOAuthConfig::gmail(client_id, client_secret, redirect_uri);
+    let token = oauth
+        .exchange_code(&config, code)
+        .await
+        .map_err(map_oauth_error)?;
+    let expires_at = token.expires_at;
+    let stored = google::StoredGoogleOAuth::new(config, token);
+    google::store_stored_oauth(secrets, account_id, &stored)
+        .await
+        .map_err(map_oauth_error)?;
+    db::accounts::set_secret_ref(pool, account_id, Some(&secrets.secret_ref(account_id)))
+        .await
+        .map_err(|e| RpcError::internal(format!("accounts::set_secret_ref: {e}")))?;
+
+    audit(
+        pool,
+        "oauth.google.complete",
+        Some(&account_id.to_string()),
+        &json!({}),
+    )
+    .await;
+    Ok(json!({"ok": true, "expires_at": expires_at}))
+}
+
+async fn ensure_oauth_google_account(
+    pool: &SqlitePool,
+    account_id: uuid::Uuid,
+) -> Result<(), RpcError> {
+    let account = db::accounts::get(pool, account_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
+    if account.auth_kind != AuthKind::OAuth2Google {
+        return Err(RpcError::bad_args(
+            "account auth_kind must be oauth2_google",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_requested_scopes_are_gmail(args: &Value) -> Result<(), RpcError> {
+    let Some(scopes) = parse_optional_scopes(args)? else {
+        return Ok(());
+    };
+    if scopes.len() == 1 && scopes[0] == google::GMAIL_SCOPE {
+        Ok(())
+    } else {
+        Err(RpcError::bad_args(
+            "only the Gmail OAuth scope is supported",
+        ))
+    }
+}
+
+fn parse_optional_scopes(args: &Value) -> Result<Option<Vec<String>>, RpcError> {
+    let Some(value) = args.get("scopes") else {
+        return Ok(None);
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| RpcError::bad_args("'scopes' must be an array"))?;
+    let mut scopes = Vec::with_capacity(values.len());
+    for value in values {
+        let scope = value
+            .as_str()
+            .ok_or_else(|| RpcError::bad_args("'scopes' must contain strings"))?
+            .trim();
+        if scope.is_empty() {
+            return Err(RpcError::bad_args(
+                "'scopes' must not contain empty strings",
+            ));
+        }
+        scopes.push(scope.to_string());
+    }
+    Ok(Some(scopes))
+}
+
+async fn credential_for_account(
+    secrets: &dyn SecretStore,
+    oauth: &dyn GoogleOAuth,
+    account: &Account,
+) -> Result<MailCredential, RpcError> {
+    match account.auth_kind {
+        AuthKind::Password => {
+            let secret = secrets
+                .get(account.id)
+                .await
+                .map_err(|e| RpcError::internal(format!("secrets::get: {e}")))?
+                .ok_or_else(|| RpcError::new("missing_secret", "no stored secret for account"))?;
+            Ok(MailCredential::password_secret(secret))
+        }
+        AuthKind::OAuth2Google => {
+            let mut stored = google::load_stored_oauth(secrets, account.id)
+                .await
+                .map_err(map_oauth_error)?
+                .ok_or_else(|| {
+                    RpcError::new("missing_secret", "no stored OAuth token for account")
+                })?;
+            if stored.token.needs_refresh(chrono::Utc::now()) {
+                let refreshed = oauth
+                    .refresh_token(&stored.config(), &stored.token)
+                    .await
+                    .map_err(map_oauth_error)?;
+                stored.token = refreshed;
+                google::store_stored_oauth(secrets, account.id, &stored)
+                    .await
+                    .map_err(map_oauth_error)?;
+            }
+            Ok(MailCredential::oauth2_bearer(stored.token.access_token))
+        }
+    }
+}
+
+fn map_oauth_error(err: GoogleOAuthError) -> RpcError {
+    match err {
+        GoogleOAuthError::InvalidInput(message) => RpcError::bad_args(message),
+        GoogleOAuthError::MissingRefreshToken => RpcError::new(
+            "oauth_failed",
+            "OAuth response did not include refresh token",
+        ),
+        GoogleOAuthError::HttpStatus(status) => RpcError::new(
+            "oauth_failed",
+            format!("OAuth token endpoint returned status {status}"),
+        ),
+        GoogleOAuthError::Http(err) => RpcError::internal(format!("oauth http: {err}")),
+        GoogleOAuthError::Secret(err) => RpcError::internal(format!("oauth secrets: {err}")),
+        GoogleOAuthError::Decode(err) => RpcError::internal(format!("oauth decode: {err}")),
+    }
 }
 
 // ---------- helpers ---------------------------------------------------------

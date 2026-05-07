@@ -21,4 +21,7 @@ pub enum SyncError {
 
     #[error("missing credentials for account")]
     MissingCredentials,
+
+    #[error("credential resolution failed: {0}")]
+    Credential(String),
 }

@@ -1,17 +1,19 @@
 # postblox — local-first email TUI + MCP bridge.
 #
-# This file is a placeholder; the full schema lands with phase R1
-# (SQLite + accounts) and R4 (MCP gates). For now nothing is read.
+# Only the sections below are currently read by the daemon.
 
 # Where postblox stores its SQLite DB and attachments.
 # Defaults to $XDG_DATA_HOME/postblox.
 # data_dir = "~/.local/share/postblox"
 
 # [secrets]
-# # Passphrase for the file-backed secret store (AES-256-GCM,
-# # Argon2id-derived key). Required to use account.set_secret.
-# # Will be replaced by the OS keyring backend in R5.
-# passphrase = "change me"
+# # Default: store account secrets in the OS keyring.
+# backend = "keyring"
+#
+# # Alternative file-backed secret store (AES-256-GCM,
+# # Argon2id-derived key). Requires a non-empty passphrase.
+# # backend = "file"
+# # passphrase = "change me"
 # # Optional: override where the encrypted secrets file lives.
 # # Defaults to <data_dir>/secrets.bin.
 # # path = "~/.local/share/postblox/secrets.bin"

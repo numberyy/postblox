@@ -7,9 +7,9 @@ use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::auth::MailCredential;
 use crate::imap::{IdleOutcome, IdleRequest, ImapError, ImapIdle, ImapSync};
 use crate::ipc::Hub;
-use crate::secrets::Secret;
 
 use super::{reconcile_folder, SyncError};
 
@@ -32,6 +32,43 @@ impl Default for WorkerConfig {
     }
 }
 
+#[async_trait::async_trait]
+pub trait WorkerCredentialResolver: Send + Sync {
+    async fn resolve(&self, account_id: Uuid) -> Result<MailCredential, SyncError>;
+}
+
+#[derive(Clone)]
+pub(crate) enum WorkerCredentialSource {
+    Static(MailCredential),
+    Dynamic {
+        account_id: Uuid,
+        resolver: Arc<dyn WorkerCredentialResolver>,
+    },
+}
+
+impl WorkerCredentialSource {
+    pub(crate) fn static_credential(credential: MailCredential) -> Self {
+        Self::Static(credential)
+    }
+
+    pub(crate) fn dynamic(account_id: Uuid, resolver: Arc<dyn WorkerCredentialResolver>) -> Self {
+        Self::Dynamic {
+            account_id,
+            resolver,
+        }
+    }
+
+    async fn resolve(&self) -> Result<MailCredential, SyncError> {
+        match self {
+            Self::Static(credential) => Ok(credential.clone()),
+            Self::Dynamic {
+                account_id,
+                resolver,
+            } => resolver.resolve(*account_id).await,
+        }
+    }
+}
+
 pub(crate) struct SyncWorker {
     pub(crate) pool: SqlitePool,
     pub(crate) hub: Arc<Hub>,
@@ -39,7 +76,7 @@ pub(crate) struct SyncWorker {
     pub(crate) idle: Option<Arc<dyn ImapIdle>>,
     pub(crate) account_id: Uuid,
     pub(crate) folder_name: String,
-    pub(crate) secret: Secret,
+    pub(crate) credential: WorkerCredentialSource,
     pub(crate) cancel: CancellationToken,
     pub(crate) config: WorkerConfig,
 }
@@ -50,7 +87,7 @@ pub(crate) struct PollingWorker {
     pub(crate) imap: Arc<dyn ImapSync>,
     pub(crate) account_id: Uuid,
     pub(crate) folder_name: String,
-    pub(crate) secret: Secret,
+    pub(crate) credential: WorkerCredentialSource,
     pub(crate) cancel: CancellationToken,
     pub(crate) config: WorkerConfig,
 }
@@ -62,7 +99,7 @@ pub(crate) async fn run_polling_worker(worker: PollingWorker) {
         imap,
         account_id,
         folder_name,
-        secret,
+        credential,
         cancel,
         config,
     } = worker;
@@ -73,6 +110,22 @@ pub(crate) async fn run_polling_worker(worker: PollingWorker) {
             return;
         }
 
+        let cycle_credential = match credential_for_cycle(
+            &credential,
+            account_id,
+            &folder_name,
+            &cancel,
+            config,
+            &mut backoff,
+            "sync worker",
+        )
+        .await
+        {
+            CredentialCycle::Ready(credential) => credential,
+            CredentialCycle::Retry => continue,
+            CredentialCycle::Stop => return,
+        };
+
         let result = tokio::select! {
             _ = cancel.cancelled() => return,
             result = reconcile_folder(
@@ -81,7 +134,7 @@ pub(crate) async fn run_polling_worker(worker: PollingWorker) {
                 imap.as_ref(),
                 account_id,
                 &folder_name,
-                &secret,
+                &cycle_credential,
             ) => result,
         };
 
@@ -133,7 +186,7 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
         idle,
         account_id,
         folder_name,
-        secret,
+        credential,
         cancel,
         config,
     } = worker;
@@ -145,7 +198,7 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
             imap,
             account_id,
             folder_name,
-            secret,
+            credential,
             cancel,
             config,
         })
@@ -159,6 +212,22 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
             return;
         }
 
+        let cycle_credential = match credential_for_cycle(
+            &credential,
+            account_id,
+            &folder_name,
+            &cancel,
+            config,
+            &mut backoff,
+            "idle sync worker",
+        )
+        .await
+        {
+            CredentialCycle::Ready(credential) => credential,
+            CredentialCycle::Retry => continue,
+            CredentialCycle::Stop => return,
+        };
+
         let reconcile = tokio::select! {
             _ = cancel.cancelled() => return,
             result = reconcile_folder(
@@ -167,7 +236,7 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
                 imap.as_ref(),
                 account_id,
                 &folder_name,
-                &secret,
+                &cycle_credential,
             ) => result,
         };
 
@@ -231,7 +300,7 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
                 host: &account.imap_host,
                 port: account.imap_port as u16,
                 username: &account.email,
-                password: &secret,
+                credential: &cycle_credential,
                 folder: &folder_name,
                 timeout: config.idle_timeout,
                 cancel: cancel.clone(),
@@ -255,7 +324,7 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
                     imap,
                     account_id,
                     folder_name,
-                    secret,
+                    credential,
                     cancel,
                     config,
                 })
@@ -303,6 +372,54 @@ async fn sleep_or_cancel(duration: Duration, cancel: &CancellationToken) -> bool
     tokio::select! {
         _ = cancel.cancelled() => true,
         _ = tokio::time::sleep(duration) => false,
+    }
+}
+
+enum CredentialCycle {
+    Ready(MailCredential),
+    Retry,
+    Stop,
+}
+
+async fn credential_for_cycle(
+    source: &WorkerCredentialSource,
+    account_id: Uuid,
+    folder_name: &str,
+    cancel: &CancellationToken,
+    config: WorkerConfig,
+    backoff: &mut Duration,
+    worker_label: &'static str,
+) -> CredentialCycle {
+    let result = tokio::select! {
+        _ = cancel.cancelled() => return CredentialCycle::Stop,
+        result = source.resolve() => result,
+    };
+
+    match result {
+        Ok(credential) => CredentialCycle::Ready(credential),
+        Err(err) if is_auth_error(&err) => {
+            tracing::warn!(
+                %account_id,
+                folder_name = %folder_name,
+                error = %err,
+                "{worker_label} stopped after credential failure"
+            );
+            CredentialCycle::Stop
+        }
+        Err(err) => {
+            tracing::warn!(
+                %account_id,
+                folder_name = %folder_name,
+                error = %err,
+                retry_in_ms = backoff.as_millis(),
+                "{worker_label} credential resolution failed; retrying"
+            );
+            if sleep_or_cancel(*backoff, cancel).await {
+                return CredentialCycle::Stop;
+            }
+            *backoff = next_backoff(*backoff, config.max_backoff);
+            CredentialCycle::Retry
+        }
     }
 }
 
@@ -354,10 +471,11 @@ mod tests {
             _: &str,
             _: u16,
             _: &str,
-            _: &str,
+            credential: &MailCredential,
             _: &str,
             _: u32,
         ) -> Result<FolderSync, ImapError> {
+            assert_eq!(credential.secret(), "right");
             self.calls.fetch_add(1, Ordering::SeqCst);
             match self
                 .outcomes
@@ -498,7 +616,9 @@ mod tests {
             imap,
             account_id,
             folder_name: "INBOX".into(),
-            secret: zeroize::Zeroizing::new("right".to_string()),
+            credential: WorkerCredentialSource::static_credential(MailCredential::password(
+                "right",
+            )),
             cancel: cancel.clone(),
             config,
         }));
@@ -522,7 +642,9 @@ mod tests {
             idle: Some(idle_trait),
             account_id,
             folder_name: "INBOX".into(),
-            secret: zeroize::Zeroizing::new("right".to_string()),
+            credential: WorkerCredentialSource::static_credential(MailCredential::password(
+                "right",
+            )),
             cancel: cancel.clone(),
             config,
         }));

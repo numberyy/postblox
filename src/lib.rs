@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod config;
 pub mod daemon;
 pub mod db;
@@ -7,6 +8,7 @@ pub mod ipc;
 pub mod mail;
 pub mod mcp;
 pub mod models;
+pub mod oauth;
 pub mod secrets;
 pub mod smtp;
 pub mod sync;

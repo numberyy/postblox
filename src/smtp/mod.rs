@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use lettre::address::{Address, Envelope};
-use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use thiserror::Error;
 
-use crate::secrets::Secret;
+use crate::auth::{CredentialKind, MailCredential};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmtpServer {
@@ -19,7 +19,7 @@ pub struct SmtpServer {
 pub struct SmtpSubmitRequest {
     pub server: SmtpServer,
     pub username: String,
-    pub password: Secret,
+    pub credential: MailCredential,
     pub from: String,
     pub recipients: Vec<String>,
     pub mime: Vec<u8>,
@@ -113,12 +113,18 @@ fn build_transport(
         SmtpSecurity::None => Some(Tls::None),
     };
 
-    let credentials = Credentials::new(request.username.clone(), request.password.to_string());
+    let credentials = Credentials::new(
+        request.username.clone(),
+        request.credential.secret().to_string(),
+    );
     let mut builder =
         AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(request.server.host.clone())
             .port(request.server.port)
             .timeout(Some(Duration::from_secs(30)))
             .credentials(credentials);
+    if request.credential.kind() == CredentialKind::OAuth2Bearer {
+        builder = builder.authentication(vec![Mechanism::Xoauth2]);
+    }
 
     if let Some(tls) = tls {
         builder = builder.tls(tls);

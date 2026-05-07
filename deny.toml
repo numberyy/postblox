@@ -1,10 +1,7 @@
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+unmaintained = "none"
 
 [licenses]
-unlicensed = "deny"
-copyleft = "deny"
 allow = [
     "MIT",
     "Apache-2.0",
@@ -14,6 +11,13 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Unicode-DFS-2016",
+]
+exceptions = [
+    { crate = "foldhash@0.1.5", allow = ["Zlib"] },
+    { crate = "option-ext@0.2.0", allow = ["MPL-2.0"] },
+    { crate = "quoted_printable@0.5.2", allow = ["0BSD"] },
+    { crate = "webpki-root-certs@1.0.7", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "webpki-roots@1.0.7", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [bans]

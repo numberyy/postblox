@@ -10,12 +10,11 @@ use anyhow::Context;
 use tokio::signal;
 
 use postblox::config;
-use postblox::daemon::DaemonDispatcher;
+use postblox::daemon::{worker_manager_with_idle_config, DaemonDispatcher, DaemonServices};
 use postblox::db;
 use postblox::imap;
 use postblox::ipc::{default_socket_path, listen, Hub};
-use postblox::secrets::{file::FileSecretStore, SecretStore, UnconfiguredSecretStore};
-use postblox::sync::WorkerManager;
+use postblox::secrets::{file::FileSecretStore, keyring::KeyringSecretStore, SecretStore};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> anyhow::Result<()> {
@@ -45,25 +44,29 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("connect to db at {}", db_path.display()))?;
 
-    let secrets = build_secret_store(&cfg, &db_path);
+    let secrets = build_secret_store(&cfg, &db_path)?;
 
     let hub = Arc::new(Hub::new());
     let imap_auth = imap::default_auth().context("initialize IMAP auth")?;
     let imap_sync = imap::default_sync().context("initialize IMAP sync")?;
     let imap_idle = imap::default_idle().context("initialize IMAP IDLE")?;
-    let manager = Arc::new(WorkerManager::with_idle_config(
-        pool.clone(),
-        hub.clone(),
+    let services = DaemonServices::default();
+    let manager = worker_manager_with_idle_config(
+        &pool,
+        &hub,
         imap_sync.clone(),
         Some(imap_idle),
+        &secrets,
+        &services,
         postblox::sync::WorkerConfig::default(),
-    ));
-    let dispatcher = Arc::new(DaemonDispatcher::with_imap_and_manager(
+    );
+    let dispatcher = Arc::new(DaemonDispatcher::with_imap_smtp_oauth_and_manager(
         pool,
         hub.clone(),
         imap_auth,
         imap_sync,
         secrets,
+        services,
         manager.clone(),
     ));
     let server = listen(&socket_path, dispatcher, hub).await?;
@@ -76,21 +79,28 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_secret_store(cfg: &config::Config, db_path: &std::path::Path) -> Arc<dyn SecretStore> {
-    match cfg.secrets.as_ref() {
-        Some(s) => {
-            let path = s
+fn build_secret_store(
+    cfg: &config::Config,
+    db_path: &std::path::Path,
+) -> anyhow::Result<Arc<dyn SecretStore>> {
+    match cfg.secrets.backend {
+        config::SecretsBackend::Keyring => {
+            tracing::info!("secrets backend: OS keyring");
+            Ok(Arc::new(KeyringSecretStore::default()))
+        }
+        config::SecretsBackend::File => {
+            let passphrase = cfg
+                .secrets
+                .passphrase
+                .clone()
+                .context("file secrets backend requires [secrets] passphrase")?;
+            let path = cfg
+                .secrets
                 .path
                 .clone()
                 .unwrap_or_else(|| default_secrets_path(db_path));
             tracing::info!(secrets_path = %path.display(), "secrets backend: file (aes-gcm)");
-            Arc::new(FileSecretStore::new(path, s.passphrase.clone()))
-        }
-        None => {
-            tracing::warn!(
-                "no [secrets] section in config — account.set_secret will refuse to run"
-            );
-            Arc::new(UnconfiguredSecretStore)
+            Ok(Arc::new(FileSecretStore::new(path, passphrase)))
         }
     }
 }

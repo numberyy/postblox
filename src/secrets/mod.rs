@@ -6,6 +6,7 @@
 //! - Bitwarden (R7+).
 
 pub mod file;
+pub mod keyring;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -29,6 +30,9 @@ pub enum SecretError {
 
     #[error("backend: {0}")]
     Backend(String),
+
+    #[error("keyring: {0}")]
+    Keyring(#[from] keyring::KeyringSecretError),
 }
 
 /// Storage for per-account secrets. Implementations must serialise
@@ -38,6 +42,14 @@ pub trait SecretStore: Send + Sync {
     async fn put(&self, account_id: Uuid, secret: Secret) -> Result<(), SecretError>;
     async fn get(&self, account_id: Uuid) -> Result<Option<Secret>, SecretError>;
     async fn delete(&self, account_id: Uuid) -> Result<(), SecretError>;
+
+    fn secret_ref(&self, account_id: Uuid) -> String {
+        account_secret_ref(account_id)
+    }
+}
+
+pub fn account_secret_ref(account_id: Uuid) -> String {
+    format!("account:{account_id}")
 }
 
 /// Fallback used when no backend is configured. Every operation

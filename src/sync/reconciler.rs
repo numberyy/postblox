@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::auth::MailCredential;
 use crate::db;
 use crate::imap::ImapSync;
 use crate::ipc::{Hub, Topic};
@@ -50,9 +51,9 @@ pub async fn reconcile_folder(
     imap: &dyn ImapSync,
     account_id: Uuid,
     folder_name: &str,
-    password: &str,
+    credential: &MailCredential,
 ) -> Result<ReconcileReport, SyncError> {
-    if password.is_empty() {
+    if credential.is_empty() {
         return Err(SyncError::MissingCredentials);
     }
     let account = db::accounts::get(pool, account_id)
@@ -68,7 +69,7 @@ pub async fn reconcile_folder(
             &account.imap_host,
             account.imap_port as u16,
             &account.email,
-            password,
+            credential,
             folder_name,
             from_uid,
         )
@@ -88,7 +89,7 @@ pub async fn reconcile_folder(
             &account.imap_host,
             account.imap_port as u16,
             &account.email,
-            password,
+            credential,
             folder_name,
             1,
         )

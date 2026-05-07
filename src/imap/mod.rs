@@ -13,12 +13,15 @@ pub mod client;
 pub mod error;
 
 pub use client::{
-    connect, fetch_uid_range, list_folders, wait_for_idle_change, Connector, FetchedMessage,
-    FolderInfo, FolderSync, IdleOutcome, IdleRequest, PlainConnector, RustlsConnector,
+    connect, connect_with_credential, fetch_uid_range, list_folders, wait_for_idle_change,
+    Connector, FetchedMessage, FolderInfo, FolderSync, IdleOutcome, IdleRequest, PlainConnector,
+    RustlsConnector,
 };
 pub use error::ImapError;
 
 use std::sync::Arc;
+
+use crate::auth::MailCredential;
 
 /// Erased entry point for [auth + folder list]: hides the underlying
 /// stream type so it can sit behind a `dyn` trait object.
@@ -29,7 +32,7 @@ pub trait ImapAuth: Send + Sync {
         host: &str,
         port: u16,
         username: &str,
-        password: &str,
+        credential: &MailCredential,
     ) -> Result<Vec<FolderInfo>, ImapError>;
 }
 
@@ -42,7 +45,7 @@ pub trait ImapSync: Send + Sync {
         host: &str,
         port: u16,
         username: &str,
-        password: &str,
+        credential: &MailCredential,
         folder: &str,
         from_uid: u32,
     ) -> Result<FolderSync, ImapError>;
@@ -73,9 +76,11 @@ impl<C: Connector> ImapAuth for ConnectorAuth<C> {
         host: &str,
         port: u16,
         username: &str,
-        password: &str,
+        credential: &MailCredential,
     ) -> Result<Vec<FolderInfo>, ImapError> {
-        let mut session = connect(&self.connector, host, port, username, password).await?;
+        let mut session =
+            client::connect_with_credential(&self.connector, host, port, username, credential)
+                .await?;
         let folders = list_folders(&mut session).await?;
         let _ = session.logout().await;
         Ok(folders)
@@ -89,11 +94,13 @@ impl<C: Connector> ImapSync for ConnectorAuth<C> {
         host: &str,
         port: u16,
         username: &str,
-        password: &str,
+        credential: &MailCredential,
         folder: &str,
         from_uid: u32,
     ) -> Result<FolderSync, ImapError> {
-        let mut session = connect(&self.connector, host, port, username, password).await?;
+        let mut session =
+            client::connect_with_credential(&self.connector, host, port, username, credential)
+                .await?;
         let out = fetch_uid_range(&mut session, folder, from_uid).await;
         let _ = session.logout().await;
         out

@@ -8,12 +8,16 @@ use serde_json::json;
 use sqlx::SqlitePool;
 use tokio::time::{timeout, Duration};
 
-use postblox::daemon::DaemonDispatcher;
+use postblox::auth::{CredentialKind, MailCredential};
+use postblox::daemon::{worker_manager_with_idle_config, DaemonDispatcher, DaemonServices};
 use postblox::db::{accounts, connect, folders, messages, threads};
 use postblox::imap::{FetchedMessage, FolderInfo, FolderSync, ImapAuth, ImapError, ImapSync};
 use postblox::ipc::client::Client;
 use postblox::ipc::{listen, Hub, Topic};
 use postblox::models::{ApprovalState, AuthKind, FolderRole};
+use postblox::oauth::google::{
+    self, GoogleOAuth, GoogleOAuthConfig, GoogleOAuthError, GoogleOAuthToken,
+};
 use postblox::secrets::{
     file::{FileSecretStore, KdfParams},
     SecretStore,
@@ -27,6 +31,7 @@ struct Harness {
     sock: std::path::PathBuf,
     pool: SqlitePool,
     hub: Arc<Hub>,
+    secrets: Arc<dyn SecretStore>,
     _server: postblox::ipc::server::ServerHandle,
 }
 
@@ -83,6 +88,23 @@ async fn make_harness_with_config_and_smtp(
     smtp: Arc<dyn SmtpSubmitter>,
     worker_config: WorkerConfig,
 ) -> Harness {
+    make_harness_with_config_smtp_oauth(
+        imap,
+        imap_sync,
+        smtp,
+        Arc::new(MockGoogleOAuth::default()),
+        worker_config,
+    )
+    .await
+}
+
+async fn make_harness_with_config_smtp_oauth(
+    imap: Arc<dyn ImapAuth>,
+    imap_sync: Arc<dyn ImapSync>,
+    smtp: Arc<dyn SmtpSubmitter>,
+    oauth: Arc<dyn GoogleOAuth>,
+    worker_config: WorkerConfig,
+) -> Harness {
     let db_dir = tempfile::tempdir().unwrap();
     let pool = connect(&db_dir.path().join("postblox.db")).await.unwrap();
     let sock_dir = tempfile::tempdir().unwrap();
@@ -93,14 +115,24 @@ async fn make_harness_with_config_and_smtp(
         "test-passphrase",
         KdfParams::insecure_for_tests(),
     ));
-    let dispatcher = Arc::new(DaemonDispatcher::with_imap_sync_smtp_config(
+    let services = DaemonServices::new(smtp, oauth);
+    let worker_manager = worker_manager_with_idle_config(
+        &pool,
+        &hub,
+        imap_sync.clone(),
+        None,
+        &secrets,
+        &services,
+        worker_config,
+    );
+    let dispatcher = Arc::new(DaemonDispatcher::with_imap_smtp_oauth_and_manager(
         pool.clone(),
         hub.clone(),
         imap,
         imap_sync,
-        secrets,
-        smtp,
-        worker_config,
+        secrets.clone(),
+        services,
+        worker_manager,
     ));
     let server = listen(&sock, dispatcher, hub.clone()).await.unwrap();
     Harness {
@@ -109,6 +141,7 @@ async fn make_harness_with_config_and_smtp(
         sock,
         pool,
         hub,
+        secrets,
         _server: server,
     }
 }
@@ -125,7 +158,7 @@ impl ImapAuth for NoImap {
         _: &str,
         _: u16,
         _: &str,
-        _: &str,
+        _: &MailCredential,
     ) -> Result<Vec<FolderInfo>, ImapError> {
         Err(ImapError::Protocol(
             "imap not configured for this test".into(),
@@ -143,13 +176,69 @@ impl ImapSync for NoSync {
         _: &str,
         _: u16,
         _: &str,
-        _: &str,
+        _: &MailCredential,
         _: &str,
         _: u32,
     ) -> Result<FolderSync, ImapError> {
         Err(ImapError::Protocol(
             "imap sync not configured for this test".into(),
         ))
+    }
+}
+
+#[derive(Default)]
+struct MockGoogleOAuth {
+    exchange: Mutex<VecDeque<Result<GoogleOAuthToken, GoogleOAuthError>>>,
+    refresh: Mutex<VecDeque<Result<GoogleOAuthToken, GoogleOAuthError>>>,
+}
+
+impl MockGoogleOAuth {
+    fn with_exchange(token: GoogleOAuthToken) -> Self {
+        Self {
+            exchange: Mutex::new(VecDeque::from([Ok(token)])),
+            refresh: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    fn with_exchange_and_refresh(exchange: GoogleOAuthToken, refresh: GoogleOAuthToken) -> Self {
+        Self::with_exchange_and_refreshes(exchange, vec![refresh])
+    }
+
+    fn with_exchange_and_refreshes(
+        exchange: GoogleOAuthToken,
+        refreshes: Vec<GoogleOAuthToken>,
+    ) -> Self {
+        Self {
+            exchange: Mutex::new(VecDeque::from([Ok(exchange)])),
+            refresh: Mutex::new(refreshes.into_iter().map(Ok).collect()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl GoogleOAuth for MockGoogleOAuth {
+    async fn exchange_code(
+        &self,
+        _: &GoogleOAuthConfig,
+        _: &str,
+    ) -> Result<GoogleOAuthToken, GoogleOAuthError> {
+        self.exchange
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(GoogleOAuthError::InvalidInput("no exchange token".into())))
+    }
+
+    async fn refresh_token(
+        &self,
+        _: &GoogleOAuthConfig,
+        _: &GoogleOAuthToken,
+    ) -> Result<GoogleOAuthToken, GoogleOAuthError> {
+        self.refresh
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(GoogleOAuthError::InvalidInput("no refresh token".into())))
     }
 }
 
@@ -160,7 +249,8 @@ struct CapturedSmtp {
     use_tls: bool,
     starttls: bool,
     username: String,
-    password: String,
+    credential_kind: CredentialKind,
+    secret: String,
     from: String,
     recipients: Vec<String>,
     mime: Vec<u8>,
@@ -200,7 +290,8 @@ impl SmtpSubmitter for MockSmtp {
             use_tls: request.server.use_tls,
             starttls: request.server.starttls,
             username: request.username,
-            password: request.password.to_string(),
+            credential_kind: request.credential.kind(),
+            secret: request.credential.secret().to_string(),
             from: request.from,
             recipients: request.recipients,
             mime: request.mime,
@@ -501,7 +592,8 @@ async fn message_send_with_draft_submits_mime_and_audits() {
     assert!(call.use_tls);
     assert!(!call.starttls);
     assert_eq!(call.username, "u@example.com");
-    assert_eq!(call.password, "right");
+    assert_eq!(call.credential_kind, CredentialKind::Password);
+    assert_eq!(call.secret, "right");
     assert_eq!(call.from, "u@example.com");
     assert_eq!(
         call.recipients,
@@ -611,6 +703,72 @@ async fn message_send_auth_failure_maps_to_auth_failed() {
         Some("auth_failed")
     );
     assert_eq!(smtp.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn message_send_oauth_account_uses_bearer_token_for_smtp() {
+    let smtp = Arc::new(MockSmtp::ok());
+    let oauth = Arc::new(MockGoogleOAuth::with_exchange(oauth_token(
+        "smtp-access",
+        "smtp-refresh",
+        3600,
+    )));
+    let h = make_harness_with_config_smtp_oauth(
+        Arc::new(NoImap),
+        Arc::new(NoSync),
+        smtp.clone(),
+        oauth,
+        WorkerConfig::default(),
+    )
+    .await;
+    let account_id = make_oauth_account(&h, "gmail@example.com").await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let complete = c
+        .request(
+            "oauth.google.complete",
+            json!({
+                "account_id": account_id,
+                "client_id": "client",
+                "client_secret": "secret",
+                "redirect_uri": "http://127.0.0.1/callback",
+                "code": "code",
+                "state": "state",
+                "expected_state": "state",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(complete.ok, "{:?}", complete.error);
+    let draft = postblox::db::drafts::create(
+        &h.pool,
+        &postblox::db::drafts::NewDraft {
+            account_id,
+            in_reply_to_msg: None,
+            to_addrs: json!(["to@example.com"]),
+            cc_addrs: json!([]),
+            bcc_addrs: json!([]),
+            subject: Some("OAuth SMTP".into()),
+            text_body: Some("body".into()),
+            html_body: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let sent = c
+        .request(
+            "message.send",
+            json!({"account_id": account_id, "draft_id": draft.id}),
+        )
+        .await
+        .unwrap();
+    assert!(sent.ok, "{:?}", sent.error);
+
+    let calls = smtp.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].username, "gmail@example.com");
+    assert_eq!(calls[0].credential_kind, CredentialKind::OAuth2Bearer);
+    assert_eq!(calls[0].secret, "smtp-access");
 }
 
 #[tokio::test]
@@ -922,9 +1080,9 @@ impl ImapAuth for MockImap {
         _: &str,
         _: u16,
         _: &str,
-        password: &str,
+        credential: &MailCredential,
     ) -> Result<Vec<FolderInfo>, ImapError> {
-        if password == self.bad_password {
+        if credential.secret() == self.bad_password {
             return Err(ImapError::Auth("bad creds".into()));
         }
         Ok(self.folders.clone())
@@ -1080,6 +1238,37 @@ async fn make_account(h: &Harness, email: &str) -> uuid::Uuid {
     .id
 }
 
+async fn make_oauth_account(h: &Harness, email: &str) -> uuid::Uuid {
+    accounts::create(
+        &h.pool,
+        &accounts::NewAccount {
+            email: email.into(),
+            display_name: None,
+            auth_kind: AuthKind::OAuth2Google,
+            imap_host: "imap.gmail.com".into(),
+            imap_port: 993,
+            imap_use_tls: true,
+            smtp_host: "smtp.gmail.com".into(),
+            smtp_port: 465,
+            smtp_use_tls: true,
+            smtp_starttls: false,
+        },
+    )
+    .await
+    .unwrap()
+    .id
+}
+
+fn oauth_token(access_token: &str, refresh_token: &str, expires_in: i64) -> GoogleOAuthToken {
+    GoogleOAuthToken {
+        access_token: access_token.into(),
+        refresh_token: refresh_token.into(),
+        expires_at: chrono::Utc::now() + chrono::Duration::seconds(expires_in),
+        token_type: "Bearer".into(),
+        scope: Some("https://mail.google.com/".into()),
+    }
+}
+
 #[tokio::test]
 async fn account_set_secret_round_trip_via_socket() {
     let h = make_harness().await;
@@ -1177,6 +1366,131 @@ async fn account_delete_secret_is_idempotent() {
     assert!(resp.ok);
 }
 
+// ---- OAuth Google setup ----------------------------------------------------
+
+#[tokio::test]
+async fn oauth_google_auth_url_and_complete_store_token_without_auditing_secrets() {
+    let oauth = Arc::new(MockGoogleOAuth::with_exchange(oauth_token(
+        "access-token",
+        "refresh-token",
+        3600,
+    )));
+    let h = make_harness_with_config_smtp_oauth(
+        Arc::new(NoImap),
+        Arc::new(NoSync),
+        Arc::new(MockSmtp::ok()),
+        oauth,
+        WorkerConfig::default(),
+    )
+    .await;
+    let account_id = make_oauth_account(&h, "gmail@example.com").await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let auth = c
+        .request(
+            "oauth.google.auth_url",
+            json!({
+                "account_id": account_id,
+                "client_id": "client id",
+                "redirect_uri": "http://127.0.0.1/callback",
+                "state": "state 1",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(auth.ok, "{:?}", auth.error);
+    let url = auth.data["authorization_url"].as_str().unwrap();
+    assert!(url.contains("client_id=client%20id"));
+    assert!(url.contains("state=state%201"));
+    assert!(url.contains("scope=https%3A%2F%2Fmail.google.com%2F"));
+
+    let complete = c
+        .request(
+            "oauth.google.complete",
+            json!({
+                "account_id": account_id,
+                "client_id": "client id",
+                "client_secret": "client-secret",
+                "redirect_uri": "http://127.0.0.1/callback",
+                "code": "code-123",
+                "state": "state 1",
+                "expected_state": "state 1",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(complete.ok, "{:?}", complete.error);
+    assert_eq!(complete.data["ok"], json!(true));
+
+    let stored = google::load_stored_oauth(h.secrets.as_ref(), account_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.client_id, "client id");
+    assert_eq!(stored.client_secret, "client-secret");
+    assert_eq!(stored.token.access_token, "access-token");
+    assert_eq!(stored.token.refresh_token, "refresh-token");
+
+    let account = accounts::get(&h.pool, account_id).await.unwrap().unwrap();
+    assert!(account.secret_ref.is_some());
+
+    let audits = postblox::db::audit::list_recent(&h.pool, 10, 0)
+        .await
+        .unwrap();
+    assert!(audits.iter().any(|a| a.action == "oauth.google.complete"));
+    let audit_json = serde_json::to_string(&audits).unwrap();
+    assert!(!audit_json.contains("client-secret"));
+    assert!(!audit_json.contains("code-123"));
+    assert!(!audit_json.contains("access-token"));
+    assert!(!audit_json.contains("refresh-token"));
+}
+
+#[tokio::test]
+async fn oauth_google_complete_rejects_state_mismatch_and_password_account() {
+    let h = make_harness().await;
+    let password_account = make_account(&h, "u@example.com").await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let mismatch = c
+        .request(
+            "oauth.google.complete",
+            json!({
+                "account_id": password_account,
+                "client_id": "client",
+                "client_secret": "secret",
+                "redirect_uri": "http://127.0.0.1/callback",
+                "code": "code",
+                "state": "actual",
+                "expected_state": "expected",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!mismatch.ok);
+    assert_eq!(
+        mismatch.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+
+    let wrong_kind = c
+        .request(
+            "oauth.google.auth_url",
+            json!({
+                "account_id": password_account,
+                "client_id": "client",
+                "redirect_uri": "http://127.0.0.1/callback",
+                "state": "state",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!wrong_kind.ok);
+    assert_eq!(
+        wrong_kind.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+}
+
 // ---- account.sync_folder ---------------------------------------------------
 
 /// Fetcher with scripted UID validity / message list. Per-call password
@@ -1186,15 +1500,33 @@ struct ScriptedSync {
     uid_next: std::sync::Mutex<u32>,
     messages: std::sync::Mutex<Vec<FetchedMessage>>,
     password: String,
+    expected_kind: CredentialKind,
 }
 
 impl ScriptedSync {
     fn new(uid_validity: u32, uid_next: u32, msgs: Vec<FetchedMessage>) -> Self {
+        Self::with_credential(
+            uid_validity,
+            uid_next,
+            msgs,
+            CredentialKind::Password,
+            "right",
+        )
+    }
+
+    fn with_credential(
+        uid_validity: u32,
+        uid_next: u32,
+        msgs: Vec<FetchedMessage>,
+        expected_kind: CredentialKind,
+        secret: &str,
+    ) -> Self {
         Self {
             uid_validity: std::sync::Mutex::new(uid_validity),
             uid_next: std::sync::Mutex::new(uid_next),
             messages: std::sync::Mutex::new(msgs),
-            password: "right".into(),
+            password: secret.into(),
+            expected_kind,
         }
     }
 }
@@ -1206,11 +1538,12 @@ impl ImapSync for ScriptedSync {
         _: &str,
         _: u16,
         _: &str,
-        password: &str,
+        credential: &MailCredential,
         _: &str,
         from_uid: u32,
     ) -> Result<FolderSync, ImapError> {
-        if password != self.password {
+        assert_eq!(credential.kind(), self.expected_kind);
+        if credential.secret() != self.password {
             return Err(ImapError::Auth("bad password".into()));
         }
         let messages: Vec<FetchedMessage> = self
@@ -1226,6 +1559,41 @@ impl ImapSync for ScriptedSync {
             uid_next: Some(*self.uid_next.lock().unwrap()),
             exists: messages.len() as u32,
             messages,
+        })
+    }
+}
+
+#[derive(Default)]
+struct RecordingSync {
+    secrets: Mutex<Vec<String>>,
+}
+
+impl RecordingSync {
+    fn secrets(&self) -> Vec<String> {
+        self.secrets.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ImapSync for RecordingSync {
+    async fn sync_folder(
+        &self,
+        _: &str,
+        _: u16,
+        _: &str,
+        credential: &MailCredential,
+        _: &str,
+        _: u32,
+    ) -> Result<FolderSync, ImapError> {
+        self.secrets
+            .lock()
+            .unwrap()
+            .push(credential.secret().to_string());
+        Ok(FolderSync {
+            uid_validity: Some(1),
+            uid_next: Some(1),
+            exists: 0,
+            messages: vec![],
         })
     }
 }
@@ -1307,6 +1675,20 @@ async fn wait_for_message_count(
     .expect("expected messages inserted by sync worker");
 }
 
+async fn wait_for_recorded_secrets(sync: &RecordingSync, expected: usize) -> Vec<String> {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let secrets = sync.secrets();
+            if secrets.len() >= expected {
+                return secrets;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("expected sync worker credentials")
+}
+
 #[tokio::test]
 async fn account_start_sync_starts_worker_and_stop_sync_is_idempotent() {
     let msgs = vec![FetchedMessage {
@@ -1365,6 +1747,82 @@ async fn account_start_sync_starts_worker_and_stop_sync_is_idempotent() {
         .unwrap();
     assert!(stopped_again.ok, "{:?}", stopped_again);
     assert_eq!(stopped_again.data["stopped"], json!(false));
+}
+
+#[tokio::test]
+async fn account_start_sync_oauth_worker_refreshes_between_poll_cycles() {
+    let oauth = Arc::new(MockGoogleOAuth::with_exchange_and_refreshes(
+        oauth_token("expired-complete", "refresh-token", -10),
+        vec![
+            oauth_token("startup-refresh", "refresh-token", -10),
+            oauth_token("cycle-refresh-1", "refresh-token", -10),
+            oauth_token("cycle-refresh-2", "refresh-token", -10),
+        ],
+    ));
+    let sync = Arc::new(RecordingSync::default());
+    let h = make_harness_with_config_smtp_oauth(
+        Arc::new(NoImap),
+        sync.clone(),
+        Arc::new(MockSmtp::ok()),
+        oauth,
+        fast_worker_config(),
+    )
+    .await;
+    let account_id = make_oauth_account(&h, "gmail-worker@example.com").await;
+    folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id,
+            name: "INBOX".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Inbox,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let complete = c
+        .request(
+            "oauth.google.complete",
+            json!({
+                "account_id": account_id,
+                "client_id": "client",
+                "client_secret": "secret",
+                "redirect_uri": "http://127.0.0.1/callback",
+                "code": "code",
+                "state": "state",
+                "expected_state": "state",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(complete.ok, "{:?}", complete.error);
+
+    let started = c
+        .request(
+            "account.start_sync",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(started.ok, "{:?}", started.error);
+
+    let secrets = wait_for_recorded_secrets(&sync, 2).await;
+    let stopped = c
+        .request(
+            "account.stop_sync",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(stopped.ok, "{:?}", stopped.error);
+
+    assert_eq!(
+        &secrets[..2],
+        ["cycle-refresh-1".to_string(), "cycle-refresh-2".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -1438,6 +1896,76 @@ async fn account_start_sync_unknown_account_or_folder_returns_bad_args() {
         missing_folder.error.as_ref().map(|e| e.code.as_str()),
         Some("bad_args")
     );
+}
+
+#[tokio::test]
+async fn account_sync_folder_oauth_account_refreshes_and_uses_bearer_token() {
+    let oauth = Arc::new(MockGoogleOAuth::with_exchange_and_refresh(
+        oauth_token("expired-access", "refresh-token", -10),
+        oauth_token("fresh-access", "refresh-token", 3600),
+    ));
+    let sync = Arc::new(ScriptedSync::with_credential(
+        1,
+        1,
+        vec![],
+        CredentialKind::OAuth2Bearer,
+        "fresh-access",
+    ));
+    let h = make_harness_with_config_smtp_oauth(
+        Arc::new(NoImap),
+        sync,
+        Arc::new(MockSmtp::ok()),
+        oauth,
+        WorkerConfig::default(),
+    )
+    .await;
+    let account_id = make_oauth_account(&h, "gmail@example.com").await;
+    folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id,
+            name: "INBOX".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Inbox,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let complete = c
+        .request(
+            "oauth.google.complete",
+            json!({
+                "account_id": account_id,
+                "client_id": "client",
+                "client_secret": "secret",
+                "redirect_uri": "http://127.0.0.1/callback",
+                "code": "code",
+                "state": "state",
+                "expected_state": "state",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(complete.ok, "{:?}", complete.error);
+
+    let resp = c
+        .request(
+            "account.sync_folder",
+            json!({"account_id": account_id, "folder_name": "INBOX"}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp.error);
+    assert_eq!(resp.data["inserted"], json!(0));
+
+    let stored = google::load_stored_oauth(h.secrets.as_ref(), account_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.token.access_token, "fresh-access");
 }
 
 #[tokio::test]

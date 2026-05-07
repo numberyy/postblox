@@ -13,4 +13,4 @@ pub mod worker;
 pub use error::SyncError;
 pub use manager::WorkerManager;
 pub use reconciler::{reconcile_folder, ReconcileReport};
-pub use worker::WorkerConfig;
+pub use worker::{WorkerConfig, WorkerCredentialResolver};
