@@ -158,6 +158,37 @@ impl MailboxClient {
         Ok(())
     }
 
+    pub async fn archive_message(&mut self, message_id: Uuid) -> Result<(), MailboxError> {
+        let response = self
+            .request("message.archive", json!({ "id": message_id }))
+            .await?;
+        let _: Value = decode_response("message.archive", response)?;
+        Ok(())
+    }
+
+    pub async fn delete_message(&mut self, message_id: Uuid) -> Result<(), MailboxError> {
+        let response = self
+            .request("message.delete", json!({ "id": message_id }))
+            .await?;
+        let _: Value = decode_response("message.delete", response)?;
+        Ok(())
+    }
+
+    pub async fn move_message(
+        &mut self,
+        message_id: Uuid,
+        folder_name: &str,
+    ) -> Result<(), MailboxError> {
+        let response = self
+            .request(
+                "message.move",
+                json!({ "id": message_id, "folder_name": folder_name }),
+            )
+            .await?;
+        let _: Value = decode_response("message.move", response)?;
+        Ok(())
+    }
+
     pub async fn list_attachments(
         &mut self,
         message_id: Uuid,

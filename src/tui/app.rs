@@ -50,6 +50,7 @@ pub enum InputMode {
     Command,
     Compose,
     ConfirmDiscard,
+    ConfirmDelete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,6 +252,15 @@ impl From<crate::attachments::AttachmentPreview> for AttachmentPreviewItem {
             preview_bytes: preview.preview_bytes,
         }
     }
+}
+
+/// Captured state needed to undo an optimistic message-list mutation.
+/// Opaque to callers; produced by [`AppState::snapshot_message_list`].
+#[derive(Debug, Clone)]
+pub struct MessageListSnapshot {
+    folder_messages: Vec<MessageItem>,
+    selected_thread: usize,
+    selected_message: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -673,6 +683,7 @@ pub struct AppState {
     pub selected_message: usize,
     pub selected_attachment: usize,
     pub pending_open_attachment: Option<AttachmentItem>,
+    pub pending_delete_message: Option<Uuid>,
     pub command_input: String,
     pub status: String,
     pub error: Option<String>,
@@ -704,6 +715,7 @@ impl Default for AppState {
             selected_message: 0,
             selected_attachment: 0,
             pending_open_attachment: None,
+            pending_delete_message: None,
             command_input: String::new(),
             status: "Connecting".into(),
             error: None,
@@ -1177,6 +1189,73 @@ impl AppState {
     ) -> Option<(Uuid, Vec<String>)> {
         self.selected_message()
             .map(|message| (message.id, message.with_flag(flag, enabled)))
+    }
+
+    /// Capture the message-list state needed to undo an optimistic
+    /// remove. Returned snapshot is opaque to callers and should only
+    /// be passed back to [`AppState::restore_message_list_snapshot`].
+    pub fn snapshot_message_list(&self) -> MessageListSnapshot {
+        MessageListSnapshot {
+            folder_messages: self.folder_messages.clone(),
+            selected_thread: self.selected_thread,
+            selected_message: self.selected_message,
+        }
+    }
+
+    /// Drop the message with `message_id` from the visible folder list
+    /// and refresh thread/message panes. Returns true when a row was
+    /// removed.
+    pub fn remove_message_locally(&mut self, message_id: Uuid) -> bool {
+        let before = self.folder_messages.len();
+        let selected_thread_key = self.selected_thread().map(|thread| thread.key);
+        self.folder_messages
+            .retain(|message| message.id != message_id);
+        let removed = self.folder_messages.len() != before;
+        if !removed {
+            return false;
+        }
+        self.rebuild_threads(selected_thread_key);
+        self.refresh_visible_messages();
+        if self
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail.id == message_id)
+        {
+            self.clear_detail_state();
+        }
+        self.normalize_active_pane();
+        true
+    }
+
+    pub fn restore_message_list_snapshot(&mut self, snapshot: MessageListSnapshot) {
+        self.folder_messages = snapshot.folder_messages;
+        self.rebuild_threads(None);
+        self.selected_thread = snapshot.selected_thread;
+        clamp_index(&mut self.selected_thread, self.threads.len());
+        self.refresh_visible_messages();
+        self.selected_message = snapshot.selected_message;
+        clamp_index(&mut self.selected_message, self.messages.len());
+        self.normalize_active_pane();
+    }
+
+    pub fn begin_delete_confirmation(&mut self, message_id: Uuid) {
+        self.pending_delete_message = Some(message_id);
+        self.mode = InputMode::ConfirmDelete;
+        self.set_status("Delete? y/n");
+    }
+
+    pub fn cancel_delete_confirmation(&mut self) {
+        self.pending_delete_message = None;
+        self.mode = InputMode::Normal;
+        self.set_status("Delete cancelled");
+    }
+
+    pub fn take_pending_delete_message(&mut self) -> Option<Uuid> {
+        let id = self.pending_delete_message.take();
+        if id.is_some() {
+            self.mode = InputMode::Normal;
+        }
+        id
     }
 
     pub fn apply_message_flags(&mut self, message_id: Uuid, flags: Vec<String>) {

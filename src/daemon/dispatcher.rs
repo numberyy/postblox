@@ -343,6 +343,9 @@ impl Dispatcher for DaemonDispatcher {
             "account.delete" => op_account_delete(&self.pool, args).await,
             "folder.upsert" => op_folder_upsert(&self.pool, args).await,
             "message.set_flags" => op_message_set_flags(&self.pool, &self.hub, args).await,
+            "message.archive" => op_message_archive(&self.pool, &self.hub, args).await,
+            "message.delete" => op_message_delete(&self.pool, &self.hub, args).await,
+            "message.move" => op_message_move(&self.pool, &self.hub, args).await,
             "draft.create" => op_draft_create(&self.pool, args).await,
             "draft.update" => op_draft_update(&self.pool, args).await,
             "draft.delete" => op_draft_delete(&self.pool, args).await,
@@ -732,6 +735,126 @@ async fn op_message_set_flags(
     )
     .await;
     Ok(json!({"ok": true}))
+}
+
+async fn op_message_archive(pool: &SqlitePool, hub: &Hub, args: Value) -> Result<Value, RpcError> {
+    let actor = actor_from_args(&args);
+    let id = parse_uuid(&args, "id")?;
+    let message = require_message(pool, id).await?;
+    let archive = require_role_folder(pool, message.account_id, FolderRole::Archive).await?;
+    if message.folder_id == archive.id {
+        return Ok(json!({"ok": true, "folder_id": archive.id.to_string()}));
+    }
+    db::messages::set_folder(pool, id, archive.id)
+        .await
+        .map_err(|e| RpcError::internal(format!("messages::set_folder: {e}")))?;
+    audit_actor(
+        pool,
+        &actor,
+        "message.archive",
+        Some(&id.to_string()),
+        &json!({"folder_id": archive.id.to_string()}),
+    )
+    .await;
+    hub.publish(
+        Topic::MailUpdated,
+        json!({
+            "message_id": id.to_string(),
+            "folder_id": archive.id.to_string(),
+            "from_folder_id": message.folder_id.to_string(),
+        }),
+    )
+    .await;
+    Ok(json!({"ok": true, "folder_id": archive.id.to_string()}))
+}
+
+async fn op_message_delete(pool: &SqlitePool, hub: &Hub, args: Value) -> Result<Value, RpcError> {
+    let actor = actor_from_args(&args);
+    let id = parse_uuid(&args, "id")?;
+    let message = require_message(pool, id).await?;
+    let trash = require_role_folder(pool, message.account_id, FolderRole::Trash).await?;
+    if message.folder_id == trash.id {
+        return Ok(json!({"ok": true, "folder_id": trash.id.to_string()}));
+    }
+    db::messages::set_folder(pool, id, trash.id)
+        .await
+        .map_err(|e| RpcError::internal(format!("messages::set_folder: {e}")))?;
+    audit_actor(
+        pool,
+        &actor,
+        "message.delete",
+        Some(&id.to_string()),
+        &json!({"folder_id": trash.id.to_string()}),
+    )
+    .await;
+    hub.publish(
+        Topic::MailUpdated,
+        json!({
+            "message_id": id.to_string(),
+            "folder_id": trash.id.to_string(),
+            "from_folder_id": message.folder_id.to_string(),
+        }),
+    )
+    .await;
+    Ok(json!({"ok": true, "folder_id": trash.id.to_string()}))
+}
+
+async fn op_message_move(pool: &SqlitePool, hub: &Hub, args: Value) -> Result<Value, RpcError> {
+    let actor = actor_from_args(&args);
+    let id = parse_uuid(&args, "id")?;
+    let folder_name = parse_str(&args, "folder_name")?;
+    let message = require_message(pool, id).await?;
+    let target = db::folders::get_by_name(pool, message.account_id, folder_name)
+        .await
+        .map_err(|e| RpcError::internal(format!("folders::get_by_name: {e}")))?
+        .ok_or_else(|| RpcError::bad_args(format!("unknown folder '{folder_name}'")))?;
+    if message.folder_id == target.id {
+        return Ok(json!({"ok": true, "folder_id": target.id.to_string()}));
+    }
+    db::messages::set_folder(pool, id, target.id)
+        .await
+        .map_err(|e| RpcError::internal(format!("messages::set_folder: {e}")))?;
+    audit_actor(
+        pool,
+        &actor,
+        "message.move",
+        Some(&id.to_string()),
+        &json!({"folder_id": target.id.to_string(), "folder_name": folder_name}),
+    )
+    .await;
+    hub.publish(
+        Topic::MailUpdated,
+        json!({
+            "message_id": id.to_string(),
+            "folder_id": target.id.to_string(),
+            "from_folder_id": message.folder_id.to_string(),
+        }),
+    )
+    .await;
+    Ok(json!({"ok": true, "folder_id": target.id.to_string()}))
+}
+
+async fn require_message(
+    pool: &SqlitePool,
+    id: uuid::Uuid,
+) -> Result<crate::models::Message, RpcError> {
+    db::messages::get(pool, id)
+        .await
+        .map_err(|e| RpcError::internal(format!("messages::get: {e}")))?
+        .ok_or_else(|| RpcError::bad_args("unknown message id"))
+}
+
+async fn require_role_folder(
+    pool: &SqlitePool,
+    account_id: uuid::Uuid,
+    role: FolderRole,
+) -> Result<crate::models::Folder, RpcError> {
+    db::folders::list_by_account(pool, account_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("folders::list_by_account: {e}")))?
+        .into_iter()
+        .find(|f| f.role == role)
+        .ok_or_else(|| RpcError::bad_args(format!("no '{}' folder for account", role.as_str())))
 }
 
 async fn op_draft_create(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {

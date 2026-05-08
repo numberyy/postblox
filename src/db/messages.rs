@@ -177,6 +177,19 @@ pub async fn set_flags(
     Ok(())
 }
 
+/// Reassign a message to a different folder. Returns true when a row
+/// matched. Used by archive / move ops; on the wire IMAP this is what a
+/// MOVE would do server-side, but here we reflect the change locally
+/// and let the next IMAP sync reconcile.
+pub async fn set_folder(pool: &SqlitePool, id: Uuid, folder_id: Uuid) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query("UPDATE messages SET folder_id = ? WHERE id = ?")
+        .bind(folder_id)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(r.rows_affected() > 0)
+}
+
 pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, sqlx::Error> {
     let r = sqlx::query("DELETE FROM messages WHERE id = ?")
         .bind(id)
@@ -423,5 +436,28 @@ mod tests {
         set_thread(&c.pool, m.id, None).await.unwrap();
         let got = get(&c.pool, m.id).await.unwrap().unwrap();
         assert!(got.thread_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_folder_moves_message_and_reports_match() {
+        let c = ctx().await;
+        let m = create(&c.pool, &sample(&c, 1)).await.unwrap();
+        let other = crate::db::folders::create(
+            &c.pool,
+            &crate::db::folders::NewFolder {
+                account_id: c.account_id,
+                name: "Archive".into(),
+                delimiter: "/".into(),
+                role: crate::models::FolderRole::Archive,
+                selectable: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(set_folder(&c.pool, m.id, other.id).await.unwrap());
+        let got = get(&c.pool, m.id).await.unwrap().unwrap();
+        assert_eq!(got.folder_id, other.id);
+        assert!(!set_folder(&c.pool, Uuid::new_v4(), other.id).await.unwrap());
     }
 }

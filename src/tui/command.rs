@@ -2,7 +2,7 @@ use thiserror::Error;
 
 use super::theme::ThemeName;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Sync,
     StartSync,
@@ -11,6 +11,9 @@ pub enum Command {
     Unseen,
     Flag,
     Unflag,
+    Archive,
+    Delete,
+    Move(String),
     ThemeNext,
     Theme(ThemeName),
 }
@@ -39,6 +42,9 @@ pub fn parse_command(input: &str) -> Result<Command, CommandError> {
         "unseen" => parse_no_args(Command::Unseen, "unseen", parts),
         "flag" => parse_no_args(Command::Flag, "flag", parts),
         "unflag" => parse_no_args(Command::Unflag, "unflag", parts),
+        "archive" => parse_no_args(Command::Archive, "archive", parts),
+        "delete" => parse_no_args(Command::Delete, "delete", parts),
+        "move" => parse_move(input, parts),
         "theme" => parse_theme(parts),
         other => Err(CommandError::Unknown(other.to_string())),
     }
@@ -53,6 +59,32 @@ fn parse_no_args<'a>(
         Err(CommandError::Usage(usage))
     } else {
         Ok(command)
+    }
+}
+
+fn parse_move<'a>(
+    input: &str,
+    parts: impl Iterator<Item = &'a str>,
+) -> Result<Command, CommandError> {
+    let collected: Vec<&str> = parts.collect();
+    if collected.is_empty() {
+        return Err(CommandError::Usage("move <folder>"));
+    }
+    let folder = remainder_after_token(input, "move").trim().to_string();
+    if folder.is_empty() {
+        return Err(CommandError::Usage("move <folder>"));
+    }
+    Ok(Command::Move(folder))
+}
+
+/// Return everything after the first occurrence of `token`. Used for
+/// `:move <folder>` so that folder names with spaces survive parsing.
+fn remainder_after_token(input: &str, token: &str) -> String {
+    let trimmed = input.trim_start();
+    if let Some(rest) = trimmed.strip_prefix(token) {
+        rest.to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -140,6 +172,44 @@ mod tests {
         assert_eq!(
             err,
             CommandError::Usage("theme next|default|dark|high-contrast")
+        );
+    }
+
+    #[test]
+    fn test_parse_command_archive_and_delete_take_no_args() {
+        assert_eq!(parse_command("archive").unwrap(), Command::Archive);
+        assert_eq!(parse_command("delete").unwrap(), Command::Delete);
+        assert_eq!(
+            parse_command("archive now").unwrap_err(),
+            CommandError::Usage("archive")
+        );
+        assert_eq!(
+            parse_command("delete now").unwrap_err(),
+            CommandError::Usage("delete")
+        );
+    }
+
+    #[test]
+    fn test_parse_command_move_keeps_full_folder_name_including_spaces() {
+        assert_eq!(
+            parse_command("move Archive").unwrap(),
+            Command::Move("Archive".to_string())
+        );
+        assert_eq!(
+            parse_command("  move  My/Custom Folder  ").unwrap(),
+            Command::Move("My/Custom Folder".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_command_move_requires_folder() {
+        assert_eq!(
+            parse_command("move").unwrap_err(),
+            CommandError::Usage("move <folder>")
+        );
+        assert_eq!(
+            parse_command("move    ").unwrap_err(),
+            CommandError::Usage("move <folder>")
         );
     }
 }

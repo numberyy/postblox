@@ -74,6 +74,13 @@ trait Mailbox {
         message_id: Uuid,
         flags: &[String],
     ) -> Result<(), ipc::MailboxError>;
+    async fn archive_message(&mut self, message_id: Uuid) -> Result<(), ipc::MailboxError>;
+    async fn delete_message(&mut self, message_id: Uuid) -> Result<(), ipc::MailboxError>;
+    async fn move_message(
+        &mut self,
+        message_id: Uuid,
+        folder_name: &str,
+    ) -> Result<(), ipc::MailboxError>;
     async fn list_attachments(
         &mut self,
         message_id: Uuid,
@@ -158,6 +165,22 @@ impl Mailbox for MailboxClient {
         flags: &[String],
     ) -> Result<(), ipc::MailboxError> {
         MailboxClient::set_flags(self, message_id, flags).await
+    }
+
+    async fn archive_message(&mut self, message_id: Uuid) -> Result<(), ipc::MailboxError> {
+        MailboxClient::archive_message(self, message_id).await
+    }
+
+    async fn delete_message(&mut self, message_id: Uuid) -> Result<(), ipc::MailboxError> {
+        MailboxClient::delete_message(self, message_id).await
+    }
+
+    async fn move_message(
+        &mut self,
+        message_id: Uuid,
+        folder_name: &str,
+    ) -> Result<(), ipc::MailboxError> {
+        MailboxClient::move_message(self, message_id, folder_name).await
     }
 
     async fn list_attachments(
@@ -263,6 +286,9 @@ async fn handle_key<C: Mailbox + ?Sized>(
         InputMode::Compose | InputMode::ConfirmDiscard => {
             return handle_composer_key(key, app, client).await;
         }
+        InputMode::ConfirmDelete => {
+            return handle_delete_confirmation_key(key, app, client).await;
+        }
         InputMode::Normal => {}
     }
 
@@ -284,7 +310,9 @@ async fn handle_key<C: Mailbox + ?Sized>(
         }
         KeyCode::Char('q') => true,
         KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.focus_detail_pane() {
+            if message_list_focused(app) && app.selected_message_id().is_some() {
+                begin_message_delete(app);
+            } else if app.focus_detail_pane() {
                 app.set_status("Details");
             } else {
                 app.set_status("No message detail open");
@@ -350,7 +378,32 @@ async fn handle_key<C: Mailbox + ?Sized>(
             false
         }
         KeyCode::Char('e') => {
-            export_selected_attachment(app, client).await;
+            if message_list_focused(app) {
+                execute_command(Command::Archive, app, client).await;
+            } else {
+                export_selected_attachment(app, client).await;
+            }
+            false
+        }
+        KeyCode::Char('m') => {
+            if message_list_focused(app) {
+                app.enter_command_mode();
+                for ch in "move ".chars() {
+                    app.push_command_char(ch);
+                }
+                app.set_status("Command mode");
+            }
+            false
+        }
+        KeyCode::Char('*') => {
+            if message_list_focused(app) {
+                let command = if app.selected_message_has_flag(FLAGGED_FLAG).unwrap_or(false) {
+                    Command::Unflag
+                } else {
+                    Command::Flag
+                };
+                execute_command(command, app, client).await;
+            }
             false
         }
         KeyCode::Char('o') => {
@@ -688,6 +741,15 @@ async fn execute_command<C: Mailbox + ?Sized>(
         Command::Unflag => {
             run_flag_write(app, client, FLAGGED_FLAG, false, "Unflagged message").await;
         }
+        Command::Archive => run_message_remove(app, client, MessageRemove::Archive).await,
+        Command::Delete => {
+            if let Some(message_id) = app.selected_message_id() {
+                app.begin_delete_confirmation(message_id);
+            } else {
+                record_command_run_error(app, CommandRunError::MessageMissing);
+            }
+        }
+        Command::Move(folder) => run_message_move(app, client, &folder).await,
         Command::ThemeNext => {
             let theme = app.cycle_theme();
             app.clear_error();
@@ -784,16 +846,153 @@ async fn run_flag_write<C: Mailbox + ?Sized>(
     };
 
     app.clear_error();
-    app.set_status(success);
+    // Optimistic local update: revert if the daemon refuses.
+    let previous_flags = app
+        .selected_message()
+        .map(|message| message.flags.clone())
+        .unwrap_or_default();
+    app.apply_message_flags(message_id, flags.clone());
+    app.set_status("…");
     match client.set_flags(message_id, &flags).await {
         Ok(()) => {
-            app.apply_message_flags(message_id, flags);
             refresh_messages(app, client).await;
             if app.error.is_none() {
                 app.set_status(success);
             }
         }
-        Err(error) => record_error(app, error),
+        Err(error) => {
+            app.apply_message_flags(message_id, previous_flags);
+            record_error(app, error);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageRemove {
+    Archive,
+    Delete,
+}
+
+impl MessageRemove {
+    fn running_status(self) -> &'static str {
+        match self {
+            Self::Archive => "Archiving…",
+            Self::Delete => "Deleting…",
+        }
+    }
+
+    fn success_status(self) -> &'static str {
+        match self {
+            Self::Archive => "Archived",
+            Self::Delete => "Deleted",
+        }
+    }
+}
+
+async fn run_message_remove<C: Mailbox + ?Sized>(
+    app: &mut AppState,
+    client: &mut C,
+    op: MessageRemove,
+) {
+    let Some(message_id) = app.selected_message_id() else {
+        record_command_run_error(app, CommandRunError::MessageMissing);
+        return;
+    };
+    run_message_remove_for(app, client, op, message_id).await;
+}
+
+async fn run_message_remove_for<C: Mailbox + ?Sized>(
+    app: &mut AppState,
+    client: &mut C,
+    op: MessageRemove,
+    message_id: Uuid,
+) {
+    app.clear_error();
+    let snapshot = app.snapshot_message_list();
+    app.remove_message_locally(message_id);
+    app.set_status(op.running_status());
+
+    let result = match op {
+        MessageRemove::Archive => client.archive_message(message_id).await,
+        MessageRemove::Delete => client.delete_message(message_id).await,
+    };
+
+    match result {
+        Ok(()) => {
+            refresh_messages(app, client).await;
+            if app.error.is_none() {
+                app.set_status(op.success_status());
+            }
+        }
+        Err(error) => {
+            app.restore_message_list_snapshot(snapshot);
+            record_error(app, error);
+        }
+    }
+}
+
+async fn run_message_move<C: Mailbox + ?Sized>(
+    app: &mut AppState,
+    client: &mut C,
+    folder_name: &str,
+) {
+    let Some(message_id) = app.selected_message_id() else {
+        record_command_run_error(app, CommandRunError::MessageMissing);
+        return;
+    };
+    let folder_name = folder_name.trim();
+    if folder_name.is_empty() {
+        record_command_parse_error(app, "usage: move <folder>".into());
+        return;
+    }
+
+    app.clear_error();
+    let snapshot = app.snapshot_message_list();
+    app.remove_message_locally(message_id);
+    app.set_status(format!("Moving to {folder_name}…"));
+
+    match client.move_message(message_id, folder_name).await {
+        Ok(()) => {
+            refresh_messages(app, client).await;
+            if app.error.is_none() {
+                app.set_status(format!("Moved to {folder_name}"));
+            }
+        }
+        Err(error) => {
+            app.restore_message_list_snapshot(snapshot);
+            record_error(app, error);
+        }
+    }
+}
+
+fn message_list_focused(app: &AppState) -> bool {
+    matches!(app.active, ActivePane::Messages | ActivePane::Threads)
+}
+
+fn begin_message_delete(app: &mut AppState) {
+    match app.selected_message_id() {
+        Some(message_id) => app.begin_delete_confirmation(message_id),
+        None => record_command_run_error(app, CommandRunError::MessageMissing),
+    }
+}
+
+async fn handle_delete_confirmation_key<C: Mailbox + ?Sized>(
+    key: KeyEvent,
+    app: &mut AppState,
+    client: &mut C,
+) -> bool {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            if let Some(message_id) = app.take_pending_delete_message() {
+                run_message_remove_for(app, client, MessageRemove::Delete, message_id).await;
+            }
+            false
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            app.cancel_delete_confirmation();
+            false
+        }
+        _ => false,
     }
 }
 
@@ -1152,6 +1351,9 @@ mod tests {
         StartSync(Uuid, String),
         StopSync(Uuid, String),
         SetFlags(Uuid, Vec<String>),
+        ArchiveMessage(Uuid),
+        DeleteMessage(Uuid),
+        MoveMessage(Uuid, String),
         ListMessages(Uuid),
         GetMessage(Uuid),
         ListAttachments(Uuid),
@@ -1173,6 +1375,9 @@ mod tests {
         send_message_id: Option<String>,
         fail_sync: bool,
         fail_set_flags: bool,
+        fail_archive: bool,
+        fail_delete: bool,
+        fail_move: bool,
         fail_draft: bool,
         fail_send: bool,
     }
@@ -1245,6 +1450,38 @@ mod tests {
             self.calls.push(Call::SetFlags(message_id, flags.to_vec()));
             if self.fail_set_flags {
                 Err(server_error("message.set_flags"))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn archive_message(&mut self, message_id: Uuid) -> Result<(), ipc::MailboxError> {
+            self.calls.push(Call::ArchiveMessage(message_id));
+            if self.fail_archive {
+                Err(server_error("message.archive"))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn delete_message(&mut self, message_id: Uuid) -> Result<(), ipc::MailboxError> {
+            self.calls.push(Call::DeleteMessage(message_id));
+            if self.fail_delete {
+                Err(server_error("message.delete"))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn move_message(
+            &mut self,
+            message_id: Uuid,
+            folder_name: &str,
+        ) -> Result<(), ipc::MailboxError> {
+            self.calls
+                .push(Call::MoveMessage(message_id, folder_name.to_string()));
+            if self.fail_move {
+                Err(server_error("message.move"))
             } else {
                 Ok(())
             }
@@ -2486,5 +2723,247 @@ mod tests {
         assert_eq!(app.mode, InputMode::Normal);
         assert!(app.composer.is_none());
         assert!(app.status.contains("<sent-1@postblox.local>"));
+    }
+
+    fn app_with_message_list_focused(account_id: Uuid, folder_id: Uuid) -> (AppState, MessageItem) {
+        let mut app = app_with_account_folder(account_id, folder_id);
+        let message = message_item(Uuid::new_v4(), vec!["\\Seen"]);
+        app.apply_folder_messages(vec![message.clone()]);
+        app.active = ActivePane::Messages;
+        (app, message)
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_e_archives_when_message_list_focused() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert!(client.calls.contains(&Call::ArchiveMessage(message.id)));
+        assert_eq!(app.status, "Archived");
+        assert!(app.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_d_opens_delete_confirmation_when_message_list_focused() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.mode, InputMode::ConfirmDelete);
+        assert_eq!(app.pending_delete_message, Some(message.id));
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_confirm_delete_yes_deletes_and_clears_pending() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        app.begin_delete_confirmation(message.id);
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.pending_delete_message.is_none());
+        assert!(client.calls.contains(&Call::DeleteMessage(message.id)));
+        assert!(app.messages.is_empty());
+        assert_eq!(app.status, "Deleted");
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_confirm_delete_no_cancels_without_calling_daemon() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        app.begin_delete_confirmation(message.id);
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.pending_delete_message.is_none());
+        assert!(client.calls.is_empty());
+        assert_eq!(app.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_confirm_delete_esc_cancels() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        app.begin_delete_confirmation(message.id);
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.pending_delete_message.is_none());
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_archive_failure_restores_message_list() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox {
+            fail_archive: true,
+            ..Default::default()
+        };
+
+        execute_command(Command::Archive, &mut app, &mut client).await;
+
+        assert_eq!(client.calls, vec![Call::ArchiveMessage(message.id)]);
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].id, message.id);
+        assert!(app.error.as_deref().unwrap().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_m_opens_command_bar_with_move_prefix() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, _) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.mode, InputMode::Command);
+        assert_eq!(app.command_input, "move ");
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_move_calls_daemon_with_folder_name() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox::default();
+
+        execute_command(Command::Move("Archive".into()), &mut app, &mut client).await;
+
+        assert!(client
+            .calls
+            .contains(&Call::MoveMessage(message.id, "Archive".into())));
+        assert_eq!(app.status, "Moved to Archive");
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_move_failure_restores_message_list() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox {
+            fail_move: true,
+            ..Default::default()
+        };
+
+        execute_command(Command::Move("Archive".into()), &mut app, &mut client).await;
+
+        assert_eq!(
+            client.calls,
+            vec![Call::MoveMessage(message.id, "Archive".into())]
+        );
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].id, message.id);
+        assert!(app.error.as_deref().unwrap().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_star_toggles_flag_when_message_list_focused() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('*'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert!(client.calls.iter().any(|call| matches!(
+            call,
+            Call::SetFlags(id, flags) if *id == message.id && flags.contains(&"\\Flagged".to_string())
+        )));
+        assert_eq!(app.status, "Flagged message");
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_star_unflags_when_already_flagged() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        let message = message_item(Uuid::new_v4(), vec!["\\Flagged"]);
+        app.apply_messages(vec![message.clone()]);
+        app.active = ActivePane::Messages;
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('*'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert!(client.calls.iter().any(|call| matches!(
+            call,
+            Call::SetFlags(id, flags) if *id == message.id && !flags.contains(&"\\Flagged".to_string())
+        )));
+        assert_eq!(app.status, "Unflagged message");
     }
 }

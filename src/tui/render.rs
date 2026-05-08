@@ -532,6 +532,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
             " Discard unsaved compose? y/n ".to_string(),
             theme.command,
         ),
+        InputMode::ConfirmDelete => (" Delete? y/n ".to_string(), theme.command),
         InputMode::Normal => {
             let status = if let Some(error) = &app.error {
                 format!("Error: {error}")
@@ -544,7 +545,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
                 )
             } else {
                 format!(
-                    " {status} | q quit • c compose • : command • ←/→ pane • Tab pane • ↑/↓ move • j/k move • Enter open • d details • a attach • e export • o open • r refresh • s sync • u seen • f flag • t theme "
+                    " {status} | q quit • c compose • : command • ←/→ pane • Tab pane • ↑/↓ move • j/k move • Enter open • d details/delete • a attach • e export/archive • m move • o open • r refresh • s sync • u seen • f/* flag • t theme "
                 )
             };
             let style = if app.error.is_some() {

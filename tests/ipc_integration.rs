@@ -2451,3 +2451,326 @@ async fn account_sync_folder_missing_secret_surfaces_specific_error() {
         Some("missing_secret")
     );
 }
+
+/// Seed an account with INBOX/Archive/Trash folders and one message in INBOX.
+/// Returns (account_id, inbox_id, archive_id, trash_id, message_id).
+async fn seed_account_with_message(
+    h: &Harness,
+) -> (uuid::Uuid, uuid::Uuid, uuid::Uuid, uuid::Uuid, uuid::Uuid) {
+    let acc = accounts::create(
+        &h.pool,
+        &accounts::NewAccount {
+            email: format!("a-{}@x.com", uuid::Uuid::new_v4()),
+            display_name: None,
+            auth_kind: AuthKind::Password,
+            imap_host: "i".into(),
+            imap_port: 993,
+            imap_use_tls: true,
+            smtp_host: "s".into(),
+            smtp_port: 465,
+            smtp_use_tls: true,
+            smtp_starttls: false,
+        },
+    )
+    .await
+    .unwrap();
+    let inbox = folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id: acc.id,
+            name: "INBOX".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Inbox,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+    let archive = folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id: acc.id,
+            name: "Archive".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Archive,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+    let trash = folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id: acc.id,
+            name: "Trash".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Trash,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+    let thread = threads::create(&h.pool, acc.id, None, Some("subj"))
+        .await
+        .unwrap();
+    let msg = messages::create(
+        &h.pool,
+        &messages::NewMessage {
+            account_id: acc.id,
+            folder_id: inbox.id,
+            thread_id: Some(thread.id),
+            uid: 1,
+            message_id_header: None,
+            in_reply_to: None,
+            references_header: None,
+            from_addr: "b@x.com".into(),
+            to_addrs: json!([]),
+            cc_addrs: json!([]),
+            bcc_addrs: json!([]),
+            reply_to: None,
+            subject: Some("subj".into()),
+            snippet: None,
+            text_body: None,
+            html_body: None,
+            raw_size: 1,
+            flags: json!([]),
+            internal_date: chrono::Utc::now(),
+            sent_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    (acc.id, inbox.id, archive.id, trash.id, msg.id)
+}
+
+#[tokio::test]
+async fn message_archive_moves_row_publishes_event_and_audits() {
+    let h = make_harness().await;
+    let (_, inbox_id, archive_id, _, msg_id) = seed_account_with_message(&h).await;
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let sub = c.subscribe(Topic::MailUpdated).await.unwrap();
+    assert!(sub > 0);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let resp = c
+        .request("message.archive", json!({"id": msg_id.to_string()}))
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp.error);
+    assert_eq!(resp.data["folder_id"], archive_id.to_string());
+
+    let event = timeout(Duration::from_secs(2), c.next_event())
+        .await
+        .expect("expected mail.updated event")
+        .unwrap();
+    assert_eq!(event.topic, "mail.updated");
+    assert_eq!(event.data["message_id"], msg_id.to_string());
+    assert_eq!(event.data["folder_id"], archive_id.to_string());
+    assert_eq!(event.data["from_folder_id"], inbox_id.to_string());
+
+    let row = messages::get(&h.pool, msg_id).await.unwrap().unwrap();
+    assert_eq!(row.folder_id, archive_id);
+
+    let audit = c
+        .request("audit.list_recent", json!({"limit": 10}))
+        .await
+        .unwrap();
+    assert!(audit.ok);
+    assert!(
+        audit
+            .data
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["action"] == "message.archive" && e["target"] == msg_id.to_string()),
+        "expected audit entry for message.archive"
+    );
+}
+
+#[tokio::test]
+async fn message_delete_moves_row_to_trash_and_publishes_event() {
+    let h = make_harness().await;
+    let (_, inbox_id, _, trash_id, msg_id) = seed_account_with_message(&h).await;
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let sub = c.subscribe(Topic::MailUpdated).await.unwrap();
+    assert!(sub > 0);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let resp = c
+        .request("message.delete", json!({"id": msg_id.to_string()}))
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp.error);
+    assert_eq!(resp.data["folder_id"], trash_id.to_string());
+
+    let event = timeout(Duration::from_secs(2), c.next_event())
+        .await
+        .expect("expected mail.updated event")
+        .unwrap();
+    assert_eq!(event.data["message_id"], msg_id.to_string());
+    assert_eq!(event.data["folder_id"], trash_id.to_string());
+    assert_eq!(event.data["from_folder_id"], inbox_id.to_string());
+
+    let row = messages::get(&h.pool, msg_id).await.unwrap().unwrap();
+    assert_eq!(row.folder_id, trash_id);
+}
+
+#[tokio::test]
+async fn message_move_to_named_folder_moves_row_and_publishes_event() {
+    let h = make_harness().await;
+    let (account_id, inbox_id, _, _, msg_id) = seed_account_with_message(&h).await;
+    let custom = folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id,
+            name: "Receipts".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Custom,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let sub = c.subscribe(Topic::MailUpdated).await.unwrap();
+    assert!(sub > 0);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let resp = c
+        .request(
+            "message.move",
+            json!({"id": msg_id.to_string(), "folder_name": "Receipts"}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp.error);
+    assert_eq!(resp.data["folder_id"], custom.id.to_string());
+
+    let event = timeout(Duration::from_secs(2), c.next_event())
+        .await
+        .expect("expected mail.updated event")
+        .unwrap();
+    assert_eq!(event.data["message_id"], msg_id.to_string());
+    assert_eq!(event.data["folder_id"], custom.id.to_string());
+    assert_eq!(event.data["from_folder_id"], inbox_id.to_string());
+
+    let row = messages::get(&h.pool, msg_id).await.unwrap().unwrap();
+    assert_eq!(row.folder_id, custom.id);
+}
+
+#[tokio::test]
+async fn message_archive_unknown_id_returns_bad_args() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "message.archive",
+            json!({"id": uuid::Uuid::new_v4().to_string()}),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+}
+
+#[tokio::test]
+async fn message_archive_without_archive_folder_returns_bad_args() {
+    let h = make_harness().await;
+    // Seed an account with INBOX only — no Archive role.
+    let acc = accounts::create(
+        &h.pool,
+        &accounts::NewAccount {
+            email: "a@x.com".into(),
+            display_name: None,
+            auth_kind: AuthKind::Password,
+            imap_host: "i".into(),
+            imap_port: 993,
+            imap_use_tls: true,
+            smtp_host: "s".into(),
+            smtp_port: 465,
+            smtp_use_tls: true,
+            smtp_starttls: false,
+        },
+    )
+    .await
+    .unwrap();
+    let inbox = folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id: acc.id,
+            name: "INBOX".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Inbox,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+    let thread = threads::create(&h.pool, acc.id, None, Some("subj"))
+        .await
+        .unwrap();
+    let msg = messages::create(
+        &h.pool,
+        &messages::NewMessage {
+            account_id: acc.id,
+            folder_id: inbox.id,
+            thread_id: Some(thread.id),
+            uid: 1,
+            message_id_header: None,
+            in_reply_to: None,
+            references_header: None,
+            from_addr: "b@x.com".into(),
+            to_addrs: json!([]),
+            cc_addrs: json!([]),
+            bcc_addrs: json!([]),
+            reply_to: None,
+            subject: Some("subj".into()),
+            snippet: None,
+            text_body: None,
+            html_body: None,
+            raw_size: 1,
+            flags: json!([]),
+            internal_date: chrono::Utc::now(),
+            sent_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request("message.archive", json!({"id": msg.id.to_string()}))
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+}
+
+#[tokio::test]
+async fn message_move_unknown_folder_returns_bad_args() {
+    let h = make_harness().await;
+    let (_, _, _, _, msg_id) = seed_account_with_message(&h).await;
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "message.move",
+            json!({"id": msg_id.to_string(), "folder_name": "DoesNotExist"}),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+}
