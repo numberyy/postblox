@@ -5,6 +5,7 @@
 //! tokens.
 
 use sqlx::SqlitePool;
+use uuid::Uuid;
 
 use crate::models::Message;
 
@@ -24,24 +25,53 @@ pub async fn search(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Message>, sqlx::Error> {
+    search_scoped(pool, fts_query, None, limit, offset).await
+}
+
+/// Like [`search`], but optionally restricts hits to a specific account.
+pub async fn search_scoped(
+    pool: &SqlitePool,
+    fts_query: &str,
+    account_id: Option<Uuid>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Message>, sqlx::Error> {
     let limit = limit.clamp(1, 500);
     let offset = offset.max(0);
-    const Q: &str = "SELECT \
-            m.id, m.account_id, m.folder_id, m.thread_id, m.uid, m.message_id_header, \
-            m.in_reply_to, m.references_header, m.from_addr, m.to_addrs, m.cc_addrs, \
-            m.bcc_addrs, m.reply_to, m.subject, m.snippet, m.text_body, m.html_body, \
-            m.raw_size, m.flags, m.internal_date, m.sent_at, m.created_at \
-         FROM messages_fts f \
-         JOIN messages m ON m.rowid = f.rowid \
-         WHERE messages_fts MATCH ? \
-         ORDER BY rank \
-         LIMIT ? OFFSET ?";
-    sqlx::query_as(Q)
-        .bind(fts_query)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await
+    const COLS: &str = "\
+        m.id, m.account_id, m.folder_id, m.thread_id, m.uid, m.message_id_header, \
+        m.in_reply_to, m.references_header, m.from_addr, m.to_addrs, m.cc_addrs, \
+        m.bcc_addrs, m.reply_to, m.subject, m.snippet, m.text_body, m.html_body, \
+        m.raw_size, m.flags, m.internal_date, m.sent_at, m.created_at";
+    match account_id {
+        Some(account_id) => {
+            let q = format!(
+                "SELECT {COLS} FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
+                 WHERE messages_fts MATCH ? AND m.account_id = ? \
+                 ORDER BY rank LIMIT ? OFFSET ?"
+            );
+            sqlx::query_as(&q)
+                .bind(fts_query)
+                .bind(account_id)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(pool)
+                .await
+        }
+        None => {
+            let q = format!(
+                "SELECT {COLS} FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
+                 WHERE messages_fts MATCH ? \
+                 ORDER BY rank LIMIT ? OFFSET ?"
+            );
+            sqlx::query_as(&q)
+                .bind(fts_query)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(pool)
+                .await
+        }
+    }
 }
 
 #[cfg(test)]
@@ -211,6 +241,68 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_scoped_filters_by_account() {
+        let (pool, a, f) = seed().await;
+        // Second account in the same DB.
+        let other = crate::db::accounts::create(
+            &pool,
+            &crate::db::accounts::NewAccount {
+                email: "other@x.com".into(),
+                display_name: None,
+                auth_kind: crate::models::AuthKind::Password,
+                imap_host: "i".into(),
+                imap_port: 993,
+                imap_use_tls: true,
+                smtp_host: "s".into(),
+                smtp_port: 465,
+                smtp_use_tls: true,
+                smtp_starttls: false,
+            },
+        )
+        .await
+        .unwrap();
+        let other_folder = crate::db::folders::create(
+            &pool,
+            &crate::db::folders::NewFolder {
+                account_id: other.id,
+                name: "INBOX".into(),
+                delimiter: "/".into(),
+                role: crate::models::FolderRole::Inbox,
+                selectable: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        crate::db::messages::create(&pool, &msg(a, f, 1, "shared topic", "alpha", "u@x.com"))
+            .await
+            .unwrap();
+        crate::db::messages::create(
+            &pool,
+            &msg(
+                other.id,
+                other_folder.id,
+                1,
+                "shared topic",
+                "beta",
+                "v@x.com",
+            ),
+        )
+        .await
+        .unwrap();
+
+        let all = search_scoped(&pool, &quote_term("shared"), None, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2);
+        let only_a = search_scoped(&pool, &quote_term("shared"), Some(a), 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].account_id, a);
     }
 
     #[tokio::test]

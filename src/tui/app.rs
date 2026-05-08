@@ -47,6 +47,7 @@ pub enum ActivePane {
     Messages,
     Details,
     Attachments,
+    Search,
 }
 
 impl ActivePane {
@@ -57,18 +58,20 @@ impl ActivePane {
             Self::Threads => Self::Messages,
             Self::Messages => Self::Details,
             Self::Details => Self::Attachments,
-            Self::Attachments => Self::Accounts,
+            Self::Attachments => Self::Search,
+            Self::Search => Self::Accounts,
         }
     }
 
     pub fn previous(self) -> Self {
         match self {
-            Self::Accounts => Self::Attachments,
+            Self::Accounts => Self::Search,
             Self::Folders => Self::Accounts,
             Self::Threads => Self::Folders,
             Self::Messages => Self::Threads,
             Self::Details => Self::Messages,
             Self::Attachments => Self::Details,
+            Self::Search => Self::Attachments,
         }
     }
 }
@@ -80,7 +83,11 @@ pub enum InputMode {
     Compose,
     ConfirmDiscard,
     ConfirmDelete,
+    QuickSearch,
 }
+
+/// Maximum chars accepted in the `/` quick-search input.
+pub const MAX_SEARCH_CHARS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposeField {
@@ -233,6 +240,62 @@ impl From<Message> for MessageDetail {
             snippet,
             body,
             flags: flags_from_value(&message.flags),
+        }
+    }
+}
+
+/// One row returned by the `search` op, projected for the search pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHit {
+    pub message_id: Uuid,
+    pub account_id: Uuid,
+    pub folder_id: Uuid,
+    pub subject: String,
+    pub from: String,
+    pub snippet: String,
+    pub date: String,
+}
+
+impl From<Message> for SearchHit {
+    fn from(message: Message) -> Self {
+        let subject = text_or_default(message.subject.as_deref(), "(no subject)");
+        let snippet = text_or_default(message.snippet.as_deref(), "");
+        Self {
+            message_id: message.id,
+            account_id: message.account_id,
+            folder_id: message.folder_id,
+            subject,
+            from: message.from_addr,
+            snippet,
+            date: message.internal_date.format("%Y-%m-%d %H:%M").to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchState {
+    pub query: String,
+    pub scope_account: Option<Uuid>,
+    pub hits: Vec<SearchHit>,
+    pub selected: usize,
+    pub pending: bool,
+    /// Pane to restore when the user closes search via Esc.
+    pub previous_pane: ActivePane,
+}
+
+impl SearchState {
+    pub fn new(
+        query: impl Into<String>,
+        scope_account: Option<Uuid>,
+        previous_pane: ActivePane,
+    ) -> Self {
+        Self {
+            query: query.into(),
+            scope_account,
+            hits: Vec::new(),
+            selected: 0,
+            pending: true,
+            previous_pane,
         }
     }
 }
@@ -762,6 +825,9 @@ pub struct AppState {
     pub toasts: VecDeque<Toast>,
     pub next_toast_id: u64,
     pub account_states: HashMap<Uuid, AccountStatus>,
+    pub search: Option<SearchState>,
+    pub search_input: String,
+    pub search_input_previous_pane: ActivePane,
 }
 
 impl Default for AppState {
@@ -797,6 +863,9 @@ impl Default for AppState {
             toasts: VecDeque::new(),
             next_toast_id: 0,
             account_states: HashMap::new(),
+            search: None,
+            search_input: String::new(),
+            search_input_previous_pane: ActivePane::Accounts,
         }
     }
 }
@@ -879,6 +948,7 @@ impl AppState {
                 }
                 changed
             }
+            ActivePane::Search => self.move_search_selection(delta),
         }
     }
 
@@ -893,6 +963,7 @@ impl AppState {
         self.selected_folder = 0;
         self.selected_thread = 0;
         self.selected_message = 0;
+        self.search = None;
         self.normalize_active_pane();
     }
 
@@ -1416,6 +1487,168 @@ impl AppState {
         true
     }
 
+    pub fn search_pane_visible(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// Resolve an account name (label or email, case-insensitive) to a
+    /// `Uuid`. Used by `:search --account <name>`.
+    pub fn account_id_by_name(&self, name: &str) -> Option<Uuid> {
+        let lowered = name.trim().to_lowercase();
+        if lowered.is_empty() {
+            return None;
+        }
+        self.accounts
+            .iter()
+            .find(|account| {
+                account.label.to_lowercase() == lowered || account.email.to_lowercase() == lowered
+            })
+            .map(|account| account.id)
+    }
+
+    /// Begin quick-search input over the message list. Restores
+    /// `previous_pane` on cancel.
+    pub fn enter_quick_search(&mut self) {
+        self.search_input_previous_pane = self.active;
+        self.search_input.clear();
+        self.mode = InputMode::QuickSearch;
+        self.clear_error();
+        self.set_status("Search /");
+    }
+
+    pub fn cancel_quick_search(&mut self) {
+        self.mode = InputMode::Normal;
+        self.search_input.clear();
+        self.clear_error();
+        self.active = self.search_input_previous_pane;
+        self.set_status("Search cancelled");
+    }
+
+    pub fn push_search_char(&mut self, ch: char) -> bool {
+        if ch.is_control() || self.search_input.chars().count() >= MAX_SEARCH_CHARS {
+            return false;
+        }
+        self.search_input.push(ch);
+        true
+    }
+
+    pub fn backspace_search(&mut self) -> bool {
+        self.search_input.pop().is_some()
+    }
+
+    /// Consume the quick-search buffer and switch to Normal mode.
+    pub fn finish_quick_search(&mut self) -> String {
+        self.mode = InputMode::Normal;
+        std::mem::take(&mut self.search_input)
+    }
+
+    /// Open the search pane with `query` and `scope_account`. Records
+    /// `previous_pane` so Esc can restore it. Marks results as pending
+    /// until [`AppState::apply_search_hits`] is called.
+    pub fn begin_search(&mut self, query: impl Into<String>, scope_account: Option<Uuid>) {
+        let previous = if self.search_pane_visible() {
+            self.search
+                .as_ref()
+                .map(|state| state.previous_pane)
+                .unwrap_or(self.active)
+        } else {
+            self.active
+        };
+        self.search = Some(SearchState::new(query, scope_account, previous));
+        self.active = ActivePane::Search;
+        self.clear_error();
+    }
+
+    pub fn apply_search_hits(&mut self, hits: Vec<SearchHit>) {
+        if let Some(state) = &mut self.search {
+            state.hits = hits;
+            state.pending = false;
+            clamp_index(&mut state.selected, state.hits.len());
+        }
+    }
+
+    /// Restore the pane that was active before the search opened and
+    /// clear the search state.
+    pub fn close_search(&mut self) {
+        if let Some(state) = self.search.take() {
+            self.active = state.previous_pane;
+        }
+        self.normalize_active_pane();
+    }
+
+    pub fn move_search_selection(&mut self, delta: isize) -> bool {
+        let Some(state) = &mut self.search else {
+            return false;
+        };
+        if state.hits.is_empty() {
+            state.selected = 0;
+            return false;
+        }
+        move_index(&mut state.selected, state.hits.len(), delta)
+    }
+
+    pub fn selected_search_hit(&self) -> Option<&SearchHit> {
+        self.search
+            .as_ref()
+            .and_then(|state| state.hits.get(state.selected))
+    }
+
+    pub fn search_query(&self) -> Option<&str> {
+        self.search.as_ref().map(|state| state.query.as_str())
+    }
+
+    pub fn search_scope_account(&self) -> Option<Uuid> {
+        self.search.as_ref().and_then(|state| state.scope_account)
+    }
+
+    pub fn search_is_pending(&self) -> bool {
+        self.search.as_ref().is_some_and(|state| state.pending)
+    }
+
+    /// Refocus a hit's location: switch active account / folder /
+    /// selected message and close the search pane. Returns true when
+    /// either a target hit was found and applied or the caller passed
+    /// in a known hit. The folder/account lookups are best-effort —
+    /// the message list is loaded lazily by the caller via
+    /// `refresh_messages` after this returns.
+    pub fn jump_to_hit(&mut self, hit: &SearchHit) -> bool {
+        let Some(account_index) = self
+            .accounts
+            .iter()
+            .position(|account| account.id == hit.account_id)
+        else {
+            return false;
+        };
+        if self.selected_account != account_index {
+            self.selected_account = account_index;
+            self.folders.clear();
+            self.folder_messages.clear();
+            self.threads.clear();
+            self.messages.clear();
+            self.clear_detail_state();
+            self.selected_folder = 0;
+            self.selected_thread = 0;
+        }
+        if let Some(folder_index) = self
+            .folders
+            .iter()
+            .position(|folder| folder.id == hit.folder_id)
+        {
+            self.selected_folder = folder_index;
+        }
+        if let Some(message_index) = self
+            .messages
+            .iter()
+            .position(|message| message.id == hit.message_id)
+        {
+            self.selected_message = message_index;
+        }
+        self.search = None;
+        self.active = ActivePane::Messages;
+        self.normalize_active_pane();
+        true
+    }
+
     pub fn selected_message_id(&self) -> Option<Uuid> {
         self.messages.get(self.selected_message).map(|m| m.id)
     }
@@ -1806,11 +2039,18 @@ impl AppState {
                 ActivePane::Messages
             };
         }
+        if self.active == ActivePane::Search && !self.search_pane_visible() {
+            self.active = if self.messages.is_empty() {
+                ActivePane::Folders
+            } else {
+                ActivePane::Messages
+            };
+        }
     }
 
     fn next_visible_pane(&self) -> ActivePane {
         let mut pane = self.active;
-        for _ in 0..6 {
+        for _ in 0..7 {
             pane = pane.next();
             if self.pane_visible(pane) {
                 return pane;
@@ -1821,7 +2061,7 @@ impl AppState {
 
     fn previous_visible_pane(&self) -> ActivePane {
         let mut pane = self.active;
-        for _ in 0..6 {
+        for _ in 0..7 {
             pane = pane.previous();
             if self.pane_visible(pane) {
                 return pane;
@@ -1835,6 +2075,7 @@ impl AppState {
             ActivePane::Threads => self.threads_pane_visible(),
             ActivePane::Details => self.detail_pane_visible(),
             ActivePane::Attachments => self.attachments_pane_visible(),
+            ActivePane::Search => self.search_pane_visible(),
             ActivePane::Accounts | ActivePane::Folders | ActivePane::Messages => true,
         }
     }

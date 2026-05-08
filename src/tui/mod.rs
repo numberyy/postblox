@@ -118,6 +118,11 @@ trait Mailbox {
         account_id: Uuid,
         draft_id: Uuid,
     ) -> Result<String, ipc::MailboxError>;
+    async fn search(
+        &mut self,
+        query: &str,
+        account_id: Option<Uuid>,
+    ) -> Result<Vec<app::SearchHit>, ipc::MailboxError>;
 }
 
 #[async_trait::async_trait(?Send)]
@@ -238,6 +243,14 @@ impl Mailbox for MailboxClient {
         draft_id: Uuid,
     ) -> Result<String, ipc::MailboxError> {
         MailboxClient::send_draft(self, account_id, draft_id).await
+    }
+
+    async fn search(
+        &mut self,
+        query: &str,
+        account_id: Option<Uuid>,
+    ) -> Result<Vec<app::SearchHit>, ipc::MailboxError> {
+        MailboxClient::search(self, query, account_id).await
     }
 }
 
@@ -426,7 +439,12 @@ async fn handle_key<C: Mailbox + ?Sized>(
         InputMode::ConfirmDelete => {
             return handle_delete_confirmation_key(key, app, client).await;
         }
+        InputMode::QuickSearch => return handle_quick_search_key(key, app, client).await,
         InputMode::Normal => {}
+    }
+
+    if app.active == ActivePane::Search && handle_search_pane_key(key, app, client).await {
+        return false;
     }
 
     if app.active == ActivePane::Details && handle_detail_key(key, app) {
@@ -436,6 +454,10 @@ async fn handle_key<C: Mailbox + ?Sized>(
     match key.code {
         KeyCode::Char(':') => {
             app.enter_command_mode();
+            false
+        }
+        KeyCode::Char('/') => {
+            app.enter_quick_search();
             false
         }
         KeyCode::Char('c') => {
@@ -965,14 +987,66 @@ async fn execute_command<C: Mailbox + ?Sized>(
         Command::Goto(folder) => run_goto_folder(app, client, &folder).await,
         Command::Account(name) => run_select_account(app, client, &name).await,
         Command::Search { account, query } => {
-            // Slice 5 owns search execution; today we only verify the
-            // parser end-to-end with a placeholder toast.
-            app.clear_error();
-            let scoped = match account {
-                Some(name) => format!("[{name}] {query}"),
-                None => query,
-            };
-            app.set_status(format!("search not yet available: {scoped} (slice 5)"));
+            run_search(app, client, account, query).await;
+        }
+    }
+}
+
+async fn run_search<C: Mailbox + ?Sized>(
+    app: &mut AppState,
+    client: &mut C,
+    account: Option<String>,
+    query: String,
+) {
+    let scope_account = match account {
+        Some(name) => match app.account_id_by_name(&name) {
+            Some(id) => Some(id),
+            None => {
+                let message = format!("unknown account: {name}");
+                app.push_toast(app::ToastKind::Error, message.clone(), Instant::now());
+                app.set_error(message.clone());
+                app.set_status(message);
+                return;
+            }
+        },
+        None => None,
+    };
+    submit_search(app, client, query, scope_account).await;
+}
+
+async fn submit_search<C: Mailbox + ?Sized>(
+    app: &mut AppState,
+    client: &mut C,
+    query: String,
+    scope_account: Option<Uuid>,
+) {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        app.set_status("Search needs a query");
+        return;
+    }
+    let now = Instant::now();
+    app.push_toast(app::ToastKind::Info, "Searching…", now);
+    app.begin_search(trimmed, scope_account);
+    app.set_status(format!("Searching {trimmed}"));
+
+    match client.search(trimmed, scope_account).await {
+        Ok(hits) => {
+            let count = hits.len();
+            app.apply_search_hits(hits);
+            app.push_toast(
+                app::ToastKind::Info,
+                format!("{count} result(s)"),
+                Instant::now(),
+            );
+            app.set_status(format!("{count} search result(s)"));
+        }
+        Err(error) => {
+            let message = error.to_string();
+            app.push_toast(app::ToastKind::Error, message.clone(), Instant::now());
+            app.set_error(message.clone());
+            app.close_search();
+            app.set_status(message);
         }
     }
 }
@@ -1252,6 +1326,84 @@ async fn handle_delete_confirmation_key<C: Mailbox + ?Sized>(
     }
 }
 
+/// Handle keys while typing into the `/` quick-search overlay. Esc
+/// restores the previous pane; Enter submits the query (scoped to the
+/// current account when one is selected); printable chars build up the
+/// query buffer.
+async fn handle_quick_search_key<C: Mailbox + ?Sized>(
+    key: KeyEvent,
+    app: &mut AppState,
+    client: &mut C,
+) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.cancel_quick_search();
+            false
+        }
+        KeyCode::Enter => {
+            let query = app.finish_quick_search();
+            let scope = app.selected_account_id();
+            submit_search(app, client, query, scope).await;
+            false
+        }
+        KeyCode::Backspace => {
+            app.backspace_search();
+            false
+        }
+        KeyCode::Char(ch) => {
+            if !app.push_search_char(ch) {
+                app.set_error(format!(
+                    "search is limited to {} characters",
+                    app::MAX_SEARCH_CHARS
+                ));
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Handle keys while the Search pane is focused. Returns true when the
+/// key was consumed; false lets the outer key handler fall through to
+/// the normal-mode bindings (`/`, `:`, `q`, etc).
+async fn handle_search_pane_key<C: Mailbox + ?Sized>(
+    key: KeyEvent,
+    app: &mut AppState,
+    client: &mut C,
+) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.close_search();
+            app.set_status("Search closed");
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.move_search_selection(1);
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.move_search_selection(-1);
+            true
+        }
+        KeyCode::Enter => {
+            if let Some(hit) = app.selected_search_hit().cloned() {
+                if app.jump_to_hit(&hit) {
+                    refresh_folders(app, client).await;
+                    refresh_messages(app, client).await;
+                    refresh_detail(app, client).await;
+                    app.set_status(format!("Opened: {}", hit.subject));
+                } else {
+                    let message = "Could not jump to result".to_string();
+                    app.set_error(message.clone());
+                    app.set_status(message);
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 async fn save_composer<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) -> Option<Uuid> {
     let Some(draft) = app.composer_draft() else {
         app.set_status("No composer open");
@@ -1419,6 +1571,7 @@ async fn refresh_current_pane<C: Mailbox + ?Sized>(app: &mut AppState, client: &
         ActivePane::Messages => refresh_messages(app, client).await,
         ActivePane::Details => refresh_detail(app, client).await,
         ActivePane::Attachments => refresh_attachments(app, client).await,
+        ActivePane::Search => refresh_search(app, client).await,
     }
 }
 
@@ -1430,7 +1583,18 @@ async fn refresh_after_selection_change<C: Mailbox + ?Sized>(app: &mut AppState,
         ActivePane::Messages => refresh_detail(app, client).await,
         ActivePane::Details => refresh_detail(app, client).await,
         ActivePane::Attachments => refresh_attachment_preview(app, client).await,
+        ActivePane::Search => {}
     }
+}
+
+/// Re-run the active search (used by `r` while the Search pane is
+/// focused). No-op when no search is open.
+async fn refresh_search<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
+    let Some(query) = app.search_query().map(str::to_owned) else {
+        return;
+    };
+    let scope = app.search_scope_account();
+    submit_search(app, client, query, scope).await;
 }
 
 async fn refresh_accounts<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
@@ -1618,6 +1782,7 @@ mod tests {
         CreateDraft(app::ComposerDraft),
         UpdateDraft(Uuid, app::ComposerDraft),
         SendDraft(Uuid, Uuid),
+        Search(String, Option<Uuid>),
     }
 
     #[derive(Default)]
@@ -1629,6 +1794,7 @@ mod tests {
         preview: Option<app::AttachmentPreviewItem>,
         draft_id: Option<Uuid>,
         send_message_id: Option<String>,
+        search_hits: Vec<app::SearchHit>,
         fail_sync: bool,
         fail_set_flags: bool,
         fail_archive: bool,
@@ -1636,6 +1802,7 @@ mod tests {
         fail_move: bool,
         fail_draft: bool,
         fail_send: bool,
+        fail_search: bool,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -1819,6 +1986,19 @@ mod tests {
                     .send_message_id
                     .clone()
                     .unwrap_or_else(|| "<sent@postblox.local>".into()))
+            }
+        }
+
+        async fn search(
+            &mut self,
+            query: &str,
+            account_id: Option<Uuid>,
+        ) -> Result<Vec<app::SearchHit>, ipc::MailboxError> {
+            self.calls.push(Call::Search(query.to_string(), account_id));
+            if self.fail_search {
+                Err(server_error("search"))
+            } else {
+                Ok(self.search_hits.clone())
             }
         }
     }
@@ -3480,21 +3660,169 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_command_bar_search_emits_slice_five_placeholder() {
+    async fn test_command_bar_search_runs_unscoped_query() {
         let mut app = AppState::default();
-        let mut client = MockMailbox::default();
+        let mut client = MockMailbox {
+            search_hits: vec![search_hit("test mail", Uuid::new_v4(), Uuid::new_v4())],
+            ..Default::default()
+        };
 
         run_command_line("search foo bar".into(), &mut app, &mut client).await;
-        assert!(app.status.contains("search not yet available"));
-        assert!(app.status.contains("foo bar"));
+
+        assert!(matches!(
+            client.calls.last(),
+            Some(Call::Search(query, None)) if query == "foo bar"
+        ));
+        assert!(app.search_pane_visible());
+        assert_eq!(app.active, ActivePane::Search);
+        assert!(app.status.contains("1 search result"));
+    }
+
+    #[tokio::test]
+    async fn test_command_bar_search_scopes_to_named_account() {
+        let work_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(work_id)]);
+        let mut client = MockMailbox::default();
+
         run_command_line(
             "search --account Work foo bar".into(),
             &mut app,
             &mut client,
         )
         .await;
-        assert!(app.status.contains("[Work]"));
+
+        assert!(matches!(
+            client.calls.last(),
+            Some(Call::Search(query, Some(id))) if query == "foo bar" && *id == work_id
+        ));
+        assert!(app.search_pane_visible());
+    }
+
+    #[tokio::test]
+    async fn test_command_bar_search_unknown_account_errors_and_no_call() {
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(Uuid::new_v4())]);
+        let mut client = MockMailbox::default();
+
+        run_command_line(
+            "search --account Personal foo bar".into(),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
         assert!(client.calls.is_empty());
+        assert_eq!(app.error.as_deref(), Some("unknown account: Personal"));
+        assert!(!app.search_pane_visible());
+    }
+
+    #[tokio::test]
+    async fn test_quick_search_slash_collects_chars_then_submits_with_account_scope() {
+        let work_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(work_id)]);
+        let mut client = MockMailbox::default();
+
+        let consumed = handle_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert!(!consumed);
+        assert_eq!(app.mode, InputMode::QuickSearch);
+
+        for ch in "test".chars() {
+            handle_key(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await;
+        }
+        assert_eq!(app.search_input, "test");
+
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(matches!(
+            client.calls.last(),
+            Some(Call::Search(query, Some(id))) if query == "test" && *id == work_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_quick_search_esc_cancels_and_restores_pane() {
+        let mut app = AppState {
+            active: ActivePane::Folders,
+            ..AppState::default()
+        };
+        let mut client = MockMailbox::default();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        for ch in "abc".chars() {
+            handle_key(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await;
+        }
+        handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.search_input.is_empty());
+        assert_eq!(app.active, ActivePane::Folders);
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_quick_search_empty_query_does_not_call_daemon() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert!(client.calls.is_empty());
+        assert!(!app.search_pane_visible());
+    }
+
+    fn search_hit(subject: &str, account_id: Uuid, folder_id: Uuid) -> app::SearchHit {
+        app::SearchHit {
+            message_id: Uuid::new_v4(),
+            account_id,
+            folder_id,
+            subject: subject.into(),
+            from: "alice@example.com".into(),
+            snippet: "snippet".into(),
+            date: "2026-05-09 10:00".into(),
+        }
     }
 
     #[tokio::test]

@@ -2814,6 +2814,157 @@ async fn tui_command_archive_matches_archive_keybinding_via_daemon() {
     assert_eq!(row.folder_id, archive_id);
 }
 
+// FTS5 search end-to-end: seed two accounts each with one message, then
+// drive the daemon `search` op through the socket and assert (a)
+// unscoped queries return both, (b) `account_id` filters down to one,
+// and (c) empty `q` is rejected.
+async fn seed_searchable_message(
+    h: &Harness,
+    email: &str,
+    subject: &str,
+    body: &str,
+) -> (uuid::Uuid, uuid::Uuid) {
+    let acc = accounts::create(
+        &h.pool,
+        &accounts::NewAccount {
+            email: email.into(),
+            display_name: None,
+            auth_kind: AuthKind::Password,
+            imap_host: "i".into(),
+            imap_port: 993,
+            imap_use_tls: true,
+            smtp_host: "s".into(),
+            smtp_port: 465,
+            smtp_use_tls: true,
+            smtp_starttls: false,
+        },
+    )
+    .await
+    .unwrap();
+    let folder = folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id: acc.id,
+            name: "INBOX".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Inbox,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+    let thread = threads::create(&h.pool, acc.id, None, Some(subject))
+        .await
+        .unwrap();
+    let msg = messages::create(
+        &h.pool,
+        &messages::NewMessage {
+            account_id: acc.id,
+            folder_id: folder.id,
+            thread_id: Some(thread.id),
+            uid: 1,
+            message_id_header: None,
+            in_reply_to: None,
+            references_header: None,
+            from_addr: "sender@example.com".into(),
+            to_addrs: json!([]),
+            cc_addrs: json!([]),
+            bcc_addrs: json!([]),
+            reply_to: None,
+            subject: Some(subject.into()),
+            snippet: Some(body.into()),
+            text_body: Some(body.into()),
+            html_body: None,
+            raw_size: body.len() as i64,
+            flags: json!([]),
+            internal_date: chrono::Utc::now(),
+            sent_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    (acc.id, msg.id)
+}
+
+#[tokio::test]
+async fn search_op_returns_messages_across_accounts_when_unscoped() {
+    let h = make_harness().await;
+    let (_acc_a, msg_a) =
+        seed_searchable_message(&h, "a@x.com", "Quarterly review", "review notes").await;
+    let (_acc_b, msg_b) =
+        seed_searchable_message(&h, "b@x.com", "Quarterly meeting", "agenda").await;
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request("search", json!({"q": "quarterly"}))
+        .await
+        .unwrap();
+    assert!(resp.ok, "search failed: {:?}", resp.error);
+    let rows = resp.data.as_array().expect("array");
+    let ids: Vec<String> = rows
+        .iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_string))
+        .collect();
+    assert!(ids.contains(&msg_a.to_string()));
+    assert!(ids.contains(&msg_b.to_string()));
+}
+
+#[tokio::test]
+async fn search_op_filters_by_account_id_when_scoped() {
+    let h = make_harness().await;
+    let (acc_a, msg_a) =
+        seed_searchable_message(&h, "a@x.com", "Quarterly review", "review notes").await;
+    let (_acc_b, msg_b) =
+        seed_searchable_message(&h, "b@x.com", "Quarterly meeting", "agenda").await;
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "search",
+            json!({"q": "quarterly", "account_id": acc_a.to_string()}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "search failed: {:?}", resp.error);
+    let ids: Vec<String> = resp
+        .data
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_string))
+        .collect();
+    assert!(ids.contains(&msg_a.to_string()));
+    assert!(!ids.contains(&msg_b.to_string()));
+}
+
+#[tokio::test]
+async fn search_op_empty_query_returns_bad_args() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let resp = c.request("search", json!({"q": ""})).await.unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+}
+
+#[tokio::test]
+async fn search_op_clamps_limit_to_two_hundred() {
+    let h = make_harness().await;
+    seed_searchable_message(&h, "a@x.com", "review", "lorem").await;
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    // limit=9999 must not crash or error — the dispatcher silently
+    // clamps to 200 so the IPC frame stays bounded.
+    let resp = c
+        .request("search", json!({"q": "review", "limit": 9999}))
+        .await
+        .unwrap();
+    assert!(resp.ok, "search failed: {:?}", resp.error);
+}
+
 // Subscribe → publish round-trip is already covered by
 // `subscription_delivers_published_event_via_hub` above; the test below
 // exercises the TUI reducer that sits *behind* that subscribe path so we

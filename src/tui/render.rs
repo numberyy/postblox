@@ -61,13 +61,75 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState) {
         render_folders(frame, top[1], app, &theme);
         render_messages(frame, top[2], app, &theme);
     }
-    if app.attachments_pane_visible() {
+    if app.search_pane_visible() {
+        render_search(frame, main[1], app, &theme);
+    } else if app.attachments_pane_visible() {
         render_detail_with_attachments(frame, main[1], app, &theme);
     } else {
         render_detail(frame, main[1], app, &theme);
     }
     render_toasts(frame, root[1], app, &theme);
     render_status(frame, root[2], app, &theme);
+}
+
+fn render_search(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    let active = app.active == ActivePane::Search;
+    let query = app.search_query().unwrap_or("");
+    let scope_label = app
+        .search_scope_account()
+        .and_then(|id| {
+            app.accounts
+                .iter()
+                .find(|account| account.id == id)
+                .map(|account| account.label.clone())
+        })
+        .unwrap_or_else(|| "all accounts".into());
+    let title = if app.search_is_pending() {
+        format!("Search '{query}' — {scope_label} • loading…")
+    } else {
+        let count = app
+            .search
+            .as_ref()
+            .map(|state| state.hits.len())
+            .unwrap_or(0);
+        format!("Search '{query}' — {scope_label} • {count} hit(s)")
+    };
+
+    let items: Vec<ListItem<'_>> = match app.search.as_ref() {
+        Some(state) if state.pending => vec![ListItem::new("Loading…")],
+        Some(state) if state.hits.is_empty() => vec![ListItem::new("No results")],
+        Some(state) => state
+            .hits
+            .iter()
+            .map(|hit| {
+                let mut line = vec![
+                    Span::styled(hit.subject.clone(), theme.text.add_modifier(Modifier::BOLD)),
+                    Span::raw(format!(" — {}", hit.from)),
+                    Span::styled(format!(" {}", hit.date), theme.muted),
+                ];
+                if !hit.snippet.is_empty() {
+                    line.push(Span::raw("  "));
+                    line.push(Span::styled(hit.snippet.clone(), theme.muted));
+                }
+                ListItem::new(Line::from(line))
+            })
+            .collect(),
+        None => vec![ListItem::new("No search open")],
+    };
+
+    let selected = app.search.as_ref().map(|state| state.selected).unwrap_or(0);
+    let len = app
+        .search
+        .as_ref()
+        .map(|state| state.hits.len())
+        .unwrap_or(0);
+    let mut state = selection_state(len, selected);
+    let list = List::new(items)
+        .block(pane_block_owned(title, active, theme))
+        .style(theme.text)
+        .highlight_style(theme.selection)
+        .highlight_symbol("› ");
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_toasts(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
@@ -565,6 +627,10 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
     let (text, style) = match app.mode {
         InputMode::Command => (
             format!(" :{} | Enter run • Esc cancel ", app.command_input),
+            theme.command,
+        ),
+        InputMode::QuickSearch => (
+            format!(" /{} | Enter search • Esc cancel ", app.search_input),
             theme.command,
         ),
         InputMode::Compose => (

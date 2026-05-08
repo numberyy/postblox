@@ -11,7 +11,7 @@ use crate::models::{Account, Attachment, Draft, Folder, Message};
 
 use super::app::{
     AccountItem, AttachmentItem, AttachmentPreviewItem, ComposerDraft, FolderItem, MessageDetail,
-    MessageItem,
+    MessageItem, SearchHit,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -264,6 +264,18 @@ impl MailboxClient {
         Ok(sent.message_id)
     }
 
+    pub async fn search(
+        &mut self,
+        query: &str,
+        account_id: Option<Uuid>,
+    ) -> Result<Vec<SearchHit>, MailboxError> {
+        let response = self
+            .request("search", search_args(query, account_id))
+            .await?;
+        let hits: Vec<Message> = decode_response("search", response)?;
+        Ok(hits.into_iter().map(SearchHit::from).collect())
+    }
+
     /// Subscribe to a daemon event topic. Returns the daemon-allocated
     /// `sub_id` so callers can later unsubscribe if needed.
     pub async fn subscribe(&mut self, topic: Topic) -> Result<u64, MailboxError> {
@@ -368,6 +380,13 @@ pub(crate) fn draft_update_args(draft_id: Uuid, draft: &ComposerDraft) -> Value 
 
 pub(crate) fn message_send_args(account_id: Uuid, draft_id: Uuid) -> Value {
     json!({ "account_id": account_id, "draft_id": draft_id })
+}
+
+pub(crate) fn search_args(query: &str, account_id: Option<Uuid>) -> Value {
+    match account_id {
+        Some(account_id) => json!({ "q": query, "account_id": account_id, "limit": 50 }),
+        None => json!({ "q": query, "limit": 50 }),
+    }
 }
 
 #[cfg(test)]

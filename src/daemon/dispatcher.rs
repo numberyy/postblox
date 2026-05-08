@@ -494,10 +494,24 @@ async fn op_search(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
         .get("q")
         .and_then(|v| v.as_str())
         .ok_or_else(|| RpcError::bad_args("missing 'q'"))?;
-    let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+    if q.trim().is_empty() {
+        return Err(RpcError::bad_args("'q' must not be empty"));
+    }
+    let account_id = match args.get("account_id") {
+        Some(Value::Null) | None => None,
+        Some(_) => Some(parse_uuid(&args, "account_id")?),
+    };
+    // Soft cap so a TUI search can't accidentally pull thousands of rows
+    // over the IPC socket.
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(50)
+        .clamp(1, 200);
     let offset = args.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
     encode(
-        db::search::search(pool, &db::search::quote_term(q), limit, offset).await,
+        db::search::search_scoped(pool, &db::search::quote_term(q), account_id, limit, offset)
+            .await,
         "search",
     )
 }
