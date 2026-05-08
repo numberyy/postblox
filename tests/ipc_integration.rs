@@ -645,6 +645,8 @@ async fn message_send_missing_secret_returns_missing_secret() {
             subject: Some("No secret".into()),
             text_body: Some("body".into()),
             html_body: None,
+            in_reply_to: None,
+            references_header: None,
         },
     )
     .await
@@ -684,6 +686,8 @@ async fn message_send_auth_failure_maps_to_auth_failed() {
             subject: Some("Auth".into()),
             text_body: Some("body".into()),
             html_body: None,
+            in_reply_to: None,
+            references_header: None,
         },
     )
     .await
@@ -750,6 +754,8 @@ async fn message_send_oauth_account_uses_bearer_token_for_smtp() {
             subject: Some("OAuth SMTP".into()),
             text_body: Some("body".into()),
             html_body: None,
+            in_reply_to: None,
+            references_header: None,
         },
     )
     .await
@@ -787,6 +793,8 @@ async fn message_send_bad_args_return_bad_args() {
             subject: Some("No recipients".into()),
             text_body: Some("body".into()),
             html_body: None,
+            in_reply_to: None,
+            references_header: None,
         },
     )
     .await
@@ -3311,4 +3319,286 @@ async fn message_send_with_attachments_builds_multipart_mime() {
             .any(|e| { e["action"] == "message.send" && e["details"]["attachment_count"] == 1 }),
         "expected attachment_count in audit details: {entries:?}"
     );
+}
+
+// -- Slice 7: reply / reply-all / forward ----------------------------------
+
+async fn insert_reply_seed(h: &Harness) -> (uuid::Uuid, uuid::Uuid, uuid::Uuid) {
+    let acc = accounts::create(
+        &h.pool,
+        &accounts::NewAccount {
+            email: "me@example.com".into(),
+            display_name: None,
+            auth_kind: AuthKind::Password,
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            imap_use_tls: true,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 465,
+            smtp_use_tls: true,
+            smtp_starttls: false,
+        },
+    )
+    .await
+    .unwrap();
+    let inbox = folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id: acc.id,
+            name: "INBOX".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Inbox,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+    let thread = threads::create(&h.pool, acc.id, None, Some("Original"))
+        .await
+        .unwrap();
+    let msg = messages::create(
+        &h.pool,
+        &messages::NewMessage {
+            account_id: acc.id,
+            folder_id: inbox.id,
+            thread_id: Some(thread.id),
+            uid: 7,
+            message_id_header: Some("orig@example.com".into()),
+            in_reply_to: None,
+            references_header: None,
+            from_addr: "alice@example.com".into(),
+            to_addrs: json!(["me@example.com", "bob@example.com"]),
+            cc_addrs: json!(["carol@example.com"]),
+            bcc_addrs: json!([]),
+            reply_to: None,
+            subject: Some("Original".into()),
+            snippet: Some("hi".into()),
+            text_body: Some("Original body line one\nOriginal body line two".into()),
+            html_body: None,
+            raw_size: 32,
+            flags: json!([]),
+            internal_date: chrono::Utc::now(),
+            sent_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    (acc.id, inbox.id, msg.id)
+}
+
+#[tokio::test]
+async fn message_prepare_reply_returns_threading_headers_and_quoted_body() {
+    let h = make_harness().await;
+    let (account_id, _folder_id, message_id) = insert_reply_seed(&h).await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let resp = c
+        .request(
+            "message.prepare_reply",
+            json!({"message_id": message_id, "reply_all": false}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp.error);
+    assert_eq!(resp.data["account_id"], account_id.to_string());
+    assert_eq!(resp.data["subject"], "Re: Original");
+    assert_eq!(resp.data["in_reply_to"], "<orig@example.com>");
+    assert_eq!(resp.data["references"], "<orig@example.com>");
+    let to: Vec<String> = serde_json::from_value(resp.data["to"].clone()).unwrap();
+    assert_eq!(to, vec!["alice@example.com".to_string()]);
+    let cc: Vec<String> = serde_json::from_value(resp.data["cc"].clone()).unwrap();
+    assert!(cc.is_empty());
+    let body = resp.data["quoted_body"].as_str().unwrap();
+    assert!(body.contains("alice@example.com wrote:"));
+    assert!(body.contains("> Original body line one"));
+}
+
+#[tokio::test]
+async fn message_prepare_reply_all_includes_others_and_drops_self() {
+    let h = make_harness().await;
+    let (_account_id, _folder_id, message_id) = insert_reply_seed(&h).await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let resp = c
+        .request(
+            "message.prepare_reply",
+            json!({"message_id": message_id, "reply_all": true}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp.error);
+    let to: Vec<String> = serde_json::from_value(resp.data["to"].clone()).unwrap();
+    assert_eq!(to, vec!["alice@example.com".to_string()]);
+    let cc: Vec<String> = serde_json::from_value(resp.data["cc"].clone()).unwrap();
+    // me@example.com filtered, alice already in To, others kept.
+    assert!(cc.contains(&"bob@example.com".to_string()));
+    assert!(cc.contains(&"carol@example.com".to_string()));
+    assert!(!cc.iter().any(|s| s.eq_ignore_ascii_case("me@example.com")));
+}
+
+#[tokio::test]
+async fn message_prepare_forward_returns_subject_body_and_attachment_manifest() {
+    let h = make_harness().await;
+    let (account_id, _folder_id, message_id) = insert_reply_seed(&h).await;
+
+    // Attach one file.
+    let path = h._db_dir.path().join("forward.txt");
+    tokio::fs::write(&path, b"forward attachment bytes")
+        .await
+        .unwrap();
+    let attachment = db_attachments::create(
+        &h.pool,
+        &db_attachments::NewAttachment {
+            message_id,
+            filename: "forward.txt".into(),
+            content_type: "text/plain".into(),
+            content_id: None,
+            size_bytes: 24,
+            disposition: AttachmentDisposition::Attachment,
+            storage_path: path.display().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request("message.prepare_forward", json!({"message_id": message_id}))
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp.error);
+    assert_eq!(resp.data["account_id"], account_id.to_string());
+    assert_eq!(resp.data["subject"], "Fwd: Original");
+    let body = resp.data["forwarded_body"].as_str().unwrap();
+    assert!(body.contains("---------- Forwarded message ----------"));
+    assert!(body.contains("From: alice@example.com"));
+    let manifest = resp.data["forwarded_attachments"].as_array().unwrap();
+    assert_eq!(manifest.len(), 1);
+    assert_eq!(manifest[0]["attachment_id"], attachment.id.to_string());
+    assert_eq!(manifest[0]["filename"], "forward.txt");
+    assert_eq!(manifest[0]["size_bytes"], 24);
+}
+
+#[tokio::test]
+async fn attachment_fetch_for_forward_returns_cached_bytes_when_available() {
+    let h = make_harness().await;
+    let (_account_id, _folder_id, message_id) = insert_reply_seed(&h).await;
+    let path = h._db_dir.path().join("cached.txt");
+    let payload = b"cached forward bytes";
+    tokio::fs::write(&path, payload).await.unwrap();
+    let attachment = db_attachments::create(
+        &h.pool,
+        &db_attachments::NewAttachment {
+            message_id,
+            filename: "cached.txt".into(),
+            content_type: "text/plain".into(),
+            content_id: None,
+            size_bytes: payload.len() as i64,
+            disposition: AttachmentDisposition::Attachment,
+            storage_path: path.display().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "attachment.fetch_for_forward",
+            json!({"attachment_id": attachment.id}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp.error);
+    assert_eq!(resp.data["filename"], "cached.txt");
+    assert_eq!(resp.data["source"], "cache");
+    use base64::Engine;
+    let encoded = resp.data["content_base64"].as_str().unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap();
+    assert_eq!(decoded, payload);
+}
+
+#[tokio::test]
+async fn attachment_fetch_for_forward_without_cache_or_creds_returns_unavailable_offline() {
+    let h = make_harness().await;
+    let (_account_id, _folder_id, message_id) = insert_reply_seed(&h).await;
+    // Reference a path that does not exist on disk.
+    let attachment = db_attachments::create(
+        &h.pool,
+        &db_attachments::NewAttachment {
+            message_id,
+            filename: "missing.bin".into(),
+            content_type: "application/octet-stream".into(),
+            content_id: None,
+            size_bytes: 0,
+            disposition: AttachmentDisposition::Attachment,
+            storage_path: h
+                ._db_dir
+                .path()
+                .join("does-not-exist.bin")
+                .display()
+                .to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "attachment.fetch_for_forward",
+            json!({"attachment_id": attachment.id}),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("unavailable_offline"),
+    );
+}
+
+#[tokio::test]
+async fn message_send_with_reply_headers_emits_in_reply_to_and_references() {
+    let smtp = Arc::new(MockSmtp::ok());
+    let h = make_harness_with_smtp(smtp.clone()).await;
+    let account_id = setup_account_with_secret(&h).await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let draft = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": account_id,
+                "to_addrs": ["alice@example.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "Re: Hi",
+                "text_body": "thanks",
+                "in_reply_to": "<orig@example.com>",
+                "references_header": "<root@example.com> <orig@example.com>",
+                "in_reply_to_msg": null,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(draft.ok, "{:?}", draft.error);
+    let draft_id = draft.data["id"].as_str().unwrap().to_string();
+
+    let sent = c
+        .request(
+            "message.send",
+            json!({"account_id": account_id, "draft_id": draft_id}),
+        )
+        .await
+        .unwrap();
+    assert!(sent.ok, "{:?}", sent.error);
+
+    let calls = smtp.calls();
+    assert_eq!(calls.len(), 1);
+    let mime = String::from_utf8(calls[0].mime.clone()).unwrap();
+    assert!(mime.contains("In-Reply-To: <orig@example.com>\r\n"));
+    assert!(mime.contains("References: <root@example.com> <orig@example.com>\r\n"));
 }

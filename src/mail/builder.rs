@@ -29,6 +29,15 @@ pub struct MimeAttachment {
     pub content_id: Option<String>,
 }
 
+/// RFC 5322 §3.6.4 threading headers to thread an outgoing reply onto
+/// the original message. Both fields are optional so the same builder
+/// path serves new-thread sends.
+#[derive(Debug, Default, Clone)]
+pub struct ReplyHeaders<'a> {
+    pub in_reply_to: Option<&'a str>,
+    pub references: Option<&'a str>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_mime_with_attachments(
     from: &str,
@@ -40,6 +49,31 @@ pub fn build_mime_with_attachments(
     message_id: &str,
     attachments: &[MimeAttachment],
 ) -> Vec<u8> {
+    build_mime_full(
+        from,
+        to,
+        cc,
+        subject,
+        text_body,
+        html_body,
+        message_id,
+        attachments,
+        &ReplyHeaders::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_mime_full(
+    from: &str,
+    to: &[String],
+    cc: &[String],
+    subject: &str,
+    text_body: Option<&str>,
+    html_body: Option<&str>,
+    message_id: &str,
+    attachments: &[MimeAttachment],
+    reply: &ReplyHeaders<'_>,
+) -> Vec<u8> {
     let mut msg = String::new();
     // write! to String is infallible — fmt::Write for String never returns Err.
     let _ = write!(msg, "From: {}\r\n", sanitize_header(from));
@@ -49,6 +83,12 @@ pub fn build_mime_with_attachments(
     }
     let _ = write!(msg, "Subject: {}\r\n", sanitize_header(subject));
     let _ = write!(msg, "Message-ID: {}\r\n", sanitize_header(message_id));
+    if let Some(value) = reply.in_reply_to.filter(|s| !s.is_empty()) {
+        let _ = write!(msg, "In-Reply-To: {}\r\n", sanitize_header(value));
+    }
+    if let Some(value) = reply.references.filter(|s| !s.is_empty()) {
+        let _ = write!(msg, "References: {}\r\n", sanitize_header(value));
+    }
     let _ = write!(
         msg,
         "Date: {}\r\n",
@@ -387,6 +427,65 @@ mod tests {
         assert!(s.contains("Content-ID: <logo123@example.com>"));
         assert!(s.contains("Content-Disposition: inline; filename=\"logo.png\""));
         assert!(!s.contains("Content-Disposition: attachment; filename=\"logo.png\""));
+    }
+
+    #[test]
+    fn test_build_mime_full_emits_in_reply_to_and_references_headers() {
+        let s = String::from_utf8(build_mime_full(
+            "me@example.com",
+            &["other@example.com".into()],
+            &[],
+            "Re: Hello",
+            Some("body"),
+            None,
+            "<reply@postblox>",
+            &[],
+            &ReplyHeaders {
+                in_reply_to: Some("<orig@example.com>"),
+                references: Some("<root@example.com> <orig@example.com>"),
+            },
+        ))
+        .unwrap();
+        assert!(s.contains("In-Reply-To: <orig@example.com>\r\n"));
+        assert!(s.contains("References: <root@example.com> <orig@example.com>\r\n"));
+    }
+
+    #[test]
+    fn test_build_mime_full_omits_threading_when_absent() {
+        let s = String::from_utf8(build_mime_full(
+            "me@example.com",
+            &["other@example.com".into()],
+            &[],
+            "Hi",
+            Some("body"),
+            None,
+            "<msg@postblox>",
+            &[],
+            &ReplyHeaders::default(),
+        ))
+        .unwrap();
+        assert!(!s.contains("In-Reply-To"));
+        assert!(!s.contains("References"));
+    }
+
+    #[test]
+    fn test_build_mime_full_strips_crlf_from_reply_headers() {
+        let s = String::from_utf8(build_mime_full(
+            "me@example.com",
+            &["other@example.com".into()],
+            &[],
+            "Re: x",
+            Some("b"),
+            None,
+            "<r@postblox>",
+            &[],
+            &ReplyHeaders {
+                in_reply_to: Some("<orig@x>\r\nBcc: attacker@evil"),
+                references: Some("<root@x>"),
+            },
+        ))
+        .unwrap();
+        assert!(!s.contains("\r\nBcc:"));
     }
 
     #[test]

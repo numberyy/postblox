@@ -21,6 +21,57 @@ pub struct AttachmentExportResult {
     pub bytes_copied: u64,
 }
 
+/// Decoded `message.prepare_reply` response.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct ReplyPrepared {
+    pub message_id: Uuid,
+    pub account_id: Uuid,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub in_reply_to: String,
+    pub references: String,
+    pub quoted_body: String,
+}
+
+/// Decoded `message.prepare_forward` response.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct ForwardPrepared {
+    pub message_id: Uuid,
+    pub account_id: Uuid,
+    pub subject: String,
+    pub forwarded_body: String,
+    pub forwarded_attachments: Vec<ForwardAttachmentMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct ForwardAttachmentMeta {
+    pub message_id: Uuid,
+    pub attachment_id: Uuid,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+}
+
+/// Decoded `attachment.fetch_for_forward` response. The bytes are
+/// base64-encoded over the wire; the helper returns raw bytes via
+/// [`ForwardAttachmentBytes::decoded_bytes`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct ForwardAttachmentBytes {
+    pub attachment_id: Uuid,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub content_base64: String,
+}
+
+impl ForwardAttachmentBytes {
+    pub fn decoded_bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(&self.content_base64)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 struct SendResult {
     message_id: String,
@@ -276,6 +327,46 @@ impl MailboxClient {
         Ok(hits.into_iter().map(SearchHit::from).collect())
     }
 
+    pub async fn prepare_reply(
+        &mut self,
+        message_id: Uuid,
+        reply_all: bool,
+    ) -> Result<ReplyPrepared, MailboxError> {
+        let response = self
+            .request(
+                "message.prepare_reply",
+                json!({ "message_id": message_id, "reply_all": reply_all }),
+            )
+            .await?;
+        decode_response("message.prepare_reply", response)
+    }
+
+    pub async fn prepare_forward(
+        &mut self,
+        message_id: Uuid,
+    ) -> Result<ForwardPrepared, MailboxError> {
+        let response = self
+            .request(
+                "message.prepare_forward",
+                json!({ "message_id": message_id }),
+            )
+            .await?;
+        decode_response("message.prepare_forward", response)
+    }
+
+    pub async fn fetch_attachment_for_forward(
+        &mut self,
+        attachment_id: Uuid,
+    ) -> Result<ForwardAttachmentBytes, MailboxError> {
+        let response = self
+            .request(
+                "attachment.fetch_for_forward",
+                json!({ "attachment_id": attachment_id }),
+            )
+            .await?;
+        decode_response("attachment.fetch_for_forward", response)
+    }
+
     /// Subscribe to a daemon event topic. Returns the daemon-allocated
     /// `sub_id` so callers can later unsubscribe if needed.
     pub async fn subscribe(&mut self, topic: Topic) -> Result<u64, MailboxError> {
@@ -363,6 +454,8 @@ pub(crate) fn draft_create_args(draft: &ComposerDraft) -> Value {
         "subject": &draft.subject,
         "text_body": &draft.text_body,
         "html_body": &draft.html_body,
+        "in_reply_to": &draft.in_reply_to,
+        "references_header": &draft.references_header,
         "attachments": draft_attachment_specs(draft),
     })
 }
@@ -554,6 +647,8 @@ mod tests {
             text_body: Some("Body".into()),
             html_body: None,
             attachments: Vec::new(),
+            in_reply_to: None,
+            references_header: None,
         };
 
         assert_eq!(
@@ -567,6 +662,8 @@ mod tests {
                 "subject": "Hello",
                 "text_body": "Body",
                 "html_body": null,
+                "in_reply_to": null,
+                "references_header": null,
                 "attachments": [],
             })
         );

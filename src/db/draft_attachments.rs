@@ -124,6 +124,8 @@ mod tests {
                 subject: Some("hi".into()),
                 text_body: Some("body".into()),
                 html_body: None,
+                in_reply_to: None,
+                references_header: None,
             },
         )
         .await

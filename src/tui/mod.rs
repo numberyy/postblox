@@ -123,6 +123,19 @@ trait Mailbox {
         query: &str,
         account_id: Option<Uuid>,
     ) -> Result<Vec<app::SearchHit>, ipc::MailboxError>;
+    async fn prepare_reply(
+        &mut self,
+        message_id: Uuid,
+        reply_all: bool,
+    ) -> Result<ipc::ReplyPrepared, ipc::MailboxError>;
+    async fn prepare_forward(
+        &mut self,
+        message_id: Uuid,
+    ) -> Result<ipc::ForwardPrepared, ipc::MailboxError>;
+    async fn fetch_attachment_for_forward(
+        &mut self,
+        attachment_id: Uuid,
+    ) -> Result<ipc::ForwardAttachmentBytes, ipc::MailboxError>;
 }
 
 #[async_trait::async_trait(?Send)]
@@ -251,6 +264,28 @@ impl Mailbox for MailboxClient {
         account_id: Option<Uuid>,
     ) -> Result<Vec<app::SearchHit>, ipc::MailboxError> {
         MailboxClient::search(self, query, account_id).await
+    }
+
+    async fn prepare_reply(
+        &mut self,
+        message_id: Uuid,
+        reply_all: bool,
+    ) -> Result<ipc::ReplyPrepared, ipc::MailboxError> {
+        MailboxClient::prepare_reply(self, message_id, reply_all).await
+    }
+
+    async fn prepare_forward(
+        &mut self,
+        message_id: Uuid,
+    ) -> Result<ipc::ForwardPrepared, ipc::MailboxError> {
+        MailboxClient::prepare_forward(self, message_id).await
+    }
+
+    async fn fetch_attachment_for_forward(
+        &mut self,
+        attachment_id: Uuid,
+    ) -> Result<ipc::ForwardAttachmentBytes, ipc::MailboxError> {
+        MailboxClient::fetch_attachment_for_forward(self, attachment_id).await
     }
 }
 
@@ -590,6 +625,18 @@ async fn handle_key<C: Mailbox + ?Sized>(
             }
             false
         }
+        KeyCode::Char('R') => {
+            run_reply(app, client, false).await;
+            false
+        }
+        KeyCode::Char('A') => {
+            run_reply(app, client, true).await;
+            false
+        }
+        KeyCode::Char('F') => {
+            run_forward(app, client).await;
+            false
+        }
         KeyCode::Enter => {
             if app.active == ActivePane::Threads {
                 app.active = ActivePane::Messages;
@@ -602,6 +649,119 @@ async fn handle_key<C: Mailbox + ?Sized>(
             false
         }
         _ => false,
+    }
+}
+
+async fn run_reply<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C, reply_all: bool) {
+    let Some(message_id) = app.selected_message_id() else {
+        let label = if reply_all { "reply-all" } else { "reply" };
+        app.set_status(format!("{label}: no message selected"));
+        return;
+    };
+    let prepared = match client.prepare_reply(message_id, reply_all).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let message = error.to_string();
+            app.push_toast(app::ToastKind::Error, message.clone(), Instant::now());
+            app.set_error(message.clone());
+            app.set_status(message);
+            return;
+        }
+    };
+    let prefill = app::ComposerPrefill {
+        in_reply_to_msg: Some(prepared.message_id),
+        to_addrs: prepared.to,
+        cc_addrs: prepared.cc,
+        bcc_addrs: Vec::new(),
+        subject: Some(prepared.subject),
+        body: non_empty_string(&prepared.quoted_body),
+        in_reply_to: non_empty_string(&prepared.in_reply_to),
+        references_header: non_empty_string(&prepared.references),
+        attachments: Vec::new(),
+    };
+    app.enter_composer_with_prefill(prepared.account_id, prefill);
+    let label = if reply_all { "Reply-all" } else { "Reply" };
+    app.set_status(label);
+}
+
+async fn run_forward<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
+    let Some(message_id) = app.selected_message_id() else {
+        app.set_status("forward: no message selected");
+        return;
+    };
+    let prepared = match client.prepare_forward(message_id).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let message = error.to_string();
+            app.push_toast(app::ToastKind::Error, message.clone(), Instant::now());
+            app.set_error(message.clone());
+            app.set_status(message);
+            return;
+        }
+    };
+    let mut attachments: Vec<app::ComposerAttachment> =
+        Vec::with_capacity(prepared.forwarded_attachments.len());
+    let mut failed_attachments: Vec<String> = Vec::new();
+    for meta in &prepared.forwarded_attachments {
+        match client
+            .fetch_attachment_for_forward(meta.attachment_id)
+            .await
+        {
+            Ok(bytes) => match materialise_forward_attachment(&bytes) {
+                Ok(attachment) => attachments.push(attachment),
+                Err(_) => failed_attachments.push(meta.filename.clone()),
+            },
+            Err(_) => failed_attachments.push(meta.filename.clone()),
+        }
+    }
+    if !failed_attachments.is_empty() {
+        let message = format!("Could not carry forward: {}", failed_attachments.join(", "));
+        app.push_toast(app::ToastKind::Error, message.clone(), Instant::now());
+    }
+    let prefill = app::ComposerPrefill {
+        in_reply_to_msg: None,
+        to_addrs: Vec::new(),
+        cc_addrs: Vec::new(),
+        bcc_addrs: Vec::new(),
+        subject: Some(prepared.subject),
+        body: non_empty_string(&prepared.forwarded_body),
+        in_reply_to: None,
+        references_header: None,
+        attachments,
+    };
+    app.enter_composer_with_prefill(prepared.account_id, prefill);
+    app.set_status("Forward");
+}
+
+/// Decode the bytes returned by `attachment.fetch_for_forward` and
+/// stash them in a temp file the composer can attach. The composer
+/// API only takes file paths, so we materialise the bytes once.
+fn materialise_forward_attachment(
+    bytes: &ipc::ForwardAttachmentBytes,
+) -> Result<app::ComposerAttachment, std::io::Error> {
+    use std::io::Write;
+    let decoded = bytes
+        .decoded_bytes()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    let dir = std::env::temp_dir().join("postblox-forward");
+    std::fs::create_dir_all(&dir)?;
+    let unique = format!("{}-{}", Uuid::new_v4().simple(), bytes.filename);
+    let path = dir.join(unique);
+    let mut file = std::fs::File::create(&path)?;
+    file.write_all(&decoded)?;
+    Ok(app::ComposerAttachment {
+        path,
+        filename: bytes.filename.clone(),
+        size_bytes: decoded.len() as u64,
+        content_type: bytes.content_type.clone(),
+    })
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value.to_string())
     }
 }
 
@@ -1020,19 +1180,9 @@ async fn execute_command<C: Mailbox + ?Sized>(
             }
             None => record_command_run_error(app, CommandRunError::AccountNotSelected),
         },
-        Command::Reply | Command::ReplyAll | Command::Forward => {
-            // Slice 7 owns reply / reply-all / forward execution. Wire
-            // the parser surface today so later slices only need to
-            // plug in the handler bodies.
-            let label = match command {
-                Command::Reply => "reply",
-                Command::ReplyAll => "reply-all",
-                Command::Forward => "forward",
-                _ => unreachable!(),
-            };
-            app.clear_error();
-            app.set_status(format!("{label} not yet available (slice 7)"));
-        }
+        Command::Reply => run_reply(app, client, false).await,
+        Command::ReplyAll => run_reply(app, client, true).await,
+        Command::Forward => run_forward(app, client).await,
         Command::Goto(folder) => run_goto_folder(app, client, &folder).await,
         Command::Account(name) => run_select_account(app, client, &name).await,
         Command::Search { account, query } => {
@@ -1832,6 +1982,9 @@ mod tests {
         UpdateDraft(Uuid, app::ComposerDraft),
         SendDraft(Uuid, Uuid),
         Search(String, Option<Uuid>),
+        PrepareReply(Uuid, bool),
+        PrepareForward(Uuid),
+        FetchAttachmentForForward(Uuid),
     }
 
     #[derive(Default)]
@@ -1844,6 +1997,9 @@ mod tests {
         draft_id: Option<Uuid>,
         send_message_id: Option<String>,
         search_hits: Vec<app::SearchHit>,
+        reply_prepared: Option<ipc::ReplyPrepared>,
+        forward_prepared: Option<ipc::ForwardPrepared>,
+        forward_attachment_bytes: Option<ipc::ForwardAttachmentBytes>,
         fail_sync: bool,
         fail_set_flags: bool,
         fail_archive: bool,
@@ -1852,6 +2008,9 @@ mod tests {
         fail_draft: bool,
         fail_send: bool,
         fail_search: bool,
+        fail_prepare_reply: bool,
+        fail_prepare_forward: bool,
+        fail_fetch_attachment_for_forward: bool,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -2049,6 +2208,70 @@ mod tests {
             } else {
                 Ok(self.search_hits.clone())
             }
+        }
+
+        async fn prepare_reply(
+            &mut self,
+            message_id: Uuid,
+            reply_all: bool,
+        ) -> Result<ipc::ReplyPrepared, ipc::MailboxError> {
+            self.calls.push(Call::PrepareReply(message_id, reply_all));
+            if self.fail_prepare_reply {
+                return Err(server_error("message.prepare_reply"));
+            }
+            Ok(self
+                .reply_prepared
+                .clone()
+                .unwrap_or_else(|| ipc::ReplyPrepared {
+                    message_id,
+                    account_id: Uuid::nil(),
+                    to: Vec::new(),
+                    cc: Vec::new(),
+                    subject: String::new(),
+                    in_reply_to: String::new(),
+                    references: String::new(),
+                    quoted_body: String::new(),
+                }))
+        }
+
+        async fn prepare_forward(
+            &mut self,
+            message_id: Uuid,
+        ) -> Result<ipc::ForwardPrepared, ipc::MailboxError> {
+            self.calls.push(Call::PrepareForward(message_id));
+            if self.fail_prepare_forward {
+                return Err(server_error("message.prepare_forward"));
+            }
+            Ok(self
+                .forward_prepared
+                .clone()
+                .unwrap_or_else(|| ipc::ForwardPrepared {
+                    message_id,
+                    account_id: Uuid::nil(),
+                    subject: String::new(),
+                    forwarded_body: String::new(),
+                    forwarded_attachments: Vec::new(),
+                }))
+        }
+
+        async fn fetch_attachment_for_forward(
+            &mut self,
+            attachment_id: Uuid,
+        ) -> Result<ipc::ForwardAttachmentBytes, ipc::MailboxError> {
+            self.calls
+                .push(Call::FetchAttachmentForForward(attachment_id));
+            if self.fail_fetch_attachment_for_forward {
+                return Err(server_error("attachment.fetch_for_forward"));
+            }
+            Ok(self.forward_attachment_bytes.clone().unwrap_or_else(|| {
+                ipc::ForwardAttachmentBytes {
+                    attachment_id,
+                    filename: "att.bin".into(),
+                    content_type: "application/octet-stream".into(),
+                    size_bytes: 0,
+                    content_base64: String::new(),
+                }
+            }))
         }
     }
 
@@ -3202,6 +3425,8 @@ mod tests {
                     text_body: None,
                     html_body: None,
                     attachments: Vec::new(),
+                    in_reply_to: None,
+                    references_header: None,
                 }),
                 Call::SendDraft(account_id, draft_id),
             ]
@@ -3696,16 +3921,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_command_bar_reply_emits_slice_seven_placeholder() {
+    async fn test_command_bar_reply_without_message_records_error() {
         let mut app = AppState::default();
         let mut client = MockMailbox::default();
 
         run_command_line("reply".into(), &mut app, &mut client).await;
-        assert!(app.status.contains("reply not yet available"));
+        assert!(app.status.contains("no message selected"));
         run_command_line("reply-all".into(), &mut app, &mut client).await;
-        assert!(app.status.contains("reply-all not yet available"));
+        assert!(app.status.contains("no message selected"));
         run_command_line("forward".into(), &mut app, &mut client).await;
-        assert!(app.status.contains("forward not yet available"));
+        assert!(app.status.contains("no message selected"));
+        // Without a selected message we never reach the daemon.
         assert!(client.calls.is_empty());
     }
 
@@ -4073,5 +4299,151 @@ mod tests {
         assert!(app.status.starts_with("Matches:"));
         assert!(app.status.contains("sync"));
         assert!(app.status.contains("search"));
+    }
+
+    fn reply_prepared_fixture(message_id: Uuid, account_id: Uuid) -> ipc::ReplyPrepared {
+        ipc::ReplyPrepared {
+            message_id,
+            account_id,
+            to: vec!["alice@example.com".into()],
+            cc: Vec::new(),
+            subject: "Re: Hello".into(),
+            in_reply_to: "<orig@example.com>".into(),
+            references: "<orig@example.com>".into(),
+            quoted_body: "On Sat, alice@example.com wrote:\r\n> Hi".into(),
+        }
+    }
+
+    fn forward_prepared_fixture(message_id: Uuid, account_id: Uuid) -> ipc::ForwardPrepared {
+        ipc::ForwardPrepared {
+            message_id,
+            account_id,
+            subject: "Fwd: Hello".into(),
+            forwarded_body: "---------- Forwarded message ----------\r\n".into(),
+            forwarded_attachments: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_capital_r_runs_reply_and_seeds_composer() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox {
+            reply_prepared: Some(reply_prepared_fixture(message.id, account_id)),
+            ..Default::default()
+        };
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert!(matches!(
+            client.calls.first(),
+            Some(Call::PrepareReply(id, false)) if *id == message.id
+        ));
+        assert_eq!(app.mode, InputMode::Compose);
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.account_id, account_id);
+        assert_eq!(composer.in_reply_to_msg, Some(message.id));
+        assert_eq!(composer.in_reply_to.as_deref(), Some("<orig@example.com>"));
+        assert!(composer.subject.starts_with("Re: "));
+        assert!(composer.body.contains("> Hi"));
+        assert_eq!(app.status, "Reply");
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_capital_a_runs_reply_all_and_passes_flag() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox {
+            reply_prepared: Some(reply_prepared_fixture(message.id, account_id)),
+            ..Default::default()
+        };
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert!(matches!(
+            client.calls.first(),
+            Some(Call::PrepareReply(id, true)) if *id == message.id
+        ));
+        assert_eq!(app.status, "Reply-all");
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_capital_f_runs_forward_and_seeds_composer() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox {
+            forward_prepared: Some(forward_prepared_fixture(message.id, account_id)),
+            ..Default::default()
+        };
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert!(matches!(
+            client.calls.first(),
+            Some(Call::PrepareForward(id)) if *id == message.id
+        ));
+        assert_eq!(app.mode, InputMode::Compose);
+        let composer = app.composer.as_ref().unwrap();
+        assert!(composer.subject.starts_with("Fwd: "));
+        assert!(composer.to.is_empty());
+        assert_eq!(app.status, "Forward");
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_reply_without_message_records_status_and_skips_call() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert!(app.status.contains("no message selected"));
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_reply_failure_surfaces_toast_and_keeps_normal_mode() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, _message) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox {
+            fail_prepare_reply: true,
+            ..Default::default()
+        };
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.composer.is_none());
+        assert!(app.error.is_some());
     }
 }

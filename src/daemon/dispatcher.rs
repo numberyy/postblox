@@ -350,6 +350,18 @@ impl Dispatcher for DaemonDispatcher {
             "draft.update" => op_draft_update(&self.pool, args).await,
             "draft.delete" => op_draft_delete(&self.pool, args).await,
             "attachment.export" => op_attachment_export(&self.pool, args).await,
+            "message.prepare_reply" => op_message_prepare_reply(&self.pool, args).await,
+            "message.prepare_forward" => op_message_prepare_forward(&self.pool, args).await,
+            "attachment.fetch_for_forward" => {
+                op_attachment_fetch_for_forward(
+                    &self.pool,
+                    self.imap_sync.as_ref(),
+                    self.secrets.as_ref(),
+                    self.oauth.as_ref(),
+                    args,
+                )
+                .await
+            }
             "message.send" => {
                 op_message_send(
                     &self.pool,
@@ -1071,6 +1083,82 @@ async fn op_draft_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
     Ok(json!({"removed": removed}))
 }
 
+/// Build a `ReplyDraft` for the given message + responding account.
+///
+/// Pure-data op: the daemon doesn't persist anything yet — the TUI
+/// uses the response to pre-fill the composer, and persistence happens
+/// when the composer first auto-saves through `draft.create`.
+async fn op_message_prepare_reply(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let message_id = parse_uuid(&args, "message_id")?;
+    let reply_all = args
+        .get("reply_all")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let message = require_message(pool, message_id).await?;
+    let account = db::accounts::get(pool, message.account_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .ok_or_else(|| RpcError::bad_args("unknown account for message"))?;
+    let draft = crate::mail::reply::reply_draft(&message, &account.email, reply_all);
+    Ok(json!({
+        "message_id": message.id.to_string(),
+        "account_id": account.id.to_string(),
+        "to": draft.to,
+        "cc": draft.cc,
+        "subject": draft.subject,
+        "in_reply_to": draft.in_reply_to,
+        "references": draft.references,
+        "quoted_body": draft.quoted_body,
+    }))
+}
+
+/// Build a `ForwardDraft` plus a manifest of the original
+/// attachments. The TUI then asks `attachment.fetch_for_forward` per
+/// entry to materialise bytes before the user sends.
+async fn op_message_prepare_forward(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let message_id = parse_uuid(&args, "message_id")?;
+    let message = require_message(pool, message_id).await?;
+    let account = db::accounts::get(pool, message.account_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .ok_or_else(|| RpcError::bad_args("unknown account for message"))?;
+    let attachments = db::attachments::list_for_message(pool, message.id)
+        .await
+        .map_err(|e| RpcError::internal(format!("attachments::list_for_message: {e}")))?;
+    let attachment_tuples: Vec<(uuid::Uuid, String, String, i64)> = attachments
+        .iter()
+        .map(|a| {
+            (
+                a.id,
+                a.filename.clone(),
+                a.content_type.clone(),
+                a.size_bytes,
+            )
+        })
+        .collect();
+    let draft = crate::mail::reply::forward_draft(&message, &attachment_tuples);
+    let attachments_json: Vec<Value> = draft
+        .forwarded_attachments
+        .iter()
+        .map(|a| {
+            json!({
+                "message_id": a.message_id.to_string(),
+                "attachment_id": a.attachment_id.to_string(),
+                "filename": a.filename,
+                "content_type": a.content_type,
+                "size_bytes": a.size_bytes,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "message_id": message.id.to_string(),
+        "account_id": account.id.to_string(),
+        "subject": draft.subject,
+        "forwarded_body": draft.forwarded_body,
+        "forwarded_attachments": attachments_json,
+    }))
+}
+
 async fn op_attachment_export(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
     let actor = actor_from_args(&args);
     let id = parse_uuid(&args, "id")?;
@@ -1091,6 +1179,153 @@ async fn op_attachment_export(pool: &SqlitePool, args: Value) -> Result<Value, R
     )
     .await;
     encode_one(&exported)
+}
+
+/// Fetch the bytes of an attachment so the forward composer can carry
+/// it forward. Returns the cached copy when available; falls back to
+/// re-fetching the parent message via IMAP and re-parsing for the
+/// matching part. If neither path produces bytes the response is
+/// `unavailable_offline`.
+async fn op_attachment_fetch_for_forward(
+    pool: &SqlitePool,
+    imap_sync: &dyn ImapSync,
+    secrets: &dyn SecretStore,
+    oauth: &dyn GoogleOAuth,
+    args: Value,
+) -> Result<Value, RpcError> {
+    use base64::Engine;
+
+    let attachment_id = parse_uuid(&args, "attachment_id")?;
+    let attachment = db::attachments::get(pool, attachment_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("attachments::get: {e}")))?
+        .ok_or_else(|| RpcError::bad_args("unknown attachment id"))?;
+
+    if let Ok(bytes) = tokio::fs::read(&attachment.storage_path).await {
+        return Ok(json!({
+            "attachment_id": attachment.id.to_string(),
+            "filename": attachment.filename,
+            "content_type": attachment.content_type,
+            "size_bytes": bytes.len() as i64,
+            "content_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            "source": "cache",
+        }));
+    }
+
+    let message = db::messages::get(pool, attachment.message_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("messages::get: {e}")))?
+        .ok_or_else(|| {
+            RpcError::new(
+                "unavailable_offline",
+                "attachment unavailable offline (parent message missing)",
+            )
+        })?;
+    let folder = db::folders::get(pool, message.folder_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("folders::get: {e}")))?
+        .ok_or_else(|| {
+            RpcError::new(
+                "unavailable_offline",
+                "attachment unavailable offline (folder missing)",
+            )
+        })?;
+    let account = db::accounts::get(pool, message.account_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .ok_or_else(|| {
+            RpcError::new(
+                "unavailable_offline",
+                "attachment unavailable offline (account missing)",
+            )
+        })?;
+
+    let credential = match credential_for_account(secrets, oauth, &account).await {
+        Ok(credential) => credential,
+        Err(_) => {
+            return Err(RpcError::new(
+                "unavailable_offline",
+                "attachment unavailable offline",
+            ))
+        }
+    };
+    let target_uid = u32::try_from(message.uid)
+        .map_err(|_| RpcError::new("unavailable_offline", "attachment unavailable offline"))?;
+    let server = match imap_sync
+        .sync_folder(
+            &account.imap_host,
+            account.imap_port as u16,
+            &account.email,
+            &credential,
+            &folder.name,
+            target_uid,
+        )
+        .await
+    {
+        Ok(server) => server,
+        Err(_) => {
+            return Err(RpcError::new(
+                "unavailable_offline",
+                "attachment unavailable offline",
+            ))
+        }
+    };
+    let fetched = server
+        .messages
+        .into_iter()
+        .find(|m| m.uid == target_uid)
+        .ok_or_else(|| RpcError::new("unavailable_offline", "attachment unavailable offline"))?;
+    let parsed = crate::mail::parser::parse(&fetched.raw)
+        .map_err(|_| RpcError::new("unavailable_offline", "attachment unavailable offline"))?;
+    let bytes = pick_attachment_bytes(&parsed.attachments, &attachment)
+        .ok_or_else(|| RpcError::new("unavailable_offline", "attachment unavailable offline"))?;
+
+    if let Err(e) = persist_refetched_bytes(&attachment.storage_path, &bytes).await {
+        tracing::warn!(error = %e, "could not cache refetched attachment bytes");
+    }
+
+    Ok(json!({
+        "attachment_id": attachment.id.to_string(),
+        "filename": attachment.filename,
+        "content_type": attachment.content_type,
+        "size_bytes": bytes.len() as i64,
+        "content_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        "source": "imap",
+    }))
+}
+
+fn pick_attachment_bytes(
+    parsed: &[crate::mail::parser::ParsedAttachment],
+    attachment: &crate::models::Attachment,
+) -> Option<Vec<u8>> {
+    if let Some(cid) = attachment.content_id.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(p) = parsed.iter().find(|p| p.content_id.as_deref() == Some(cid)) {
+            return Some(p.data.clone());
+        }
+    }
+    parsed
+        .iter()
+        .find(|p| p.filename == attachment.filename && p.content_type == attachment.content_type)
+        .map(|p| p.data.clone())
+        .or_else(|| {
+            parsed
+                .iter()
+                .find(|p| p.filename == attachment.filename)
+                .map(|p| p.data.clone())
+        })
+}
+
+async fn persist_refetched_bytes(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    if path.is_empty() {
+        return Ok(());
+    }
+    let target = Path::new(path);
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+    }
+    tokio::fs::write(target, bytes).await
 }
 
 fn map_attachment_export_error(err: std::io::Error) -> RpcError {
@@ -1138,7 +1373,11 @@ async fn op_message_send(
     let subject = draft.subject.clone().unwrap_or_default();
     let attachments = load_draft_mime_attachments(pool, draft_id).await?;
     let attachment_count = attachments.len();
-    let mime = crate::mail::builder::build_mime_with_attachments(
+    let reply = crate::mail::builder::ReplyHeaders {
+        in_reply_to: draft.in_reply_to.as_deref(),
+        references: draft.references_header.as_deref(),
+    };
+    let mime = crate::mail::builder::build_mime_full(
         &account.email,
         &to,
         &cc,
@@ -1147,6 +1386,7 @@ async fn op_message_send(
         draft.html_body.as_deref(),
         &message_id,
         &attachments,
+        &reply,
     );
 
     smtp.submit(SmtpSubmitRequest {

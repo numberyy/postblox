@@ -14,19 +14,24 @@ pub struct NewDraft {
     pub subject: Option<String>,
     pub text_body: Option<String>,
     pub html_body: Option<String>,
+    #[serde(default)]
+    pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub references_header: Option<String>,
 }
 
 const SELECT: &str = "\
     id, account_id, in_reply_to_msg, to_addrs, cc_addrs, bcc_addrs, subject, \
-    text_body, html_body, remote_folder_id, remote_uid, created_at, updated_at";
+    text_body, html_body, in_reply_to, references_header, remote_folder_id, \
+    remote_uid, created_at, updated_at";
 
 pub async fn create(pool: &SqlitePool, new: &NewDraft) -> Result<Draft, sqlx::Error> {
     let id = Uuid::new_v4();
     let q = format!(
         "INSERT INTO drafts \
          (id, account_id, in_reply_to_msg, to_addrs, cc_addrs, bcc_addrs, \
-          subject, text_body, html_body) \
-         VALUES (?,?,?,?,?,?,?,?,?) RETURNING {SELECT}"
+          subject, text_body, html_body, in_reply_to, references_header) \
+         VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING {SELECT}"
     );
     sqlx::query_as(&q)
         .bind(id)
@@ -38,6 +43,8 @@ pub async fn create(pool: &SqlitePool, new: &NewDraft) -> Result<Draft, sqlx::Er
         .bind(&new.subject)
         .bind(&new.text_body)
         .bind(&new.html_body)
+        .bind(&new.in_reply_to)
+        .bind(&new.references_header)
         .fetch_one(pool)
         .await
 }
@@ -147,6 +154,8 @@ mod tests {
             subject: Some("Hi".into()),
             text_body: Some("Hello".into()),
             html_body: None,
+            in_reply_to: None,
+            references_header: None,
         }
     }
 

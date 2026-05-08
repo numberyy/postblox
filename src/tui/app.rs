@@ -385,6 +385,25 @@ pub struct ComposerDraft {
     pub text_body: Option<String>,
     pub html_body: Option<String>,
     pub attachments: Vec<ComposerAttachment>,
+    pub in_reply_to: Option<String>,
+    pub references_header: Option<String>,
+}
+
+/// Pre-fill payload handed to [`AppState::enter_composer_with_prefill`].
+/// Used by the reply / reply-all / forward key bindings to seed the
+/// composer with the response headers + quoted body before the user
+/// starts editing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ComposerPrefill {
+    pub in_reply_to_msg: Option<Uuid>,
+    pub to_addrs: Vec<String>,
+    pub cc_addrs: Vec<String>,
+    pub bcc_addrs: Vec<String>,
+    pub subject: Option<String>,
+    pub body: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references_header: Option<String>,
+    pub attachments: Vec<ComposerAttachment>,
 }
 
 /// Reasons a path the user typed into the compose attach prompt was
@@ -443,6 +462,9 @@ pub struct ComposerState {
     pub attachments: Vec<ComposerAttachment>,
     pub selected_attachment: usize,
     pub attach_input: String,
+    pub in_reply_to_msg: Option<Uuid>,
+    pub in_reply_to: Option<String>,
+    pub references_header: Option<String>,
 }
 
 impl ComposerState {
@@ -469,7 +491,38 @@ impl ComposerState {
             attachments: Vec::new(),
             selected_attachment: 0,
             attach_input: String::new(),
+            in_reply_to_msg: None,
+            in_reply_to: None,
+            references_header: None,
         }
+    }
+
+    /// Build a composer state already populated with reply / forward
+    /// data. The composer is marked dirty so the autosaver persists it
+    /// on the next idle tick.
+    fn from_prefill(account_id: Uuid, prefill: ComposerPrefill) -> Self {
+        let mut state = Self::new(account_id);
+        state.to = join_addresses(&prefill.to_addrs);
+        state.to_cursor = char_count(&state.to);
+        state.cc = join_addresses(&prefill.cc_addrs);
+        state.cc_cursor = char_count(&state.cc);
+        state.bcc = join_addresses(&prefill.bcc_addrs);
+        state.bcc_cursor = char_count(&state.bcc);
+        if let Some(subject) = prefill.subject {
+            state.subject = subject;
+            state.subject_cursor = char_count(&state.subject);
+        }
+        if let Some(body) = prefill.body {
+            state.body = body;
+            state.body_cursor = char_count(&state.body);
+        }
+        state.attachments = prefill.attachments;
+        state.in_reply_to_msg = prefill.in_reply_to_msg;
+        state.in_reply_to = prefill.in_reply_to;
+        state.references_header = prefill.references_header;
+        state.focused = ComposeField::Body;
+        state.dirty = state.has_content();
+        state
     }
 
     pub fn attachments(&self) -> &[ComposerAttachment] {
@@ -524,7 +577,7 @@ impl ComposerState {
     fn draft(&self) -> ComposerDraft {
         ComposerDraft {
             account_id: self.account_id,
-            in_reply_to_msg: None,
+            in_reply_to_msg: self.in_reply_to_msg,
             to_addrs: split_addresses(&self.to),
             cc_addrs: split_addresses(&self.cc),
             bcc_addrs: split_addresses(&self.bcc),
@@ -532,6 +585,8 @@ impl ComposerState {
             text_body: non_empty_string(&self.body),
             html_body: None,
             attachments: self.attachments.clone(),
+            in_reply_to: self.in_reply_to.clone(),
+            references_header: self.references_header.clone(),
         }
     }
 
@@ -1879,6 +1934,16 @@ impl AppState {
         self.set_status("Compose");
     }
 
+    /// Enter the composer pre-populated with reply / forward state.
+    /// The composer is marked dirty so the autosaver flushes it on the
+    /// next idle.
+    pub fn enter_composer_with_prefill(&mut self, account_id: Uuid, prefill: ComposerPrefill) {
+        self.composer = Some(ComposerState::from_prefill(account_id, prefill));
+        self.mode = InputMode::Compose;
+        self.clear_error();
+        self.set_status("Compose");
+    }
+
     pub fn composer_draft(&self) -> Option<ComposerDraft> {
         self.composer.as_ref().map(ComposerState::draft)
     }
@@ -2455,6 +2520,14 @@ fn split_addresses(value: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+fn join_addresses(values: &[String]) -> String {
+    values
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn char_count(value: &str) -> usize {
@@ -4125,5 +4198,51 @@ mod tests {
         assert_eq!(human_size(1024), "1.0 KiB");
         assert_eq!(human_size(1024 * 1024), "1.0 MiB");
         assert_eq!(human_size(2 * 1024 * 1024 * 1024), "2.0 GiB");
+    }
+
+    #[test]
+    fn test_enter_composer_with_prefill_seeds_fields_focus_and_dirty_flag() {
+        let account_id = Uuid::new_v4();
+        let original_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.enter_composer_with_prefill(
+            account_id,
+            ComposerPrefill {
+                in_reply_to_msg: Some(original_id),
+                to_addrs: vec!["alice@x.com".into()],
+                cc_addrs: vec!["b@x.com".into(), "c@x.com".into()],
+                bcc_addrs: Vec::new(),
+                subject: Some("Re: Hi".into()),
+                body: Some("On Sat, alice wrote:\n> Hi".into()),
+                in_reply_to: Some("<orig@x>".into()),
+                references_header: Some("<root@x> <orig@x>".into()),
+                attachments: Vec::new(),
+            },
+        );
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.account_id, account_id);
+        assert_eq!(composer.focused, ComposeField::Body);
+        assert_eq!(composer.to, "alice@x.com");
+        assert_eq!(composer.cc, "b@x.com, c@x.com");
+        assert_eq!(composer.subject, "Re: Hi");
+        assert!(composer.body.contains("> Hi"));
+        assert!(composer.dirty);
+        assert_eq!(composer.in_reply_to_msg, Some(original_id));
+        assert_eq!(composer.in_reply_to.as_deref(), Some("<orig@x>"));
+        assert_eq!(
+            composer.references_header.as_deref(),
+            Some("<root@x> <orig@x>")
+        );
+
+        // The serialised draft carries the threading context too so
+        // the daemon side stitches the headers onto the outgoing
+        // MIME.
+        let draft = app.composer_draft().unwrap();
+        assert_eq!(draft.in_reply_to_msg, Some(original_id));
+        assert_eq!(draft.in_reply_to.as_deref(), Some("<orig@x>"));
+        assert_eq!(
+            draft.references_header.as_deref(),
+            Some("<root@x> <orig@x>")
+        );
     }
 }

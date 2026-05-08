@@ -110,6 +110,8 @@ async fn end_to_end_account_lifecycle() {
             subject: Some("Re: Quarterly invoice".into()),
             text_body: Some("got it, thanks".into()),
             html_body: None,
+            in_reply_to: None,
+            references_header: None,
         },
     )
     .await

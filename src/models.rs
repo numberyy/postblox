@@ -229,6 +229,8 @@ pub struct Draft {
     pub subject: Option<String>,
     pub text_body: Option<String>,
     pub html_body: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references_header: Option<String>,
     pub remote_folder_id: Option<Uuid>,
     pub remote_uid: Option<i64>,
     pub created_at: DateTime<Utc>,
