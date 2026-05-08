@@ -2775,6 +2775,45 @@ async fn message_move_unknown_folder_returns_bad_args() {
     );
 }
 
+// `:archive` must drive the same daemon op + hub event as the `e`
+// keybinding. Both code paths route through `MailboxClient::archive_message`,
+// so we drive that path here against a real socket and assert the same
+// DB + hub state as `message_archive_moves_row_publishes_event_and_audits`.
+#[tokio::test]
+async fn tui_command_archive_matches_archive_keybinding_via_daemon() {
+    use postblox::tui::command::{parse_command, Command};
+    use postblox::tui::ipc::MailboxClient;
+
+    let h = make_harness().await;
+    let (_, inbox_id, archive_id, _, msg_id) = seed_account_with_message(&h).await;
+
+    // Command-bar parser must yield the same Command::Archive that the
+    // `e` key dispatches.
+    assert_eq!(parse_command("archive").unwrap(), Command::Archive);
+
+    // Subscribe through the high-level TUI client so we exercise the
+    // same client wire shape the live TUI uses.
+    let mut events = Client::connect(&h.sock).await.unwrap();
+    let sub = events.subscribe(Topic::MailUpdated).await.unwrap();
+    assert!(sub > 0);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let mut tui = MailboxClient::connect(&h.sock).await.unwrap();
+    tui.archive_message(msg_id).await.unwrap();
+
+    let event = timeout(Duration::from_secs(2), events.next_event())
+        .await
+        .expect("expected mail.updated event")
+        .unwrap();
+    assert_eq!(event.topic, "mail.updated");
+    assert_eq!(event.data["message_id"], msg_id.to_string());
+    assert_eq!(event.data["folder_id"], archive_id.to_string());
+    assert_eq!(event.data["from_folder_id"], inbox_id.to_string());
+
+    let row = messages::get(&h.pool, msg_id).await.unwrap().unwrap();
+    assert_eq!(row.folder_id, archive_id);
+}
+
 // Subscribe → publish round-trip is already covered by
 // `subscription_delivers_published_event_via_hub` above; the test below
 // exercises the TUI reducer that sits *behind* that subscribe path so we

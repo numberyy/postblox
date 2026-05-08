@@ -833,6 +833,10 @@ async fn handle_command_key<C: Mailbox + ?Sized>(
             app.backspace_command();
             false
         }
+        KeyCode::Tab => {
+            handle_command_tab(app);
+            false
+        }
         KeyCode::Char(ch) => {
             if !app.push_command_char(ch) {
                 app.set_error(format!(
@@ -846,7 +850,41 @@ async fn handle_command_key<C: Mailbox + ?Sized>(
     }
 }
 
+/// Tab-complete the current `:` input.
+///
+/// - Unique match: replace the prefix with the full command name and
+///   append a trailing space so the user can type args.
+/// - Multiple matches: extend the prefix to the longest common prefix
+///   if it adds at least one character, then surface the candidate
+///   list as a status hint so the user can disambiguate.
+/// - No match / past the command name: no-op.
+fn handle_command_tab(app: &mut AppState) {
+    let Some(completion) = command::complete_command(&app.command_input) else {
+        return;
+    };
+    if completion.unique {
+        app.command_input.clear();
+        for ch in completion.text.chars() {
+            if !app.push_command_char(ch) {
+                break;
+            }
+        }
+        let _ = app.push_command_char(' ');
+        app.set_status(format!("Command: {}", completion.text));
+        return;
+    }
+    if completion.text.len() > app.command_input.len() {
+        app.command_input = completion.text.clone();
+    }
+    app.set_status(format!("Matches: {}", completion.matches.join(" ")));
+}
+
 async fn run_command_line<C: Mailbox + ?Sized>(input: String, app: &mut AppState, client: &mut C) {
+    if input.trim().is_empty() {
+        // Empty / whitespace-only input is a silent no-op so an
+        // accidental `:Enter` doesn't produce error noise.
+        return;
+    }
     match parse_command(&input) {
         Ok(command) => execute_command(command, app, client).await,
         Err(error) => record_command_parse_error(app, error.to_string()),
@@ -891,7 +929,80 @@ async fn execute_command<C: Mailbox + ?Sized>(
             app.clear_error();
             app.set_status(format!("Theme: {theme}"));
         }
+        Command::Compose => match app.selected_account_id() {
+            Some(account_id) => {
+                app.enter_composer(account_id);
+            }
+            None => record_command_run_error(app, CommandRunError::AccountNotSelected),
+        },
+        Command::Reply | Command::ReplyAll | Command::Forward => {
+            // Slice 7 owns reply / reply-all / forward execution. Wire
+            // the parser surface today so later slices only need to
+            // plug in the handler bodies.
+            let label = match command {
+                Command::Reply => "reply",
+                Command::ReplyAll => "reply-all",
+                Command::Forward => "forward",
+                _ => unreachable!(),
+            };
+            app.clear_error();
+            app.set_status(format!("{label} not yet available (slice 7)"));
+        }
+        Command::Goto(folder) => run_goto_folder(app, client, &folder).await,
+        Command::Account(name) => run_select_account(app, client, &name).await,
+        Command::Search { account, query } => {
+            // Slice 5 owns search execution; today we only verify the
+            // parser end-to-end with a placeholder toast.
+            app.clear_error();
+            let scoped = match account {
+                Some(name) => format!("[{name}] {query}"),
+                None => query,
+            };
+            app.set_status(format!("search not yet available: {scoped} (slice 5)"));
+        }
     }
+}
+
+async fn run_goto_folder<C: Mailbox + ?Sized>(
+    app: &mut AppState,
+    client: &mut C,
+    folder_name: &str,
+) {
+    let folder_name = folder_name.trim();
+    if folder_name.is_empty() {
+        record_command_parse_error(app, "usage: goto <folder>".into());
+        return;
+    }
+    if app.selected_account_id().is_none() {
+        record_command_run_error(app, CommandRunError::AccountNotSelected);
+        return;
+    }
+    if !app.select_folder_by_name(folder_name) {
+        let message = format!("No folder named '{folder_name}' for current account");
+        app.set_status(message.clone());
+        app.set_error(message);
+        return;
+    }
+    app.clear_error();
+    app.set_status(format!("Folder: {folder_name}"));
+    refresh_messages(app, client).await;
+}
+
+async fn run_select_account<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C, name: &str) {
+    let name = name.trim();
+    if name.is_empty() {
+        record_command_parse_error(app, "usage: account <name|email>".into());
+        return;
+    }
+    if !app.select_account_by_name(name) {
+        let message = format!("No account named '{name}'");
+        app.set_status(message.clone());
+        app.set_error(message);
+        return;
+    }
+    app.clear_error();
+    app.set_status(format!("Account: {name}"));
+    refresh_folders(app, client).await;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3213,5 +3324,362 @@ mod tests {
 
         assert_eq!(app.toasts.len(), 1);
         assert_eq!(app.mode, InputMode::ConfirmDelete);
+    }
+
+    fn app_with_specific_message(account_id: Uuid, folder_id: Uuid, message_id: Uuid) -> AppState {
+        let mut app = app_with_account_folder(account_id, folder_id);
+        let message = MessageItem {
+            id: message_id,
+            thread_id: None,
+            subject: "Hello".into(),
+            from: "alice@example.com".into(),
+            date: "2026-05-07 10:00".into(),
+            snippet: "Preview".into(),
+            flags: vec!["\\Seen".into()],
+        };
+        app.apply_folder_messages(vec![message]);
+        app.active = ActivePane::Messages;
+        app
+    }
+
+    /// `:archive` must drive the same archive handler as the `e` key.
+    /// Both paths must produce the same daemon-visible call sequence
+    /// and post-state.
+    #[tokio::test]
+    async fn test_command_bar_archive_matches_e_keybinding() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+
+        let mut key_app = app_with_specific_message(account_id, folder_id, message_id);
+        let mut key_client = MockMailbox::default();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            &mut key_app,
+            &mut key_client,
+        )
+        .await;
+
+        let mut cmd_app = app_with_specific_message(account_id, folder_id, message_id);
+        let mut cmd_client = MockMailbox::default();
+        run_command_line("archive".into(), &mut cmd_app, &mut cmd_client).await;
+
+        assert_eq!(key_client.calls, cmd_client.calls);
+        assert_eq!(key_app.status, cmd_app.status);
+        assert_eq!(key_app.messages.len(), cmd_app.messages.len());
+        assert_eq!(key_app.error, cmd_app.error);
+    }
+
+    /// `:delete` followed by confirming `y` must drive the same
+    /// confirm-modal + delete path as pressing `d` then `y`.
+    #[tokio::test]
+    async fn test_command_bar_delete_with_confirm_matches_d_keybinding() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+
+        let mut key_app = app_with_specific_message(account_id, folder_id, message_id);
+        let mut key_client = MockMailbox::default();
+        handle_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &mut key_app,
+            &mut key_client,
+        )
+        .await;
+        handle_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut key_app,
+            &mut key_client,
+        )
+        .await;
+
+        let mut cmd_app = app_with_specific_message(account_id, folder_id, message_id);
+        let mut cmd_client = MockMailbox::default();
+        run_command_line("delete".into(), &mut cmd_app, &mut cmd_client).await;
+        handle_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut cmd_app,
+            &mut cmd_client,
+        )
+        .await;
+
+        assert_eq!(key_client.calls, cmd_client.calls);
+        assert_eq!(key_app.status, cmd_app.status);
+        assert_eq!(key_app.messages.len(), cmd_app.messages.len());
+    }
+
+    /// `:move <folder>` parses the multi-word folder and dispatches via
+    /// the same `Command::Move` path as the `m` key prefill.
+    #[tokio::test]
+    async fn test_command_bar_move_dispatches_move_message_call() {
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox::default();
+
+        run_command_line("move INBOX/Receipts 2025".into(), &mut app, &mut client).await;
+
+        assert!(client.calls.iter().any(|call| matches!(
+            call,
+            Call::MoveMessage(id, folder)
+                if *id == message.id && folder == "INBOX/Receipts 2025"
+        )));
+        assert_eq!(app.status, "Moved to INBOX/Receipts 2025");
+    }
+
+    #[tokio::test]
+    async fn test_command_bar_compose_opens_composer_for_current_account() {
+        let account_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        let mut client = MockMailbox::default();
+
+        run_command_line("compose".into(), &mut app, &mut client).await;
+
+        assert_eq!(app.mode, InputMode::Compose);
+        assert_eq!(app.composer.as_ref().unwrap().account_id, account_id);
+    }
+
+    #[tokio::test]
+    async fn test_command_bar_compose_without_account_records_error() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        run_command_line("compose".into(), &mut app, &mut client).await;
+
+        assert!(app.composer.is_none());
+        assert_eq!(app.error.as_deref(), Some("No account selected"));
+    }
+
+    #[tokio::test]
+    async fn test_command_bar_reply_emits_slice_seven_placeholder() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        run_command_line("reply".into(), &mut app, &mut client).await;
+        assert!(app.status.contains("reply not yet available"));
+        run_command_line("reply-all".into(), &mut app, &mut client).await;
+        assert!(app.status.contains("reply-all not yet available"));
+        run_command_line("forward".into(), &mut app, &mut client).await;
+        assert!(app.status.contains("forward not yet available"));
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_command_bar_search_emits_slice_five_placeholder() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        run_command_line("search foo bar".into(), &mut app, &mut client).await;
+        assert!(app.status.contains("search not yet available"));
+        assert!(app.status.contains("foo bar"));
+        run_command_line(
+            "search --account Work foo bar".into(),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert!(app.status.contains("[Work]"));
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_command_bar_goto_switches_folder_and_loads_messages() {
+        let account_id = Uuid::new_v4();
+        let inbox_id = Uuid::new_v4();
+        let archive_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        app.apply_folders(vec![
+            folder_item(inbox_id),
+            FolderItem {
+                id: archive_id,
+                name: "Archive".into(),
+                role: "archive".into(),
+            },
+        ]);
+        let mut client = MockMailbox::default();
+
+        run_command_line("goto Archive".into(), &mut app, &mut client).await;
+
+        assert_eq!(app.selected_folder_id(), Some(archive_id));
+        assert_eq!(app.active, ActivePane::Folders);
+        assert!(client.calls.contains(&Call::ListMessages(archive_id)));
+    }
+
+    #[tokio::test]
+    async fn test_command_bar_goto_unknown_folder_records_error() {
+        let account_id = Uuid::new_v4();
+        let inbox_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        app.apply_folders(vec![folder_item(inbox_id)]);
+        let mut client = MockMailbox::default();
+
+        run_command_line("goto DoesNotExist".into(), &mut app, &mut client).await;
+
+        assert_eq!(app.selected_folder_id(), Some(inbox_id));
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("No folder named 'DoesNotExist'")));
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_command_bar_account_switches_active_account() {
+        let work_id = Uuid::new_v4();
+        let home_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![
+            AccountItem {
+                id: work_id,
+                label: "Work".into(),
+                email: "work@example.com".into(),
+                status: "idle".into(),
+            },
+            AccountItem {
+                id: home_id,
+                label: "Home".into(),
+                email: "home@example.com".into(),
+                status: "idle".into(),
+            },
+        ]);
+        let mut client = MockMailbox::default();
+
+        run_command_line("account home".into(), &mut app, &mut client).await;
+
+        assert_eq!(app.selected_account_id(), Some(home_id));
+        assert_eq!(app.active, ActivePane::Accounts);
+    }
+
+    #[tokio::test]
+    async fn test_command_bar_account_unknown_records_error() {
+        let work_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(work_id)]);
+        let mut client = MockMailbox::default();
+
+        run_command_line("account ghost@example.com".into(), &mut app, &mut client).await;
+
+        assert_eq!(app.selected_account_id(), Some(work_id));
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("No account named")));
+    }
+
+    #[tokio::test]
+    async fn test_handle_command_key_unknown_command_emits_error() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+        app.enter_command_mode();
+        for ch in "wololo".chars() {
+            app.push_command_char(ch);
+        }
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("unknown command")));
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_command_key_empty_input_is_no_op() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+        app.enter_command_mode();
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        // Empty input goes through the parser → CommandError::Empty,
+        // which currently surfaces as a status-line note. The important
+        // contract is that no daemon op fires.
+        assert!(client.calls.is_empty());
+        assert_eq!(app.mode, InputMode::Normal);
+    }
+
+    #[tokio::test]
+    async fn test_handle_command_key_tab_completes_unique_prefix_with_trailing_space() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+        app.enter_command_mode();
+        for ch in "m".chars() {
+            app.push_command_char(ch);
+        }
+
+        handle_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert_eq!(app.command_input, "move ");
+    }
+
+    #[tokio::test]
+    async fn test_handle_command_key_tab_for_g_completes_to_goto() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+        app.enter_command_mode();
+        app.push_command_char('g');
+
+        handle_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert_eq!(app.command_input, "goto ");
+    }
+
+    #[tokio::test]
+    async fn test_handle_command_key_tab_for_empty_input_is_no_op() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+        app.enter_command_mode();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert!(app.command_input.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_command_key_tab_with_multiple_matches_extends_prefix_and_lists() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+        app.enter_command_mode();
+        app.push_command_char('s');
+
+        handle_key(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        // 's' is the longest common prefix; status surfaces the
+        // candidate list.
+        assert_eq!(app.command_input, "s");
+        assert!(app.status.starts_with("Matches:"));
+        assert!(app.status.contains("sync"));
+        assert!(app.status.contains("search"));
     }
 }

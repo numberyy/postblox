@@ -1358,6 +1358,64 @@ impl AppState {
             .map(|f| f.name.as_str())
     }
 
+    /// Switch the active account by case-insensitive label or email
+    /// match. Mirrors the navigation effect of pressing `↑`/`↓` on the
+    /// accounts pane: clears folder/message state so the caller can
+    /// refresh from the daemon. Returns true on a successful match.
+    pub fn select_account_by_name(&mut self, name: &str) -> bool {
+        let needle = name.trim();
+        if needle.is_empty() {
+            return false;
+        }
+        let lowered = needle.to_lowercase();
+        let Some(index) = self.accounts.iter().position(|account| {
+            account.label.to_lowercase() == lowered || account.email.to_lowercase() == lowered
+        }) else {
+            return false;
+        };
+        if self.selected_account == index {
+            return true;
+        }
+        self.selected_account = index;
+        self.active = ActivePane::Accounts;
+        self.folders.clear();
+        self.folder_messages.clear();
+        self.threads.clear();
+        self.messages.clear();
+        self.clear_detail_state();
+        self.selected_folder = 0;
+        self.selected_thread = 0;
+        self.selected_message = 0;
+        self.normalize_active_pane();
+        true
+    }
+
+    /// Switch the active folder by exact name match within the current
+    /// account. Returns true on a successful match. Same downstream
+    /// reset as moving via `↑`/`↓` on the folders pane.
+    pub fn select_folder_by_name(&mut self, name: &str) -> bool {
+        let needle = name.trim();
+        if needle.is_empty() {
+            return false;
+        }
+        let Some(index) = self.folders.iter().position(|folder| folder.name == needle) else {
+            return false;
+        };
+        if self.selected_folder == index {
+            return true;
+        }
+        self.selected_folder = index;
+        self.active = ActivePane::Folders;
+        self.folder_messages.clear();
+        self.threads.clear();
+        self.messages.clear();
+        self.clear_detail_state();
+        self.selected_thread = 0;
+        self.selected_message = 0;
+        self.normalize_active_pane();
+        true
+    }
+
     pub fn selected_message_id(&self) -> Option<Uuid> {
         self.messages.get(self.selected_message).map(|m| m.id)
     }
