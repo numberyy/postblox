@@ -7,7 +7,6 @@ postblox.toml
 .env
 HANDOVER.md
 TASKS.md
-plans/
 .claude/
 .mcp.json
 docs/book/
