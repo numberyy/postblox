@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use crate::models::{Account, Attachment, Folder, Message};
+use crate::models::{Account, Attachment, Draft, Folder, Message};
 
 use super::theme::ThemeName;
 
@@ -251,6 +251,77 @@ impl From<Message> for MessageDetail {
             snippet,
             body,
             flags: flags_from_value(&message.flags),
+        }
+    }
+}
+
+/// One row in the Drafts pane (shown when a Drafts folder is active).
+/// Mirrors the `MessageItem` shape so the messages list renderer can
+/// reuse the same widget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftItem {
+    pub id: Uuid,
+    pub account_id: Uuid,
+    pub subject: String,
+    pub to: String,
+    pub date: String,
+    pub snippet: String,
+}
+
+impl From<Draft> for DraftItem {
+    fn from(draft: Draft) -> Self {
+        let subject = text_or_default(draft.subject.as_deref(), "(no subject)");
+        let to = addrs_label(&draft.to_addrs);
+        let snippet = first_line_or_default(draft.text_body.as_deref());
+        Self {
+            id: draft.id,
+            account_id: draft.account_id,
+            subject,
+            to,
+            date: draft.updated_at.format("%Y-%m-%d %H:%M").to_string(),
+            snippet,
+        }
+    }
+}
+
+/// Decoded `draft.get` payload re-shaped for the composer reopen
+/// path. The byte payloads stay base64-encoded until `enter_composer_for_draft`
+/// materialises them into temp files.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftSummary {
+    pub draft: Draft,
+    pub attachments: Vec<DraftAttachmentBytes>,
+}
+
+impl From<crate::tui::ipc::DraftGetResult> for DraftSummary {
+    fn from(payload: crate::tui::ipc::DraftGetResult) -> Self {
+        Self {
+            draft: payload.draft,
+            attachments: payload
+                .attachments
+                .into_iter()
+                .map(DraftAttachmentBytes::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftAttachmentBytes {
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub bytes: Vec<u8>,
+}
+
+impl From<crate::tui::ipc::DraftAttachmentPayload> for DraftAttachmentBytes {
+    fn from(payload: crate::tui::ipc::DraftAttachmentPayload) -> Self {
+        let bytes = payload.decoded_bytes().unwrap_or_default();
+        Self {
+            filename: payload.filename,
+            content_type: payload.content_type,
+            size_bytes: payload.size_bytes,
+            bytes,
         }
     }
 }
@@ -955,6 +1026,14 @@ pub struct AppState {
     pub search: Option<SearchState>,
     pub search_input: String,
     pub search_input_previous_pane: ActivePane,
+    /// Drafts list when the Drafts folder is selected. Disjoint from
+    /// `folder_messages`/`messages` so the renderer can pick a code
+    /// path without inspecting both stores.
+    pub drafts: Vec<DraftItem>,
+    pub selected_draft: usize,
+    /// Pending draft to delete; mirrors `pending_delete_message` so
+    /// the same y/n confirmation flow can be reused.
+    pub pending_delete_draft: Option<Uuid>,
 }
 
 impl Default for AppState {
@@ -991,6 +1070,9 @@ impl Default for AppState {
             next_toast_id: 0,
             account_states: HashMap::new(),
             search: None,
+            drafts: Vec::new(),
+            selected_draft: 0,
+            pending_delete_draft: None,
             search_input: String::new(),
             search_input_previous_pane: ActivePane::Accounts,
         }
@@ -1023,6 +1105,7 @@ impl AppState {
                     self.folder_messages.clear();
                     self.threads.clear();
                     self.messages.clear();
+                    self.clear_drafts();
                     self.clear_detail_state();
                     self.selected_folder = 0;
                     self.selected_thread = 0;
@@ -1036,6 +1119,7 @@ impl AppState {
                     self.folder_messages.clear();
                     self.threads.clear();
                     self.messages.clear();
+                    self.clear_drafts();
                     self.clear_detail_state();
                     self.selected_thread = 0;
                     self.selected_message = 0;
@@ -1056,6 +1140,13 @@ impl AppState {
                 changed
             }
             ActivePane::Messages => {
+                if self.drafts_pane_active() {
+                    let changed = move_index(&mut self.selected_draft, self.drafts.len(), delta);
+                    if changed {
+                        self.clear_detail_state();
+                    }
+                    return changed;
+                }
                 let changed = move_index(&mut self.selected_message, self.messages.len(), delta);
                 if changed {
                     self.clear_detail_state();
@@ -1086,6 +1177,7 @@ impl AppState {
         self.folder_messages.clear();
         self.threads.clear();
         self.messages.clear();
+        self.clear_drafts();
         self.clear_detail_state();
         self.selected_folder = 0;
         self.selected_thread = 0;
@@ -1100,6 +1192,7 @@ impl AppState {
         self.folder_messages.clear();
         self.threads.clear();
         self.messages.clear();
+        self.clear_drafts();
         self.clear_detail_state();
         self.selected_thread = 0;
         self.selected_message = 0;
@@ -1122,6 +1215,62 @@ impl AppState {
         self.refresh_visible_messages();
         self.normalize_active_pane();
         self.clear_detail_state();
+    }
+
+    pub fn apply_drafts(&mut self, drafts: Vec<DraftItem>) {
+        self.drafts = drafts;
+        clamp_index(&mut self.selected_draft, self.drafts.len());
+    }
+
+    pub fn clear_drafts(&mut self) {
+        self.drafts.clear();
+        self.selected_draft = 0;
+    }
+
+    pub fn selected_draft_id(&self) -> Option<Uuid> {
+        self.drafts.get(self.selected_draft).map(|d| d.id)
+    }
+
+    pub fn selected_draft(&self) -> Option<&DraftItem> {
+        self.drafts.get(self.selected_draft)
+    }
+
+    /// Move the drafts cursor by `delta` rows. Returns true on a real
+    /// position change so callers can trigger refresh logic.
+    pub fn move_draft_selection(&mut self, delta: isize) -> bool {
+        move_index(&mut self.selected_draft, self.drafts.len(), delta)
+    }
+
+    pub fn begin_draft_delete(&mut self, draft_id: Uuid) {
+        self.pending_delete_draft = Some(draft_id);
+        self.mode = InputMode::ConfirmDelete;
+    }
+
+    pub fn cancel_pending_delete_draft(&mut self) {
+        self.pending_delete_draft = None;
+        if self.mode == InputMode::ConfirmDelete {
+            self.mode = InputMode::Normal;
+        }
+    }
+
+    pub fn take_pending_delete_draft(&mut self) -> Option<Uuid> {
+        let id = self.pending_delete_draft.take();
+        if id.is_some() && self.mode == InputMode::ConfirmDelete {
+            self.mode = InputMode::Normal;
+        }
+        id
+    }
+
+    /// Drop the row matching `draft_id` from the drafts list and
+    /// clamp the selection. Used by the optimistic delete path.
+    pub fn remove_draft_locally(&mut self, draft_id: Uuid) -> bool {
+        let before = self.drafts.len();
+        self.drafts.retain(|d| d.id != draft_id);
+        let removed = self.drafts.len() != before;
+        if removed {
+            clamp_index(&mut self.selected_draft, self.drafts.len());
+        }
+        removed
     }
 
     pub fn apply_detail(&mut self, detail: Option<MessageDetail>) {
@@ -1556,6 +1705,19 @@ impl AppState {
             .map(|f| f.name.as_str())
     }
 
+    pub fn selected_folder_role(&self) -> Option<&str> {
+        self.folders
+            .get(self.selected_folder)
+            .map(|f| f.role.as_str())
+    }
+
+    /// True when the user is currently viewing a folder whose role is
+    /// `drafts`. Drives the "Enter opens composer" / "D deletes draft"
+    /// keybindings on the messages list.
+    pub fn drafts_pane_active(&self) -> bool {
+        self.selected_folder_role() == Some("drafts")
+    }
+
     /// Switch the active account by case-insensitive label or email
     /// match. Mirrors the navigation effect of pressing `↑`/`↓` on the
     /// accounts pane: clears folder/message state so the caller can
@@ -1580,6 +1742,7 @@ impl AppState {
         self.folder_messages.clear();
         self.threads.clear();
         self.messages.clear();
+        self.clear_drafts();
         self.clear_detail_state();
         self.selected_folder = 0;
         self.selected_thread = 0;
@@ -1607,6 +1770,7 @@ impl AppState {
         self.folder_messages.clear();
         self.threads.clear();
         self.messages.clear();
+        self.clear_drafts();
         self.clear_detail_state();
         self.selected_thread = 0;
         self.selected_message = 0;
@@ -1904,7 +2068,11 @@ impl AppState {
     }
 
     pub fn cancel_command_mode(&mut self) {
-        self.mode = InputMode::Normal;
+        self.mode = if self.composer.is_some() {
+            InputMode::Compose
+        } else {
+            InputMode::Normal
+        };
         self.command_input.clear();
         self.clear_error();
         self.set_status("Command cancelled");
@@ -1923,7 +2091,13 @@ impl AppState {
     }
 
     pub fn finish_command(&mut self) -> String {
-        self.mode = InputMode::Normal;
+        // Restore the composer mode if we entered command mode from
+        // inside a composer (e.g. `:w`). Otherwise drop back to normal.
+        self.mode = if self.composer.is_some() {
+            InputMode::Compose
+        } else {
+            InputMode::Normal
+        };
         std::mem::take(&mut self.command_input)
     }
 
@@ -1939,6 +2113,45 @@ impl AppState {
     /// next idle.
     pub fn enter_composer_with_prefill(&mut self, account_id: Uuid, prefill: ComposerPrefill) {
         self.composer = Some(ComposerState::from_prefill(account_id, prefill));
+        self.mode = InputMode::Compose;
+        self.clear_error();
+        self.set_status("Compose");
+    }
+
+    /// Enter the composer pre-populated with an existing draft so the
+    /// user can keep editing. `draft_id` is recorded so subsequent
+    /// saves go through `draft.update` rather than creating a new
+    /// draft. Restored composers are clean — the dirty flag only
+    /// flips once the user starts editing.
+    pub fn enter_composer_for_existing_draft(
+        &mut self,
+        draft_id: Uuid,
+        draft: ComposerDraft,
+        focus: ComposeField,
+    ) {
+        let mut state = ComposerState::new(draft.account_id);
+        state.draft_id = Some(draft_id);
+        state.to = join_addresses(&draft.to_addrs);
+        state.to_cursor = char_count(&state.to);
+        state.cc = join_addresses(&draft.cc_addrs);
+        state.cc_cursor = char_count(&state.cc);
+        state.bcc = join_addresses(&draft.bcc_addrs);
+        state.bcc_cursor = char_count(&state.bcc);
+        if let Some(subject) = draft.subject {
+            state.subject = subject;
+            state.subject_cursor = char_count(&state.subject);
+        }
+        if let Some(body) = draft.text_body {
+            state.body = body;
+            state.body_cursor = char_count(&state.body);
+        }
+        state.in_reply_to_msg = draft.in_reply_to_msg;
+        state.in_reply_to = draft.in_reply_to;
+        state.references_header = draft.references_header;
+        state.attachments = draft.attachments;
+        state.focused = focus;
+        state.dirty = false;
+        self.composer = Some(state);
         self.mode = InputMode::Compose;
         self.clear_error();
         self.set_status("Compose");
@@ -2448,6 +2661,38 @@ fn text_or_default(value: Option<&str>, default: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or(default)
         .to_string()
+}
+
+/// Render a JSON address array as a comma-joined label for a Drafts
+/// row. Empty / non-array inputs map to the literal "(no recipient)"
+/// so Drafts without a To: still surface in the list.
+fn addrs_label(value: &serde_json::Value) -> String {
+    let Some(items) = value.as_array() else {
+        return "(no recipient)".into();
+    };
+    let collected: Vec<&str> = items
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    if collected.is_empty() {
+        "(no recipient)".into()
+    } else {
+        collected.join(", ")
+    }
+}
+
+/// First non-empty line of a draft's text body, used as the snippet
+/// in the Drafts row. Empty bodies render as "(empty)".
+fn first_line_or_default(value: Option<&str>) -> String {
+    let Some(text) = value else {
+        return "(empty)".into();
+    };
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.to_string())
+        .unwrap_or_else(|| "(empty)".into())
 }
 
 fn non_empty_string(value: &str) -> Option<String> {
@@ -4244,5 +4489,157 @@ mod tests {
             draft.references_header.as_deref(),
             Some("<root@x> <orig@x>")
         );
+    }
+
+    #[test]
+    fn test_enter_composer_for_existing_draft_seeds_state_clean_and_records_id() {
+        let account_id = Uuid::new_v4();
+        let draft_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.enter_composer_for_existing_draft(
+            draft_id,
+            ComposerDraft {
+                account_id,
+                in_reply_to_msg: None,
+                to_addrs: vec!["bob@x.com".into()],
+                cc_addrs: Vec::new(),
+                bcc_addrs: Vec::new(),
+                subject: Some("Resume".into()),
+                text_body: Some("partial work".into()),
+                html_body: None,
+                attachments: Vec::new(),
+                in_reply_to: None,
+                references_header: None,
+            },
+            ComposeField::Body,
+        );
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.account_id, account_id);
+        assert_eq!(composer.draft_id, Some(draft_id));
+        assert_eq!(composer.to, "bob@x.com");
+        assert_eq!(composer.subject, "Resume");
+        assert_eq!(composer.body, "partial work");
+        // Reopened drafts are clean — only edits flip the dirty flag.
+        assert!(!composer.dirty);
+        assert_eq!(composer.focused, ComposeField::Body);
+        assert_eq!(app.mode, InputMode::Compose);
+    }
+
+    #[test]
+    fn test_enter_composer_for_existing_draft_typing_marks_dirty_but_keeps_id() {
+        let mut app = AppState::default();
+        let draft_id = Uuid::new_v4();
+        app.enter_composer_for_existing_draft(
+            draft_id,
+            ComposerDraft {
+                account_id: Uuid::new_v4(),
+                in_reply_to_msg: None,
+                to_addrs: Vec::new(),
+                cc_addrs: Vec::new(),
+                bcc_addrs: Vec::new(),
+                subject: None,
+                text_body: Some("body".into()),
+                html_body: None,
+                attachments: Vec::new(),
+                in_reply_to: None,
+                references_header: None,
+            },
+            ComposeField::Body,
+        );
+        assert!(!app.composer_is_dirty());
+        assert!(app.push_composer_char('!'));
+        assert!(app.composer_is_dirty());
+        // Save target stays the same draft so we hit `draft.update`.
+        assert_eq!(app.composer_draft_id(), Some(draft_id));
+    }
+
+    #[test]
+    fn test_drafts_pane_active_follows_selected_folder_role() {
+        let mut app = AppState::default();
+        app.apply_folders(vec![
+            FolderItem {
+                id: Uuid::new_v4(),
+                name: "INBOX".into(),
+                role: "inbox".into(),
+            },
+            FolderItem {
+                id: Uuid::new_v4(),
+                name: "[Gmail]/Drafts".into(),
+                role: "drafts".into(),
+            },
+        ]);
+        assert!(!app.drafts_pane_active());
+        // Move the cursor to the drafts folder.
+        app.selected_folder = 1;
+        assert!(app.drafts_pane_active());
+    }
+
+    #[test]
+    fn test_apply_drafts_clamps_selection_and_remove_local_works() {
+        let mut app = AppState::default();
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+        let id_c = Uuid::new_v4();
+        let make = |id| DraftItem {
+            id,
+            account_id: Uuid::new_v4(),
+            subject: "s".into(),
+            to: "t".into(),
+            date: "d".into(),
+            snippet: "x".into(),
+        };
+        app.apply_drafts(vec![make(id_a), make(id_b), make(id_c)]);
+        app.selected_draft = 2;
+        assert_eq!(app.selected_draft_id(), Some(id_c));
+        assert!(app.remove_draft_locally(id_c));
+        // After removal selection clamps to the new last row.
+        assert_eq!(app.selected_draft_id(), Some(id_b));
+        // No-op when already gone.
+        assert!(!app.remove_draft_locally(id_c));
+    }
+
+    #[test]
+    fn test_begin_draft_delete_uses_confirm_delete_mode() {
+        let mut app = AppState::default();
+        let id = Uuid::new_v4();
+        app.begin_draft_delete(id);
+        assert_eq!(app.mode, InputMode::ConfirmDelete);
+        assert_eq!(app.pending_delete_draft, Some(id));
+        // Cancelling restores Normal and clears the slot.
+        app.cancel_pending_delete_draft();
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.pending_delete_draft.is_none());
+    }
+
+    #[test]
+    fn test_take_pending_delete_draft_returns_id_and_resets_mode() {
+        let mut app = AppState::default();
+        let id = Uuid::new_v4();
+        app.begin_draft_delete(id);
+        assert_eq!(app.take_pending_delete_draft(), Some(id));
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.pending_delete_draft.is_none());
+    }
+
+    #[test]
+    fn test_finish_command_returns_to_compose_when_composer_open() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        app.enter_command_mode();
+        app.push_command_char('w');
+        let _ = app.finish_command();
+        // `:w` from inside the composer should leave the composer
+        // open, not drop back to Normal.
+        assert_eq!(app.mode, InputMode::Compose);
+        assert!(app.composer.is_some());
+    }
+
+    #[test]
+    fn test_finish_command_drops_to_normal_when_no_composer() {
+        let mut app = AppState::default();
+        app.enter_command_mode();
+        app.push_command_char('s');
+        let _ = app.finish_command();
+        assert_eq!(app.mode, InputMode::Normal);
     }
 }

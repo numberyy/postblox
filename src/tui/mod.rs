@@ -118,6 +118,15 @@ trait Mailbox {
         account_id: Uuid,
         draft_id: Uuid,
     ) -> Result<String, ipc::MailboxError>;
+    async fn list_drafts(
+        &mut self,
+        account_id: Uuid,
+    ) -> Result<Vec<app::DraftItem>, ipc::MailboxError>;
+    async fn get_draft(
+        &mut self,
+        draft_id: Uuid,
+    ) -> Result<Option<app::DraftSummary>, ipc::MailboxError>;
+    async fn delete_draft(&mut self, draft_id: Uuid) -> Result<(), ipc::MailboxError>;
     async fn search(
         &mut self,
         query: &str,
@@ -256,6 +265,24 @@ impl Mailbox for MailboxClient {
         draft_id: Uuid,
     ) -> Result<String, ipc::MailboxError> {
         MailboxClient::send_draft(self, account_id, draft_id).await
+    }
+
+    async fn list_drafts(
+        &mut self,
+        account_id: Uuid,
+    ) -> Result<Vec<app::DraftItem>, ipc::MailboxError> {
+        MailboxClient::list_drafts(self, account_id).await
+    }
+
+    async fn get_draft(
+        &mut self,
+        draft_id: Uuid,
+    ) -> Result<Option<app::DraftSummary>, ipc::MailboxError> {
+        MailboxClient::get_draft(self, draft_id).await
+    }
+
+    async fn delete_draft(&mut self, draft_id: Uuid) -> Result<(), ipc::MailboxError> {
+        MailboxClient::delete_draft(self, draft_id).await
     }
 
     async fn search(
@@ -516,7 +543,14 @@ async fn handle_key<C: Mailbox + ?Sized>(
             false
         }
         KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if message_list_focused(app) && app.selected_message_id().is_some() {
+            if drafts_list_focused(app) {
+                if let Some(draft_id) = app.selected_draft_id() {
+                    app.begin_draft_delete(draft_id);
+                    app.set_status("Delete draft? y/n");
+                } else {
+                    app.set_status("No draft selected");
+                }
+            } else if message_list_focused(app) && app.selected_message_id().is_some() {
                 begin_message_delete(app);
             } else if app.focus_detail_pane() {
                 app.set_status("Details");
@@ -638,7 +672,9 @@ async fn handle_key<C: Mailbox + ?Sized>(
             false
         }
         KeyCode::Enter => {
-            if app.active == ActivePane::Threads {
+            if drafts_list_focused(app) && app.selected_draft_id().is_some() {
+                open_selected_draft(app, client).await;
+            } else if app.active == ActivePane::Threads {
                 app.active = ActivePane::Messages;
                 refresh_detail(app, client).await;
             } else if app.active == ActivePane::Attachments {
@@ -755,6 +791,64 @@ fn materialise_forward_attachment(
         size_bytes: decoded.len() as u64,
         content_type: bytes.content_type.clone(),
     })
+}
+
+/// Same temp-file dance as `materialise_forward_attachment` but for
+/// a draft attachment fetched via `draft.get`. Used when re-opening a
+/// saved draft into the composer.
+fn materialise_draft_attachment(
+    bytes: &app::DraftAttachmentBytes,
+) -> Result<app::ComposerAttachment, std::io::Error> {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join("postblox-drafts");
+    std::fs::create_dir_all(&dir)?;
+    let unique = format!("{}-{}", Uuid::new_v4().simple(), bytes.filename);
+    let path = dir.join(unique);
+    let mut file = std::fs::File::create(&path)?;
+    file.write_all(&bytes.bytes)?;
+    Ok(app::ComposerAttachment {
+        path,
+        filename: bytes.filename.clone(),
+        size_bytes: bytes.bytes.len() as u64,
+        content_type: bytes.content_type.clone(),
+    })
+}
+
+/// Build a `ComposerDraft` from a `DraftSummary`. The address arrays
+/// are decoded from the JSON columns; attachments are written to temp
+/// files so the existing `draft.update` flow can re-upload them.
+fn composer_draft_from_summary(
+    summary: &app::DraftSummary,
+) -> Result<app::ComposerDraft, std::io::Error> {
+    let mut attachments = Vec::with_capacity(summary.attachments.len());
+    for att in &summary.attachments {
+        attachments.push(materialise_draft_attachment(att)?);
+    }
+    Ok(app::ComposerDraft {
+        account_id: summary.draft.account_id,
+        in_reply_to_msg: summary.draft.in_reply_to_msg,
+        to_addrs: addr_array_to_strings(&summary.draft.to_addrs),
+        cc_addrs: addr_array_to_strings(&summary.draft.cc_addrs),
+        bcc_addrs: addr_array_to_strings(&summary.draft.bcc_addrs),
+        subject: summary.draft.subject.clone(),
+        text_body: summary.draft.text_body.clone(),
+        html_body: summary.draft.html_body.clone(),
+        attachments,
+        in_reply_to: summary.draft.in_reply_to.clone(),
+        references_header: summary.draft.references_header.clone(),
+    })
+}
+
+fn addr_array_to_strings(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn non_empty_string(value: &str) -> Option<String> {
@@ -886,6 +980,13 @@ async fn handle_composer_key<C: Mailbox + ?Sized>(
         }
         KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             send_composer(app, client).await;
+            false
+        }
+        // Outside the body, `:` opens the command bar so users can run
+        // `:w` to save without learning the Ctrl-S chord. Inside the
+        // body, `:` types a literal colon (matches existing behaviour).
+        KeyCode::Char(':') if !composer_body_focused => {
+            app.enter_command_mode();
             false
         }
         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1187,6 +1288,13 @@ async fn execute_command<C: Mailbox + ?Sized>(
         Command::Account(name) => run_select_account(app, client, &name).await,
         Command::Search { account, query } => {
             run_search(app, client, account, query).await;
+        }
+        Command::Write => {
+            if app.composer.is_some() {
+                save_composer(app, client).await;
+            } else {
+                app.set_status(":w only valid while composing");
+            }
         }
     }
 }
@@ -1498,6 +1606,13 @@ fn message_list_focused(app: &AppState) -> bool {
     matches!(app.active, ActivePane::Messages | ActivePane::Threads)
 }
 
+/// True when the user is on the messages pane in a Drafts folder, so
+/// the Enter / d / etc. keybindings act on the drafts list instead of
+/// the regular message list.
+fn drafts_list_focused(app: &AppState) -> bool {
+    app.active == ActivePane::Messages && app.drafts_pane_active()
+}
+
 fn begin_message_delete(app: &mut AppState) {
     match app.selected_message_id() {
         Some(message_id) => app.begin_delete_confirmation(message_id),
@@ -1512,13 +1627,20 @@ async fn handle_delete_confirmation_key<C: Mailbox + ?Sized>(
 ) -> bool {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            if let Some(message_id) = app.take_pending_delete_message() {
+            if app.pending_delete_draft.is_some() {
+                delete_pending_draft(app, client).await;
+            } else if let Some(message_id) = app.take_pending_delete_message() {
                 run_message_remove_for(app, client, MessageRemove::Delete, message_id).await;
             }
             false
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-            app.cancel_delete_confirmation();
+            if app.pending_delete_draft.is_some() {
+                app.cancel_pending_delete_draft();
+                app.set_status("Delete cancelled");
+            } else {
+                app.cancel_delete_confirmation();
+            }
             false
         }
         _ => false,
@@ -1767,8 +1889,21 @@ async fn refresh_current_pane<C: Mailbox + ?Sized>(app: &mut AppState, client: &
         ActivePane::Accounts => refresh_accounts(app, client).await,
         ActivePane::Folders => refresh_folders(app, client).await,
         ActivePane::Threads => refresh_messages(app, client).await,
-        ActivePane::Messages => refresh_messages(app, client).await,
-        ActivePane::Details => refresh_detail(app, client).await,
+        ActivePane::Messages => {
+            if app.drafts_pane_active() {
+                refresh_drafts(app, client).await;
+            } else {
+                refresh_messages(app, client).await;
+            }
+        }
+        ActivePane::Details => {
+            if app.drafts_pane_active() {
+                // Detail pane is unused while viewing drafts.
+                refresh_drafts(app, client).await;
+            } else {
+                refresh_detail(app, client).await;
+            }
+        }
         ActivePane::Attachments => refresh_attachments(app, client).await,
         ActivePane::Search => refresh_search(app, client).await,
     }
@@ -1777,9 +1912,19 @@ async fn refresh_current_pane<C: Mailbox + ?Sized>(app: &mut AppState, client: &
 async fn refresh_after_selection_change<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
     match app.active {
         ActivePane::Accounts => refresh_folders(app, client).await,
-        ActivePane::Folders => refresh_messages(app, client).await,
+        ActivePane::Folders => {
+            if app.drafts_pane_active() {
+                refresh_drafts(app, client).await;
+            } else {
+                refresh_messages(app, client).await;
+            }
+        }
         ActivePane::Threads => refresh_detail(app, client).await,
-        ActivePane::Messages => refresh_detail(app, client).await,
+        ActivePane::Messages => {
+            if !app.drafts_pane_active() {
+                refresh_detail(app, client).await;
+            }
+        }
         ActivePane::Details => refresh_detail(app, client).await,
         ActivePane::Attachments => refresh_attachment_preview(app, client).await,
         ActivePane::Search => {}
@@ -1866,6 +2011,78 @@ async fn refresh_messages<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut 
             }
         }
         Err(error) => record_error(app, error),
+    }
+}
+
+async fn refresh_drafts<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
+    let Some(account_id) = app.selected_account_id() else {
+        app.apply_drafts(Vec::new());
+        app.set_status("No account selected");
+        return;
+    };
+    app.set_status("Loading drafts");
+    match client.list_drafts(account_id).await {
+        Ok(drafts) => {
+            let count = drafts.len();
+            app.clear_error();
+            app.apply_drafts(drafts);
+            if count == 0 {
+                app.set_status("No drafts");
+            } else {
+                app.set_status(format!("Loaded {count} draft(s)"));
+            }
+        }
+        Err(error) => record_error(app, error),
+    }
+}
+
+async fn open_selected_draft<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
+    let Some(draft_id) = app.selected_draft_id() else {
+        app.set_status("No draft selected");
+        return;
+    };
+    app.set_status("Loading draft");
+    let summary = match client.get_draft(draft_id).await {
+        Ok(Some(summary)) => summary,
+        Ok(None) => {
+            app.set_status("Draft no longer exists");
+            return;
+        }
+        Err(error) => {
+            record_error(app, error);
+            return;
+        }
+    };
+    let composer_draft = match composer_draft_from_summary(&summary) {
+        Ok(draft) => draft,
+        Err(error) => {
+            let message = format!("Cannot reopen draft: {error}");
+            app.push_toast(app::ToastKind::Error, message.clone(), Instant::now());
+            app.set_error(message);
+            return;
+        }
+    };
+    app.enter_composer_for_existing_draft(draft_id, composer_draft, app::ComposeField::Body);
+    app.set_status("Compose (resumed)");
+}
+
+async fn delete_pending_draft<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
+    let Some(draft_id) = app.take_pending_delete_draft() else {
+        return;
+    };
+    // Optimistic removal — restore on error.
+    let removed = app.remove_draft_locally(draft_id);
+    match client.delete_draft(draft_id).await {
+        Ok(()) => {
+            if removed {
+                app.set_status(format!("Draft {draft_id} deleted"));
+            }
+        }
+        Err(error) => {
+            record_error(app, error);
+            // Re-fetch authoritative list since we already mutated.
+            refresh_drafts(app, client).await;
+        }
     }
 }
 
@@ -1985,6 +2202,9 @@ mod tests {
         PrepareReply(Uuid, bool),
         PrepareForward(Uuid),
         FetchAttachmentForForward(Uuid),
+        ListDrafts(Uuid),
+        GetDraft(Uuid),
+        DeleteDraft(Uuid),
     }
 
     #[derive(Default)]
@@ -2000,6 +2220,8 @@ mod tests {
         reply_prepared: Option<ipc::ReplyPrepared>,
         forward_prepared: Option<ipc::ForwardPrepared>,
         forward_attachment_bytes: Option<ipc::ForwardAttachmentBytes>,
+        drafts: Vec<app::DraftItem>,
+        draft_summary: Option<app::DraftSummary>,
         fail_sync: bool,
         fail_set_flags: bool,
         fail_archive: bool,
@@ -2011,6 +2233,9 @@ mod tests {
         fail_prepare_reply: bool,
         fail_prepare_forward: bool,
         fail_fetch_attachment_for_forward: bool,
+        fail_list_drafts: bool,
+        fail_get_draft: bool,
+        fail_delete_draft: bool,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -2272,6 +2497,39 @@ mod tests {
                     content_base64: String::new(),
                 }
             }))
+        }
+
+        async fn list_drafts(
+            &mut self,
+            account_id: Uuid,
+        ) -> Result<Vec<app::DraftItem>, ipc::MailboxError> {
+            self.calls.push(Call::ListDrafts(account_id));
+            if self.fail_list_drafts {
+                Err(server_error("draft.list"))
+            } else {
+                Ok(self.drafts.clone())
+            }
+        }
+
+        async fn get_draft(
+            &mut self,
+            draft_id: Uuid,
+        ) -> Result<Option<app::DraftSummary>, ipc::MailboxError> {
+            self.calls.push(Call::GetDraft(draft_id));
+            if self.fail_get_draft {
+                Err(server_error("draft.get"))
+            } else {
+                Ok(self.draft_summary.clone())
+            }
+        }
+
+        async fn delete_draft(&mut self, draft_id: Uuid) -> Result<(), ipc::MailboxError> {
+            self.calls.push(Call::DeleteDraft(draft_id));
+            if self.fail_delete_draft {
+                Err(server_error("draft.delete"))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -4445,5 +4703,185 @@ mod tests {
         assert_eq!(app.mode, InputMode::Normal);
         assert!(app.composer.is_none());
         assert!(app.error.is_some());
+    }
+
+    // -- Slice 8: drafts list / reopen / delete -----------------------
+
+    fn drafts_folder_item(id: Uuid) -> FolderItem {
+        FolderItem {
+            id,
+            name: "[Gmail]/Drafts".into(),
+            role: "drafts".into(),
+        }
+    }
+
+    fn draft_item(id: Uuid, account_id: Uuid, subject: &str) -> app::DraftItem {
+        app::DraftItem {
+            id,
+            account_id,
+            subject: subject.into(),
+            to: "bob@x.com".into(),
+            date: "2026-05-09 12:00".into(),
+            snippet: "draft body".into(),
+        }
+    }
+
+    fn draft_summary(account_id: Uuid, draft_id: Uuid) -> app::DraftSummary {
+        use chrono::Utc;
+        app::DraftSummary {
+            draft: crate::models::Draft {
+                id: draft_id,
+                account_id,
+                in_reply_to_msg: None,
+                to_addrs: json!(["bob@x.com"]),
+                cc_addrs: json!([]),
+                bcc_addrs: json!([]),
+                subject: Some("Resume".into()),
+                text_body: Some("partial body".into()),
+                html_body: None,
+                in_reply_to: None,
+                references_header: None,
+                remote_folder_id: None,
+                remote_uid: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            attachments: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_drafts_pane_enter_reopens_draft_into_composer() {
+        let account_id = Uuid::new_v4();
+        let drafts_id = Uuid::new_v4();
+        let draft_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        app.apply_folders(vec![drafts_folder_item(drafts_id)]);
+        app.apply_drafts(vec![draft_item(draft_id, account_id, "Resume")]);
+        app.active = ActivePane::Messages;
+
+        let mut client = MockMailbox {
+            draft_summary: Some(draft_summary(account_id, draft_id)),
+            ..Default::default()
+        };
+
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert!(client.calls.contains(&Call::GetDraft(draft_id)));
+        assert_eq!(app.mode, InputMode::Compose);
+        let composer = app.composer.as_ref().expect("composer opened");
+        assert_eq!(composer.draft_id, Some(draft_id));
+        assert_eq!(composer.subject, "Resume");
+        assert!(!composer.dirty);
+    }
+
+    #[tokio::test]
+    async fn test_drafts_pane_d_then_y_deletes_via_daemon_and_removes_locally() {
+        let account_id = Uuid::new_v4();
+        let drafts_id = Uuid::new_v4();
+        let draft_id = Uuid::new_v4();
+        let other_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        app.apply_folders(vec![drafts_folder_item(drafts_id)]);
+        app.apply_drafts(vec![
+            draft_item(draft_id, account_id, "to-delete"),
+            draft_item(other_id, account_id, "keeper"),
+        ]);
+        app.active = ActivePane::Messages;
+        let mut client = MockMailbox::default();
+
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert_eq!(app.mode, InputMode::ConfirmDelete);
+        assert_eq!(app.pending_delete_draft, Some(draft_id));
+
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert!(client.calls.contains(&Call::DeleteDraft(draft_id)));
+        assert_eq!(app.drafts.len(), 1);
+        assert_eq!(app.drafts[0].id, other_id);
+    }
+
+    #[tokio::test]
+    async fn test_drafts_pane_d_then_n_cancels_without_calling_daemon() {
+        let account_id = Uuid::new_v4();
+        let drafts_id = Uuid::new_v4();
+        let draft_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        app.apply_folders(vec![drafts_folder_item(drafts_id)]);
+        app.apply_drafts(vec![draft_item(draft_id, account_id, "keep me")]);
+        app.active = ActivePane::Messages;
+        let mut client = MockMailbox::default();
+
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert!(!client
+            .calls
+            .iter()
+            .any(|c| matches!(c, Call::DeleteDraft(_))));
+        assert_eq!(app.drafts.len(), 1);
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.pending_delete_draft.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_command_bar_w_inside_composer_calls_create_draft() {
+        let account_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        app.enter_composer(account_id);
+        // Type a single char so the composer is non-empty.
+        let mut client = MockMailbox {
+            draft_id: Some(Uuid::new_v4()),
+            ..Default::default()
+        };
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        run_command_line("w".into(), &mut app, &mut client).await;
+
+        assert!(matches!(client.calls.last(), Some(Call::CreateDraft(_))));
+        assert_eq!(app.mode, InputMode::Compose);
+        assert!(app.composer.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_command_bar_w_outside_composer_is_a_no_op_with_status() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+        run_command_line("w".into(), &mut app, &mut client).await;
+        assert!(client.calls.is_empty());
+        assert!(app.status.contains(":w only valid"));
     }
 }

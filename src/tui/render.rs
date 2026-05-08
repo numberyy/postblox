@@ -278,6 +278,10 @@ fn render_threads(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
 }
 
 fn render_messages(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    if app.drafts_pane_active() {
+        render_drafts(frame, area, app, theme);
+        return;
+    }
     let items: Vec<ListItem<'_>> = if app.messages.is_empty() {
         let text = if !app.threads_pane_visible() {
             if app.folders.is_empty() {
@@ -313,6 +317,43 @@ fn render_messages(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Th
     let list = List::new(items)
         .block(pane_block(
             "Messages",
+            app.active == ActivePane::Messages,
+            theme,
+        ))
+        .style(theme.text)
+        .highlight_style(theme.selection)
+        .highlight_symbol("› ");
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// Render the Drafts pane in place of the regular messages list when
+/// the active folder has the `drafts` role. Same widget shape as
+/// `render_messages` so it slots into the existing layout, but the
+/// rows show the recipient + the first body line so users can spot
+/// the draft they want to resume.
+fn render_drafts(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    let items: Vec<ListItem<'_>> = if app.drafts.is_empty() {
+        vec![ListItem::new("No drafts")]
+    } else {
+        app.drafts
+            .iter()
+            .map(|draft| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        draft.subject.clone(),
+                        theme.text.add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!(" → {}", draft.to)),
+                    Span::raw(format!(" — {}", draft.snippet)),
+                    Span::styled(format!(" {}", draft.date), theme.muted),
+                ]))
+            })
+            .collect()
+    };
+    let mut state = selection_state(app.drafts.len(), app.selected_draft);
+    let list = List::new(items)
+        .block(pane_block(
+            "Drafts",
             app.active == ActivePane::Messages,
             theme,
         ))

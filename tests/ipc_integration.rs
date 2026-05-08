@@ -3602,3 +3602,235 @@ async fn message_send_with_reply_headers_emits_in_reply_to_and_references() {
     assert!(mime.contains("In-Reply-To: <orig@example.com>\r\n"));
     assert!(mime.contains("References: <root@example.com> <orig@example.com>\r\n"));
 }
+
+// -- Slice 8: drafts list / get / delete -------------------------------------
+
+#[tokio::test]
+async fn draft_list_orders_by_updated_at_desc() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let acc = c
+        .request("account.create", account_args("a@x.com"))
+        .await
+        .unwrap();
+    let acc_id = acc.data["id"].as_str().unwrap().to_string();
+
+    let first = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": acc_id,
+                "to_addrs": ["bob@x.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "first",
+                "text_body": "1",
+                "html_body": null,
+                "in_reply_to_msg": null,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(first.ok, "{:?}", first.error);
+    // Tiny sleep so updated_at strictly differs (millisecond resolution).
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    let second = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": acc_id,
+                "to_addrs": ["carol@x.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "second",
+                "text_body": "2",
+                "html_body": null,
+                "in_reply_to_msg": null,
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(second.ok);
+
+    let listed = c
+        .request("draft.list", json!({ "account_id": acc_id }))
+        .await
+        .unwrap();
+    assert!(listed.ok);
+    let rows = listed.data.as_array().expect("array");
+    assert_eq!(rows.len(), 2);
+    // Newest first.
+    assert_eq!(rows[0]["subject"], "second");
+    assert_eq!(rows[1]["subject"], "first");
+}
+
+#[tokio::test]
+async fn draft_get_round_trip_returns_draft_and_attachment_bytes() {
+    use base64::Engine;
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let acc = c
+        .request("account.create", account_args("a@x.com"))
+        .await
+        .unwrap();
+    let acc_id = acc.data["id"].as_str().unwrap().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.txt");
+    tokio::fs::write(&path, b"draft notes").await.unwrap();
+
+    let created = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": acc_id,
+                "to_addrs": ["bob@x.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "with attachment",
+                "text_body": "see file",
+                "html_body": null,
+                "in_reply_to": "<orig@x.com>",
+                "references_header": "<root@x.com> <orig@x.com>",
+                "attachments": [{"path": path.display().to_string()}],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(created.ok, "{:?}", created.error);
+    let draft_id = created.data["id"].as_str().unwrap().to_string();
+
+    let got = c
+        .request("draft.get", json!({ "id": draft_id }))
+        .await
+        .unwrap();
+    assert!(got.ok, "{:?}", got.error);
+    let draft = &got.data["draft"];
+    assert_eq!(draft["subject"], "with attachment");
+    assert_eq!(draft["in_reply_to"], "<orig@x.com>");
+    assert_eq!(draft["references_header"], "<root@x.com> <orig@x.com>");
+
+    let attachments = got.data["attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0]["filename"], "notes.txt");
+    let encoded = attachments[0]["content_base64"].as_str().unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap();
+    assert_eq!(decoded, b"draft notes");
+}
+
+#[tokio::test]
+async fn draft_get_returns_null_for_missing_draft() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request("draft.get", json!({ "id": uuid::Uuid::new_v4() }))
+        .await
+        .unwrap();
+    assert!(resp.ok);
+    assert!(resp.data.is_null());
+}
+
+#[tokio::test]
+async fn draft_delete_cascades_attachments() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let acc = c
+        .request("account.create", account_args("a@x.com"))
+        .await
+        .unwrap();
+    let acc_id = acc.data["id"].as_str().unwrap().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("blob.bin");
+    tokio::fs::write(&path, b"xxxxx").await.unwrap();
+
+    let created = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": acc_id,
+                "to_addrs": ["bob@x.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "going away",
+                "text_body": "soon",
+                "html_body": null,
+                "attachments": [{"path": path.display().to_string()}],
+            }),
+        )
+        .await
+        .unwrap();
+    let draft_id = created.data["id"].as_str().unwrap().to_string();
+
+    let deleted = c
+        .request("draft.delete", json!({ "id": draft_id }))
+        .await
+        .unwrap();
+    assert!(deleted.ok);
+    assert_eq!(deleted.data["removed"], true);
+
+    // After delete the draft is gone (`draft.get` returns null) and
+    // listing the account shows zero drafts.
+    let got = c
+        .request("draft.get", json!({ "id": draft_id }))
+        .await
+        .unwrap();
+    assert!(got.ok);
+    assert!(got.data.is_null());
+
+    let listed = c
+        .request("draft.list", json!({ "account_id": acc_id }))
+        .await
+        .unwrap();
+    assert!(listed.ok);
+    let rows = listed.data.as_array().unwrap();
+    assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn message_send_removes_draft_after_smtp_accepts() {
+    let smtp = Arc::new(MockSmtp::ok());
+    let h = make_harness_with_smtp(smtp.clone()).await;
+    let account_id = setup_account_with_secret(&h).await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let draft = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": account_id,
+                "to_addrs": ["to@example.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "send me",
+                "text_body": "body",
+                "html_body": null,
+                "in_reply_to_msg": null,
+            }),
+        )
+        .await
+        .unwrap();
+    let draft_id = draft.data["id"].as_str().unwrap().to_string();
+
+    let sent = c
+        .request(
+            "message.send",
+            json!({"account_id": account_id, "draft_id": draft_id}),
+        )
+        .await
+        .unwrap();
+    assert!(sent.ok);
+
+    // Draft is cleaned up.
+    let got = c
+        .request("draft.get", json!({ "id": draft_id }))
+        .await
+        .unwrap();
+    assert!(got.ok);
+    assert!(got.data.is_null());
+}

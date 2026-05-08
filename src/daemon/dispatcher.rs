@@ -349,6 +349,8 @@ impl Dispatcher for DaemonDispatcher {
             "draft.create" => op_draft_create(&self.pool, args).await,
             "draft.update" => op_draft_update(&self.pool, args).await,
             "draft.delete" => op_draft_delete(&self.pool, args).await,
+            "draft.list" => op_draft_list(&self.pool, args).await,
+            "draft.get" => op_draft_get(&self.pool, args).await,
             "attachment.export" => op_attachment_export(&self.pool, args).await,
             "message.prepare_reply" => op_message_prepare_reply(&self.pool, args).await,
             "message.prepare_forward" => op_message_prepare_forward(&self.pool, args).await,
@@ -1083,6 +1085,48 @@ async fn op_draft_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
     Ok(json!({"removed": removed}))
 }
 
+async fn op_draft_list(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let account_id = parse_uuid(&args, "account_id")?;
+    encode(
+        db::drafts::list_by_account(pool, account_id).await,
+        "drafts::list_by_account",
+    )
+}
+
+async fn op_draft_get(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    use base64::Engine;
+
+    let id = parse_uuid(&args, "id")?;
+    let draft = db::drafts::get(pool, id)
+        .await
+        .map_err(|e| RpcError::internal(format!("drafts::get: {e}")))?;
+    let Some(draft) = draft else {
+        return Ok(Value::Null);
+    };
+    let attachment_rows = db::draft_attachments::list_for_draft(pool, id)
+        .await
+        .map_err(|e| RpcError::internal(format!("draft_attachments::list_for_draft: {e}")))?;
+    let mut attachments_json = Vec::with_capacity(attachment_rows.len());
+    for row in attachment_rows {
+        let bytes = db::draft_attachments::load_content(pool, row.id)
+            .await
+            .map_err(|e| RpcError::internal(format!("draft_attachments::load_content: {e}")))?
+            .unwrap_or_default();
+        attachments_json.push(json!({
+            "id": row.id.to_string(),
+            "draft_id": row.draft_id.to_string(),
+            "filename": row.filename,
+            "content_type": row.content_type,
+            "size_bytes": row.size_bytes,
+            "content_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        }));
+    }
+    Ok(json!({
+        "draft": draft,
+        "attachments": attachments_json,
+    }))
+}
+
 /// Build a `ReplyDraft` for the given message + responding account.
 ///
 /// Pure-data op: the daemon doesn't persist anything yet — the TUI
@@ -1404,6 +1448,18 @@ async fn op_message_send(
     })
     .await
     .map_err(map_smtp_error)?;
+
+    // Drop the local draft now that the wire has accepted it.
+    // Cascade clears `draft_attachments` rows automatically. Errors
+    // here are logged but don't fail the send — the user shouldn't
+    // see "send failed" once SMTP returned 250.
+    if let Err(e) = db::drafts::delete(pool, draft_id).await {
+        tracing::warn!(
+            error = %e,
+            draft_id = %draft_id,
+            "drafts::delete after send failed"
+        );
+    }
 
     audit_actor(
         pool,

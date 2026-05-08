@@ -26,6 +26,10 @@ pub enum Command {
         account: Option<String>,
         query: String,
     },
+    /// Persist the current composer draft (alias `:w`). Mirrors the
+    /// `Ctrl-S` keybinding so users with vim muscle-memory don't have
+    /// to learn the chord.
+    Write,
 }
 
 /// Names recognized as commands at the start of a `:`-line. Sorted so
@@ -49,6 +53,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "theme",
     "unflag",
     "unseen",
+    "w",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -81,6 +86,7 @@ pub fn parse_command(input: &str) -> Result<Command, CommandError> {
         "reply" => parse_no_args(Command::Reply, "reply", parts),
         "reply-all" => parse_no_args(Command::ReplyAll, "reply-all", parts),
         "forward" => parse_no_args(Command::Forward, "forward", parts),
+        "w" => parse_no_args(Command::Write, "w", parts),
         "move" => parse_remainder(input, "move", parts).map(Command::Move),
         "goto" => parse_remainder(input, "goto", parts).map(Command::Goto),
         "account" => parse_account(parts),
@@ -537,5 +543,21 @@ mod tests {
     #[test]
     fn test_complete_command_returns_none_for_no_match() {
         assert!(complete_command("zzz").is_none());
+    }
+
+    #[test]
+    fn test_parse_command_w_alias_for_save() {
+        assert_eq!(parse_command("w").unwrap(), Command::Write);
+        assert_eq!(
+            parse_command("w now").unwrap_err(),
+            CommandError::Usage("w")
+        );
+    }
+
+    #[test]
+    fn test_complete_command_w_resolves_uniquely() {
+        let completion = complete_command("w").unwrap();
+        assert_eq!(completion.text, "w");
+        assert!(completion.unique);
     }
 }

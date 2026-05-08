@@ -10,8 +10,8 @@ use crate::ipc::{Event, Response, RpcError, Topic};
 use crate::models::{Account, Attachment, Draft, Folder, Message};
 
 use super::app::{
-    AccountItem, AttachmentItem, AttachmentPreviewItem, ComposerDraft, FolderItem, MessageDetail,
-    MessageItem, SearchHit,
+    AccountItem, AttachmentItem, AttachmentPreviewItem, ComposerDraft, DraftItem, DraftSummary,
+    FolderItem, MessageDetail, MessageItem, SearchHit,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -75,6 +75,32 @@ impl ForwardAttachmentBytes {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 struct SendResult {
     message_id: String,
+}
+
+/// Decoded `draft.get` response. The daemon sends attachment bytes as
+/// base64 so the wire stays JSON-friendly; the TUI re-materialises
+/// them as temp files when re-opening a draft.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct DraftGetResult {
+    pub draft: Draft,
+    pub attachments: Vec<DraftAttachmentPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct DraftAttachmentPayload {
+    pub id: Uuid,
+    pub draft_id: Uuid,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub content_base64: String,
+}
+
+impl DraftAttachmentPayload {
+    pub fn decoded_bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(&self.content_base64)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -313,6 +339,31 @@ impl MailboxClient {
             .await?;
         let sent: SendResult = decode_response("message.send", response)?;
         Ok(sent.message_id)
+    }
+
+    pub async fn list_drafts(&mut self, account_id: Uuid) -> Result<Vec<DraftItem>, MailboxError> {
+        let response = self
+            .request("draft.list", json!({ "account_id": account_id }))
+            .await?;
+        let drafts: Vec<Draft> = decode_response("draft.list", response)?;
+        Ok(drafts.into_iter().map(DraftItem::from).collect())
+    }
+
+    pub async fn get_draft(
+        &mut self,
+        draft_id: Uuid,
+    ) -> Result<Option<DraftSummary>, MailboxError> {
+        let response = self.request("draft.get", json!({ "id": draft_id })).await?;
+        let payload: Option<DraftGetResult> = decode_response("draft.get", response)?;
+        Ok(payload.map(DraftSummary::from))
+    }
+
+    pub async fn delete_draft(&mut self, draft_id: Uuid) -> Result<(), MailboxError> {
+        let response = self
+            .request("draft.delete", json!({ "id": draft_id }))
+            .await?;
+        let _: Value = decode_response("draft.delete", response)?;
+        Ok(())
     }
 
     pub async fn search(
