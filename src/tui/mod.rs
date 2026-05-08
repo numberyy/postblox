@@ -23,6 +23,7 @@ use crate::ipc::Topic;
 use app::{ActivePane, AppState, InputMode, SyncStateUi, FLAGGED_FLAG, SEEN_FLAG};
 use command::{parse_command, Command};
 use ipc::MailboxClient;
+use theme::ThemeName;
 
 /// Bounded mailbox depth for the key-event reader thread. Large enough
 /// to ride out a redraw or a brief async stall without dropping
@@ -241,6 +242,16 @@ impl Mailbox for MailboxClient {
 }
 
 pub async fn run(socket_path: PathBuf) -> Result<(), TuiError> {
+    run_with_theme(socket_path, None).await
+}
+
+/// Same as [`run`], but lets the caller pre-select the initial theme
+/// (e.g. from `postblox.toml [tui] theme = "..."`). `None` keeps the
+/// type-default.
+pub async fn run_with_theme(
+    socket_path: PathBuf,
+    initial_theme: Option<ThemeName>,
+) -> Result<(), TuiError> {
     let mut client = MailboxClient::connect(&socket_path)
         .await
         .map_err(|source| TuiError::Connect {
@@ -253,6 +264,9 @@ pub async fn run(socket_path: PathBuf) -> Result<(), TuiError> {
         }
     }
     let mut app = AppState::default();
+    if let Some(theme) = initial_theme {
+        app.set_theme(theme);
+    }
     app.set_status(format!("Connected to {}", socket_path.display()));
     refresh_accounts(&mut app, &mut client).await;
 
@@ -2100,7 +2114,7 @@ mod tests {
 
         assert_eq!(
             app.error.as_deref(),
-            Some("usage: theme next|default|dark|high-contrast")
+            Some("usage: theme next|light|dark|high-contrast")
         );
         assert!(client.calls.is_empty());
     }

@@ -243,10 +243,10 @@ fn remainder_after_token(input: &str, token: &str) -> String {
 
 fn parse_theme<'a>(mut parts: impl Iterator<Item = &'a str>) -> Result<Command, CommandError> {
     let Some(name) = parts.next() else {
-        return Err(CommandError::Usage("theme next|default|dark|high-contrast"));
+        return Err(CommandError::Usage("theme next|light|dark|high-contrast"));
     };
     if parts.next().is_some() {
-        return Err(CommandError::Usage("theme next|default|dark|high-contrast"));
+        return Err(CommandError::Usage("theme next|light|dark|high-contrast"));
     }
 
     if name == "next" {
@@ -254,7 +254,7 @@ fn parse_theme<'a>(mut parts: impl Iterator<Item = &'a str>) -> Result<Command, 
     } else {
         name.parse::<ThemeName>()
             .map(Command::Theme)
-            .map_err(|_| CommandError::Usage("theme next|default|dark|high-contrast"))
+            .map_err(|_| CommandError::Usage("theme next|light|dark|high-contrast"))
     }
 }
 
@@ -282,8 +282,8 @@ mod tests {
     fn test_parse_command_accepts_theme_commands() {
         assert_eq!(parse_command("theme next").unwrap(), Command::ThemeNext);
         assert_eq!(
-            parse_command("theme default").unwrap(),
-            Command::Theme(ThemeName::Default)
+            parse_command("theme light").unwrap(),
+            Command::Theme(ThemeName::Light)
         );
         assert_eq!(
             parse_command("theme dark").unwrap(),
@@ -291,6 +291,10 @@ mod tests {
         );
         assert_eq!(
             parse_command("theme high-contrast").unwrap(),
+            Command::Theme(ThemeName::HighContrast)
+        );
+        assert_eq!(
+            parse_command("theme hc").unwrap(),
             Command::Theme(ThemeName::HighContrast)
         );
     }
@@ -324,7 +328,7 @@ mod tests {
 
         assert_eq!(
             err,
-            CommandError::Usage("theme next|default|dark|high-contrast")
+            CommandError::Usage("theme next|light|dark|high-contrast")
         );
     }
 

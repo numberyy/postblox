@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use anyhow::Context;
+use postblox::config;
 use postblox::ipc::default_socket_path;
 
 #[tokio::main(flavor = "current_thread")]
@@ -14,6 +16,21 @@ async fn run() -> anyhow::Result<()> {
     let socket_path = std::env::var_os("POSTBLOX_SOCKET")
         .map(PathBuf::from)
         .unwrap_or_else(default_socket_path);
-    postblox::tui::run(socket_path).await?;
+    let config_path = std::env::var_os("POSTBLOX_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_config_path);
+
+    let cfg = config::load(&config_path)
+        .with_context(|| format!("load config from {}", config_path.display()))?;
+
+    postblox::tui::run_with_theme(socket_path, cfg.tui.theme).await?;
     Ok(())
+}
+
+fn default_config_path() -> PathBuf {
+    if let Some(home) = dirs::config_dir() {
+        home.join("postblox").join("postblox.toml")
+    } else {
+        PathBuf::from("postblox.toml")
+    }
 }

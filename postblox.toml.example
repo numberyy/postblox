@@ -6,6 +6,12 @@
 # Defaults to $XDG_DATA_HOME/postblox.
 # data_dir = "~/.local/share/postblox"
 
+# [tui]
+# # Startup theme for the TUI. Valid values: "light", "dark",
+# # "high-contrast" (alias: "hc"). Runtime `:theme <name>` overrides
+# # this in-memory only — changes are not written back to disk.
+# theme = "dark"
+
 # [secrets]
 # # Default: store account secrets in the OS keyring.
 # backend = "keyring"

@@ -7,7 +7,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ThemeName {
     #[default]
-    Default,
+    Light,
     Dark,
     HighContrast,
 }
@@ -15,7 +15,7 @@ pub enum ThemeName {
 impl ThemeName {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Default => "default",
+            Self::Light => "light",
             Self::Dark => "dark",
             Self::HighContrast => "high-contrast",
         }
@@ -23,29 +23,37 @@ impl ThemeName {
 
     pub fn next(self) -> Self {
         match self {
-            Self::Default => Self::Dark,
+            Self::Light => Self::Dark,
             Self::Dark => Self::HighContrast,
-            Self::HighContrast => Self::Default,
+            Self::HighContrast => Self::Light,
         }
     }
 
     pub fn theme(self) -> Theme {
         match self {
-            Self::Default => Theme {
-                text: Style::default().fg(Color::Reset),
-                muted: Style::default().fg(Color::Gray),
-                pane: Style::default(),
+            Self::Light => Theme {
+                text: Style::default().fg(Color::Black).bg(Color::White),
+                muted: Style::default().fg(Color::DarkGray).bg(Color::White),
+                pane: Style::default().fg(Color::Blue).bg(Color::White),
                 active_pane: Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::Blue)
+                    .bg(Color::White)
                     .add_modifier(Modifier::BOLD),
-                selection: Style::default().add_modifier(Modifier::REVERSED),
-                status: Style::default().fg(Color::Black).bg(Color::Gray),
-                error: Style::default().fg(Color::White).bg(Color::Red),
-                command: Style::default().fg(Color::Black).bg(Color::Cyan),
-                unread: Style::default()
+                selection: Style::default().fg(Color::White).bg(Color::Blue),
+                status: Style::default().fg(Color::White).bg(Color::Blue),
+                error: Style::default()
                     .fg(Color::White)
+                    .bg(Color::Red)
                     .add_modifier(Modifier::BOLD),
-                flagged: Style::default().fg(Color::Yellow),
+                command: Style::default().fg(Color::White).bg(Color::Magenta),
+                unread: Style::default()
+                    .fg(Color::Blue)
+                    .bg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+                flagged: Style::default()
+                    .fg(Color::Yellow)
+                    .bg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             },
             Self::Dark => Theme {
                 text: Style::default().fg(Color::White).bg(Color::Black),
@@ -107,9 +115,9 @@ impl FromStr for ThemeName {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "default" => Ok(Self::Default),
+            "light" => Ok(Self::Light),
             "dark" => Ok(Self::Dark),
-            "high-contrast" => Ok(Self::HighContrast),
+            "high-contrast" | "hc" => Ok(Self::HighContrast),
             other => Err(ThemeParseError::Unknown(other.to_string())),
         }
     }
@@ -141,12 +149,17 @@ mod tests {
 
     #[test]
     fn test_theme_name_parses_supported_names() {
-        assert_eq!("default".parse::<ThemeName>().unwrap(), ThemeName::Default);
+        assert_eq!("light".parse::<ThemeName>().unwrap(), ThemeName::Light);
         assert_eq!("dark".parse::<ThemeName>().unwrap(), ThemeName::Dark);
         assert_eq!(
             "high-contrast".parse::<ThemeName>().unwrap(),
             ThemeName::HighContrast
         );
+    }
+
+    #[test]
+    fn test_theme_name_parses_hc_alias() {
+        assert_eq!("hc".parse::<ThemeName>().unwrap(), ThemeName::HighContrast);
     }
 
     #[test]
@@ -157,9 +170,44 @@ mod tests {
     }
 
     #[test]
+    fn test_theme_name_rejects_legacy_default_name() {
+        // "default" is no longer a recognized theme name; "light" is the
+        // default. This guards against tests or configs that still ship
+        // the old name.
+        assert!("default".parse::<ThemeName>().is_err());
+    }
+
+    #[test]
     fn test_theme_cycle_order_wraps() {
-        assert_eq!(ThemeName::Default.next(), ThemeName::Dark);
+        assert_eq!(ThemeName::Light.next(), ThemeName::Dark);
         assert_eq!(ThemeName::Dark.next(), ThemeName::HighContrast);
-        assert_eq!(ThemeName::HighContrast.next(), ThemeName::Default);
+        assert_eq!(ThemeName::HighContrast.next(), ThemeName::Light);
+    }
+
+    #[test]
+    fn test_default_theme_name_is_light() {
+        assert_eq!(ThemeName::default(), ThemeName::Light);
+    }
+
+    /// Every named palette must populate every Theme field with a
+    /// non-empty Style; rendering must never fall through to a bare
+    /// `Style::default()` because that's terminal-dependent and easy to
+    /// leave illegible (e.g. white-on-white).
+    #[test]
+    fn test_every_theme_populates_every_field() {
+        for name in [ThemeName::Light, ThemeName::Dark, ThemeName::HighContrast] {
+            let theme = name.theme();
+            let bare = Style::default();
+            assert_ne!(theme.text, bare, "{name}: text");
+            assert_ne!(theme.muted, bare, "{name}: muted");
+            assert_ne!(theme.pane, bare, "{name}: pane");
+            assert_ne!(theme.active_pane, bare, "{name}: active_pane");
+            assert_ne!(theme.selection, bare, "{name}: selection");
+            assert_ne!(theme.status, bare, "{name}: status");
+            assert_ne!(theme.error, bare, "{name}: error");
+            assert_ne!(theme.command, bare, "{name}: command");
+            assert_ne!(theme.unread, bare, "{name}: unread");
+            assert_ne!(theme.flagged, bare, "{name}: flagged");
+        }
     }
 }

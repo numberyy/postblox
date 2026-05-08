@@ -9,17 +9,28 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::tui::theme::ThemeName;
+
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Config {
     pub secrets: SecretsConfig,
+    pub tui: TuiConfig,
 }
 
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
             .field("secrets", &self.secrets)
+            .field("tui", &self.tui)
             .finish()
     }
+}
+
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct TuiConfig {
+    /// Override the startup theme. `None` means the TUI uses
+    /// `ThemeName::default()`.
+    pub theme: Option<ThemeName>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -63,14 +74,23 @@ pub enum SecretsBackend {
 struct RawConfig {
     #[serde(default)]
     secrets: Option<RawSecretsConfig>,
+    #[serde(default)]
+    tui: Option<RawTuiConfig>,
 }
 
 impl fmt::Debug for RawConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RawConfig")
             .field("secrets", &self.secrets)
+            .field("tui", &self.tui)
             .finish()
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTuiConfig {
+    theme: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -123,8 +143,13 @@ fn parse(input: &str) -> Result<Config, ConfigError> {
 }
 
 fn normalize(raw: RawConfig) -> Result<Config, ConfigError> {
+    let tui = normalize_tui(raw.tui)?;
+
     let Some(secrets) = raw.secrets else {
-        return Ok(Config::default());
+        return Ok(Config {
+            tui,
+            ..Config::default()
+        });
     };
 
     let backend = secrets.backend.unwrap_or_else(|| {
@@ -157,7 +182,23 @@ fn normalize(raw: RawConfig) -> Result<Config, ConfigError> {
             passphrase: secrets.passphrase,
             path: secrets.path,
         },
+        tui,
     })
+}
+
+fn normalize_tui(raw: Option<RawTuiConfig>) -> Result<TuiConfig, ConfigError> {
+    let Some(raw) = raw else {
+        return Ok(TuiConfig::default());
+    };
+    let theme = match raw.theme.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(name) => Some(name.parse::<ThemeName>().map_err(|err| {
+            ConfigError::Invalid(format!(
+                "[tui] {err}; valid: light, dark, high-contrast (or hc)"
+            ))
+        })?),
+    };
+    Ok(TuiConfig { theme })
 }
 
 #[cfg(test)]
@@ -171,6 +212,7 @@ mod tests {
         let cfg = load(&dir.path().join("nope.toml")).unwrap();
         assert_eq!(cfg.secrets.backend, SecretsBackend::Keyring);
         assert!(cfg.secrets.passphrase.is_none());
+        assert!(cfg.tui.theme.is_none());
     }
 
     #[test]
@@ -181,6 +223,106 @@ mod tests {
         let cfg = load(&p).unwrap();
         assert_eq!(cfg.secrets.backend, SecretsBackend::Keyring);
         assert!(cfg.secrets.passphrase.is_none());
+        assert!(cfg.tui.theme.is_none());
+    }
+
+    #[test]
+    fn parses_tui_theme_dark() {
+        let cfg = parse(
+            r#"
+            [tui]
+            theme = "dark"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.tui.theme, Some(ThemeName::Dark));
+    }
+
+    #[test]
+    fn parses_tui_theme_light() {
+        let cfg = parse(
+            r#"
+            [tui]
+            theme = "light"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.tui.theme, Some(ThemeName::Light));
+    }
+
+    #[test]
+    fn parses_tui_theme_high_contrast_and_hc_alias() {
+        let canonical = parse(
+            r#"
+            [tui]
+            theme = "high-contrast"
+            "#,
+        )
+        .unwrap();
+        let alias = parse(
+            r#"
+            [tui]
+            theme = "hc"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(canonical.tui.theme, Some(ThemeName::HighContrast));
+        assert_eq!(alias.tui.theme, Some(ThemeName::HighContrast));
+    }
+
+    #[test]
+    fn empty_tui_theme_string_falls_back_to_default() {
+        let cfg = parse(
+            r#"
+            [tui]
+            theme = ""
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.tui.theme.is_none());
+    }
+
+    #[test]
+    fn unknown_tui_theme_is_an_error() {
+        let err = parse(
+            r#"
+            [tui]
+            theme = "wat"
+            "#,
+        )
+        .unwrap_err();
+        match err {
+            ConfigError::Invalid(message) => {
+                assert!(message.contains("unknown theme"), "got: {message}");
+                assert!(message.contains("[tui]"), "got: {message}");
+            }
+            other => panic!("expected invalid config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_tui_section_keeps_default_theme() {
+        let cfg = parse(
+            r#"
+            [secrets]
+            backend = "keyring"
+            "#,
+        )
+        .unwrap();
+        assert!(cfg.tui.theme.is_none());
+    }
+
+    #[test]
+    fn unknown_tui_field_is_an_error() {
+        let err = parse(
+            r#"
+            [tui]
+            theme = "dark"
+            extra = "nope"
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Toml(_)));
     }
 
     #[test]
