@@ -1192,19 +1192,41 @@ async fn op_account_sync_folder(
         .ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
     let credential = credential_for_account(secrets, oauth, &account).await?;
 
-    let report = sync::reconcile_folder(pool, hub, imap_sync, account_id, folder_name, &credential)
-        .await
-        .map_err(|e| match e {
-            sync::SyncError::Imap(crate::imap::ImapError::Auth(m)) => {
-                RpcError::new("auth_failed", m)
-            }
-            sync::SyncError::UnknownAccount => RpcError::bad_args("unknown account_id"),
-            sync::SyncError::UnknownFolder(_) => RpcError::bad_args(e.to_string()),
-            sync::SyncError::MissingCredentials => {
-                RpcError::new("missing_secret", "no stored secret")
-            }
-            other => RpcError::internal(other.to_string()),
-        })?;
+    sync::publish_sync_state(
+        hub,
+        sync::SyncStateEvent::new(account_id, sync::SyncState::Syncing, None),
+    )
+    .await;
+    let report =
+        sync::reconcile_folder(pool, hub, imap_sync, account_id, folder_name, &credential).await;
+    let report = match report {
+        Ok(report) => {
+            sync::publish_sync_state(
+                hub,
+                sync::SyncStateEvent::new(account_id, sync::SyncState::Idle, None),
+            )
+            .await;
+            report
+        }
+        Err(e) => {
+            sync::publish_sync_state(
+                hub,
+                sync::SyncStateEvent::new(account_id, sync::SyncState::Error, Some(e.to_string())),
+            )
+            .await;
+            return Err(match e {
+                sync::SyncError::Imap(crate::imap::ImapError::Auth(m)) => {
+                    RpcError::new("auth_failed", m)
+                }
+                sync::SyncError::UnknownAccount => RpcError::bad_args("unknown account_id"),
+                sync::SyncError::UnknownFolder(_) => RpcError::bad_args(e.to_string()),
+                sync::SyncError::MissingCredentials => {
+                    RpcError::new("missing_secret", "no stored secret")
+                }
+                other => RpcError::internal(other.to_string()),
+            });
+        }
+    };
 
     audit(
         pool,

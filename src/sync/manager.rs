@@ -13,6 +13,7 @@ use crate::auth::{CredentialKind, MailCredential};
 use crate::imap::{ImapIdle, ImapSync};
 use crate::ipc::Hub;
 
+use super::state::{publish_sync_state, SyncState, SyncStateEvent};
 use super::worker::{
     run_sync_worker, SyncWorker, WorkerConfig, WorkerCredentialResolver, WorkerCredentialSource,
 };
@@ -129,6 +130,16 @@ impl WorkerManager {
 
         let cancel = CancellationToken::new();
         let credential = self.credential_source(account_id, credential);
+        let initial_state = if self.idle.is_some() {
+            SyncState::Idle
+        } else {
+            SyncState::Polling
+        };
+        publish_sync_state(
+            &self.hub,
+            SyncStateEvent::new(account_id, initial_state, None),
+        )
+        .await;
         let join = tokio::spawn(run_sync_worker(SyncWorker {
             pool: self.pool.clone(),
             hub: self.hub.clone(),

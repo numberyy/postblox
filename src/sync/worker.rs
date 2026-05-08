@@ -11,7 +11,30 @@ use crate::auth::MailCredential;
 use crate::imap::{IdleOutcome, IdleRequest, ImapError, ImapIdle, ImapSync};
 use crate::ipc::Hub;
 
+use super::state::{publish_sync_state, SyncState, SyncStateEvent};
 use super::{reconcile_folder, SyncError};
+
+/// Thin helper that publishes per-account `Topic::SyncState`
+/// transitions for one worker. Does no coalescing — subscribers handle
+/// rate-limiting if they care.
+struct StateReporter {
+    hub: Arc<Hub>,
+    account_id: Uuid,
+}
+
+impl StateReporter {
+    fn new(hub: Arc<Hub>, account_id: Uuid) -> Self {
+        Self { hub, account_id }
+    }
+
+    async fn transition(&mut self, state: SyncState, last_error: Option<String>) {
+        publish_sync_state(
+            &self.hub,
+            SyncStateEvent::new(self.account_id, state, last_error),
+        )
+        .await;
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct WorkerConfig {
@@ -104,6 +127,8 @@ pub(crate) async fn run_polling_worker(worker: PollingWorker) {
         config,
     } = worker;
     let mut backoff = config.initial_backoff;
+    let mut reporter = StateReporter::new(hub.clone(), account_id);
+    reporter.transition(SyncState::Polling, None).await;
 
     loop {
         if cancel.is_cancelled() {
@@ -118,6 +143,7 @@ pub(crate) async fn run_polling_worker(worker: PollingWorker) {
             config,
             &mut backoff,
             "sync worker",
+            Some(&mut reporter),
         )
         .await
         {
@@ -126,6 +152,7 @@ pub(crate) async fn run_polling_worker(worker: PollingWorker) {
             CredentialCycle::Stop => return,
         };
 
+        reporter.transition(SyncState::Syncing, None).await;
         let result = tokio::select! {
             _ = cancel.cancelled() => return,
             result = reconcile_folder(
@@ -148,6 +175,7 @@ pub(crate) async fn run_polling_worker(worker: PollingWorker) {
                     "sync worker reconciled folder"
                 );
                 backoff = config.initial_backoff;
+                reporter.transition(SyncState::Polling, None).await;
                 if sleep_or_cancel(config.poll_interval, &cancel).await {
                     return;
                 }
@@ -159,6 +187,9 @@ pub(crate) async fn run_polling_worker(worker: PollingWorker) {
                     error = %err,
                     "sync worker stopped after authentication failure"
                 );
+                reporter
+                    .transition(SyncState::Error, Some(err.to_string()))
+                    .await;
                 return;
             }
             Err(err) => {
@@ -169,6 +200,9 @@ pub(crate) async fn run_polling_worker(worker: PollingWorker) {
                     retry_in_ms = backoff.as_millis(),
                     "sync worker reconcile failed; retrying"
                 );
+                reporter
+                    .transition(SyncState::Error, Some(err.to_string()))
+                    .await;
                 if sleep_or_cancel(backoff, &cancel).await {
                     return;
                 }
@@ -207,6 +241,8 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
     };
 
     let mut backoff = config.initial_backoff;
+    let mut reporter = StateReporter::new(hub.clone(), account_id);
+    reporter.transition(SyncState::Idle, None).await;
     loop {
         if cancel.is_cancelled() {
             return;
@@ -220,6 +256,7 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
             config,
             &mut backoff,
             "idle sync worker",
+            Some(&mut reporter),
         )
         .await
         {
@@ -228,6 +265,7 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
             CredentialCycle::Stop => return,
         };
 
+        reporter.transition(SyncState::Syncing, None).await;
         let reconcile = tokio::select! {
             _ = cancel.cancelled() => return,
             result = reconcile_folder(
@@ -258,6 +296,9 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
                     error = %err,
                     "idle sync worker stopped after authentication failure"
                 );
+                reporter
+                    .transition(SyncState::Error, Some(err.to_string()))
+                    .await;
                 return;
             }
             Err(err) => {
@@ -268,6 +309,9 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
                     retry_in_ms = backoff.as_millis(),
                     "idle sync worker reconcile failed; retrying"
                 );
+                reporter
+                    .transition(SyncState::Error, Some(err.to_string()))
+                    .await;
                 if sleep_or_cancel(backoff, &cancel).await {
                     return;
                 }
@@ -287,6 +331,9 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
                     retry_in_ms = backoff.as_millis(),
                     "idle sync worker account lookup failed; retrying"
                 );
+                reporter
+                    .transition(SyncState::Error, Some(err.to_string()))
+                    .await;
                 if sleep_or_cancel(backoff, &cancel).await {
                     return;
                 }
@@ -295,6 +342,7 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
             }
         };
 
+        reporter.transition(SyncState::Idle, None).await;
         let wait = idle
             .idle_once(IdleRequest {
                 host: &account.imap_host,
@@ -338,6 +386,9 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
                     error = %err,
                     "idle sync worker stopped after authentication failure"
                 );
+                reporter
+                    .transition(SyncState::Error, Some(err.to_string()))
+                    .await;
                 return;
             }
             Err(err) => {
@@ -348,6 +399,9 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
                     retry_in_ms = backoff.as_millis(),
                     "idle sync worker wait failed; retrying"
                 );
+                reporter
+                    .transition(SyncState::Error, Some(err.to_string()))
+                    .await;
                 if sleep_or_cancel(backoff, &cancel).await {
                     return;
                 }
@@ -381,6 +435,7 @@ enum CredentialCycle {
     Stop,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn credential_for_cycle(
     source: &WorkerCredentialSource,
     account_id: Uuid,
@@ -389,6 +444,7 @@ async fn credential_for_cycle(
     config: WorkerConfig,
     backoff: &mut Duration,
     worker_label: &'static str,
+    reporter: Option<&mut StateReporter>,
 ) -> CredentialCycle {
     let result = tokio::select! {
         _ = cancel.cancelled() => return CredentialCycle::Stop,
@@ -404,6 +460,11 @@ async fn credential_for_cycle(
                 error = %err,
                 "{worker_label} stopped after credential failure"
             );
+            if let Some(reporter) = reporter {
+                reporter
+                    .transition(SyncState::Error, Some(err.to_string()))
+                    .await;
+            }
             CredentialCycle::Stop
         }
         Err(err) => {
@@ -414,6 +475,11 @@ async fn credential_for_cycle(
                 retry_in_ms = backoff.as_millis(),
                 "{worker_label} credential resolution failed; retrying"
             );
+            if let Some(reporter) = reporter {
+                reporter
+                    .transition(SyncState::Error, Some(err.to_string()))
+                    .await;
+            }
             if sleep_or_cancel(*backoff, cancel).await {
                 return CredentialCycle::Stop;
             }
@@ -608,11 +674,21 @@ mod tests {
         account_id: Uuid,
         config: WorkerConfig,
     ) -> (CancellationToken, JoinHandle<()>) {
+        spawn_test_worker_with_hub(pool, sync, account_id, config, Arc::new(Hub::new()))
+    }
+
+    fn spawn_test_worker_with_hub(
+        pool: SqlitePool,
+        sync: Arc<ScriptedSync>,
+        account_id: Uuid,
+        config: WorkerConfig,
+        hub: Arc<Hub>,
+    ) -> (CancellationToken, JoinHandle<()>) {
         let cancel = CancellationToken::new();
         let imap: Arc<dyn ImapSync> = sync;
         let handle = tokio::spawn(run_polling_worker(PollingWorker {
             pool,
-            hub: Arc::new(Hub::new()),
+            hub,
             imap,
             account_id,
             folder_name: "INBOX".into(),
@@ -649,6 +725,22 @@ mod tests {
             config,
         }));
         (cancel, handle)
+    }
+
+    async fn collect_sync_states(
+        rx: &mut tokio::sync::broadcast::Receiver<Arc<serde_json::Value>>,
+        budget: Duration,
+    ) -> Vec<SyncStateEvent> {
+        let mut events = Vec::new();
+        let _ = timeout(budget, async {
+            while let Ok(payload) = rx.recv().await {
+                if let Ok(event) = serde_json::from_value::<SyncStateEvent>((*payload).clone()) {
+                    events.push(event);
+                }
+            }
+        })
+        .await;
+        events
     }
 
     async fn wait_for_calls(sync: &ScriptedSync, expected: usize) {
@@ -785,5 +877,70 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(40)).await;
         assert_eq!(sync.calls(), after_cancel);
         assert_eq!(idle.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_polling_worker_publishes_polling_syncing_states() {
+        let pool = crate::db::test_pool().await;
+        let account_id = seed_account_folder(&pool).await;
+        let sync = Arc::new(ScriptedSync::new(vec![Outcome::Ok]));
+        let hub = Arc::new(Hub::new());
+        let mut rx = hub.subscribe(crate::ipc::Topic::SyncState).await;
+        let (cancel, handle) =
+            spawn_test_worker_with_hub(pool, sync.clone(), account_id, fast_config(), hub.clone());
+
+        wait_for_calls(&sync, 2).await;
+        cancel.cancel();
+        handle.await.unwrap();
+
+        let events = collect_sync_states(&mut rx, Duration::from_millis(50)).await;
+        let states: Vec<_> = events.iter().map(|e| e.state).collect();
+        assert!(
+            states.contains(&SyncState::Polling),
+            "expected polling state in {states:?}"
+        );
+        assert!(
+            states.contains(&SyncState::Syncing),
+            "expected syncing state in {states:?}"
+        );
+        assert!(events.iter().all(|e| e.account_id == account_id));
+    }
+
+    #[tokio::test]
+    async fn test_polling_worker_publishes_error_state_with_last_error() {
+        let pool = crate::db::test_pool().await;
+        let account_id = seed_account_folder(&pool).await;
+        let sync = Arc::new(ScriptedSync::new(vec![Outcome::Protocol, Outcome::Ok]));
+        let hub = Arc::new(Hub::new());
+        let mut rx = hub.subscribe(crate::ipc::Topic::SyncState).await;
+        let (cancel, handle) =
+            spawn_test_worker_with_hub(pool, sync.clone(), account_id, fast_config(), hub.clone());
+
+        wait_for_calls(&sync, 2).await;
+        cancel.cancel();
+        handle.await.unwrap();
+
+        let events = collect_sync_states(&mut rx, Duration::from_millis(50)).await;
+        let error_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.state == SyncState::Error)
+            .collect();
+        assert!(
+            !error_events.is_empty(),
+            "expected at least one error state event in {events:?}"
+        );
+        assert!(error_events
+            .iter()
+            .all(|e| e.last_error.as_deref().is_some_and(|m| !m.is_empty())));
+
+        // After recovery, a non-error state must follow with last_error == None.
+        let non_error_after_error = events
+            .iter()
+            .skip_while(|e| e.state != SyncState::Error)
+            .find(|e| e.state != SyncState::Error);
+        assert!(
+            non_error_after_error.is_some_and(|e| e.last_error.is_none()),
+            "expected non-error transition after error to clear last_error: {events:?}"
+        );
     }
 }

@@ -23,6 +23,8 @@ pub enum Topic {
     MailUpdated,
     /// Account sync_status changed.
     AccountSynced,
+    /// Per-account sync state transition (idle/polling/syncing/error).
+    SyncState,
     /// MCP gate produced a pending approval needing UI attention.
     McpApprovalRequested,
     /// A pending approval was decided (user or system).
@@ -35,6 +37,7 @@ impl Topic {
             Self::MailNew => "mail.new",
             Self::MailUpdated => "mail.updated",
             Self::AccountSynced => "account.synced",
+            Self::SyncState => "sync.state",
             Self::McpApprovalRequested => "mcp.approval_requested",
             Self::McpApprovalDecided => "mcp.approval_decided",
         }
@@ -45,6 +48,7 @@ impl Topic {
             "mail.new" => Some(Self::MailNew),
             "mail.updated" => Some(Self::MailUpdated),
             "account.synced" => Some(Self::AccountSynced),
+            "sync.state" => Some(Self::SyncState),
             "mcp.approval_requested" => Some(Self::McpApprovalRequested),
             "mcp.approval_decided" => Some(Self::McpApprovalDecided),
             _ => None,
@@ -129,6 +133,7 @@ mod tests {
             Topic::MailNew,
             Topic::MailUpdated,
             Topic::AccountSynced,
+            Topic::SyncState,
             Topic::McpApprovalRequested,
             Topic::McpApprovalDecided,
         ] {

@@ -8,9 +8,11 @@
 pub mod error;
 pub mod manager;
 pub mod reconciler;
+pub mod state;
 pub mod worker;
 
 pub use error::SyncError;
 pub use manager::WorkerManager;
 pub use reconciler::{reconcile_folder, ReconcileReport};
+pub use state::{publish_sync_state, SyncState, SyncStateEvent};
 pub use worker::{WorkerConfig, WorkerCredentialResolver};

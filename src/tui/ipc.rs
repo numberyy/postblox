@@ -6,7 +6,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::ipc::client::{Client, ClientError};
-use crate::ipc::{Response, RpcError};
+use crate::ipc::{Event, Response, RpcError, Topic};
 use crate::models::{Account, Attachment, Draft, Folder, Message};
 
 use super::app::{
@@ -262,6 +262,29 @@ impl MailboxClient {
             .await?;
         let sent: SendResult = decode_response("message.send", response)?;
         Ok(sent.message_id)
+    }
+
+    /// Subscribe to a daemon event topic. Returns the daemon-allocated
+    /// `sub_id` so callers can later unsubscribe if needed.
+    pub async fn subscribe(&mut self, topic: Topic) -> Result<u64, MailboxError> {
+        self.client
+            .subscribe(topic)
+            .await
+            .map_err(|source| MailboxError::Request {
+                op: "subscribe",
+                source,
+            })
+    }
+
+    /// Pull the next inbound event off the client's event queue.
+    pub async fn next_event(&mut self) -> Result<Event, MailboxError> {
+        self.client
+            .next_event()
+            .await
+            .map_err(|source| MailboxError::Request {
+                op: "next_event",
+                source,
+            })
     }
 
     async fn request(
