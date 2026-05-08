@@ -2774,3 +2774,50 @@ async fn message_move_unknown_folder_returns_bad_args() {
         Some("bad_args")
     );
 }
+
+// Subscribe → publish round-trip is already covered by
+// `subscription_delivers_published_event_via_hub` above; the test below
+// exercises the TUI reducer that sits *behind* that subscribe path so we
+// know the wire shape we publish today is the one the TUI consumes.
+#[tokio::test]
+async fn tui_reducer_creates_toast_for_mail_new_event() {
+    use postblox::ipc::Event as IpcEvent;
+    use postblox::tui::app::{AccountItem, AppState, FolderItem, ToastKind};
+    use postblox::tui::on_daemon_event;
+    use uuid::Uuid;
+
+    let account_id = Uuid::new_v4();
+    let folder_id = Uuid::new_v4();
+    let mut app = AppState::default();
+    app.apply_accounts(vec![AccountItem {
+        id: account_id,
+        label: "Work".into(),
+        email: "work@example.com".into(),
+        status: "idle".into(),
+    }]);
+    app.apply_folders(vec![FolderItem {
+        id: folder_id,
+        name: "INBOX".into(),
+        role: "inbox".into(),
+    }]);
+
+    let event = IpcEvent {
+        sub: 1,
+        topic: "mail.new".into(),
+        data: json!({
+            "account_id": account_id.to_string(),
+            "folder_id": folder_id.to_string(),
+            "thread_id": Uuid::new_v4().to_string(),
+            "message_id": Uuid::new_v4().to_string(),
+            "uid": 42,
+        }),
+    };
+
+    on_daemon_event(&mut app, &event);
+
+    assert_eq!(app.toasts.len(), 1);
+    let toast = app.toasts.back().unwrap();
+    assert_eq!(toast.kind, ToastKind::Info);
+    assert!(toast.text.contains("INBOX"));
+    assert!(toast.text.contains("Work"));
+}

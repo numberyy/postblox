@@ -6,7 +6,7 @@ pub mod theme;
 
 use std::io::{self, Stdout};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -16,11 +16,22 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use thiserror::Error;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use app::{ActivePane, AppState, InputMode, FLAGGED_FLAG, SEEN_FLAG};
+use crate::ipc::Topic;
+use app::{ActivePane, AppState, InputMode, SyncStateUi, FLAGGED_FLAG, SEEN_FLAG};
 use command::{parse_command, Command};
 use ipc::MailboxClient;
+
+/// Bounded mailbox depth for the key-event reader thread. Large enough
+/// to ride out a redraw or a brief async stall without dropping
+/// keystrokes; small enough that we can't grow unboundedly.
+const KEY_EVENT_CHANNEL_CAPACITY: usize = 64;
+/// Tick cadence used to expire toasts.
+const TICK_INTERVAL: Duration = Duration::from_millis(250);
+/// Bound for the blocking event poll inside the reader thread.
+const KEY_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
 const COMPOSER_BODY_KEY_VIEWPORT_LINES: usize = 3;
 const DETAIL_KEY_VIEWPORT_LINES: usize = 6;
@@ -236,6 +247,11 @@ pub async fn run(socket_path: PathBuf) -> Result<(), TuiError> {
             path: socket_path.clone(),
             source,
         })?;
+    for topic in [Topic::MailNew, Topic::AccountSynced, Topic::SyncState] {
+        if let Err(error) = client.subscribe(topic).await {
+            tracing::warn!(error = %error, topic = ?topic, "tui subscribe failed");
+        }
+    }
     let mut app = AppState::default();
     app.set_status(format!("Connected to {}", socket_path.display()));
     refresh_accounts(&mut app, &mut client).await;
@@ -251,25 +267,132 @@ pub async fn run(socket_path: PathBuf) -> Result<(), TuiError> {
     }
 }
 
+/// Spawn a blocking thread that polls crossterm key events and forwards
+/// them on an mpsc. Returns a join handle plus the receiver.
+fn spawn_key_reader() -> (
+    tokio::task::JoinHandle<()>,
+    mpsc::Receiver<KeyEvent>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let (tx, rx) = mpsc::channel::<KeyEvent>(KEY_EVENT_CHANNEL_CAPACITY);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_for_task = stop.clone();
+    let handle = tokio::task::spawn_blocking(move || loop {
+        if stop_for_task.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        match event::poll(KEY_POLL_TIMEOUT) {
+            Ok(true) => match event::read() {
+                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                    if tx.blocking_send(key).is_err() {
+                        return;
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(error = %error, "crossterm event::read failed");
+                    return;
+                }
+            },
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "crossterm event::poll failed");
+                return;
+            }
+        }
+    });
+    (handle, rx, stop)
+}
+
 async fn run_loop(
     terminal: &mut CrosstermTerminal,
     mut app: AppState,
     mut client: MailboxClient,
 ) -> Result<(), TuiError> {
+    let (key_handle, mut keys, key_stop) = spawn_key_reader();
+    let mut tick = tokio::time::interval(TICK_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         terminal.draw(|frame| render::render(frame, &app))?;
-        if event::poll(Duration::from_millis(200))? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if handle_key(key, &mut app, &mut client).await {
-                        break;
+        let quit = tokio::select! {
+            biased;
+            maybe_key = keys.recv() => match maybe_key {
+                Some(key) => handle_key(key, &mut app, &mut client).await,
+                None => true,
+            },
+            event = client.next_event() => {
+                match event {
+                    Ok(event) => {
+                        on_daemon_event(&mut app, &event);
+                        false
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "tui event stream closed");
+                        true
                     }
                 }
-                _ => {}
             }
+            _ = tick.tick() => {
+                app.tick_toasts(Instant::now());
+                false
+            }
+        };
+        if quit {
+            break;
         }
     }
+
+    key_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    key_handle.abort();
     Ok(())
+}
+
+pub fn on_daemon_event(app: &mut AppState, event: &crate::ipc::Event) {
+    let now = Instant::now();
+    match event.topic.as_str() {
+        "mail.new" => {
+            if let Some(account_id) = event.data.get("account_id").and_then(parse_uuid_value) {
+                let folder_id = event.data.get("folder_id").and_then(parse_uuid_value);
+                app.push_mail_new_toast(account_id, folder_id, now);
+            }
+        }
+        "account.synced" => {
+            if let Some(account_id) = event.data.get("account_id").and_then(parse_uuid_value) {
+                app.push_account_synced_toast(account_id, now);
+            }
+        }
+        "sync.state" => {
+            let Some(account_id) = event.data.get("account_id").and_then(parse_uuid_value) else {
+                return;
+            };
+            let state = event.data.get("state").and_then(|v| v.as_str());
+            let Some(state) = state.and_then(parse_sync_state_str) else {
+                return;
+            };
+            let last_error = event
+                .data
+                .get("last_error")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            app.apply_sync_state(account_id, state, last_error, now);
+        }
+        _ => {}
+    }
+}
+
+fn parse_uuid_value(value: &serde_json::Value) -> Option<Uuid> {
+    value.as_str().and_then(|s| Uuid::parse_str(s).ok())
+}
+
+fn parse_sync_state_str(state: &str) -> Option<SyncStateUi> {
+    match state {
+        "idle" => Some(SyncStateUi::Idle),
+        "polling" => Some(SyncStateUi::Polling),
+        "syncing" => Some(SyncStateUi::Syncing),
+        "error" => Some(SyncStateUi::Error),
+        _ => None,
+    }
 }
 
 async fn handle_key<C: Mailbox + ?Sized>(
@@ -309,6 +432,14 @@ async fn handle_key<C: Mailbox + ?Sized>(
             false
         }
         KeyCode::Char('q') => true,
+        KeyCode::Char('x') => {
+            app.dismiss_newest_toast();
+            false
+        }
+        KeyCode::Char('X') => {
+            app.clear_toasts();
+            false
+        }
         KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if message_list_focused(app) && app.selected_message_id().is_some() {
                 begin_message_delete(app);
@@ -2965,5 +3096,122 @@ mod tests {
             Call::SetFlags(id, flags) if *id == message.id && !flags.contains(&"\\Flagged".to_string())
         )));
         assert_eq!(app.status, "Unflagged message");
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_x_dismisses_newest_toast_in_normal_mode() {
+        use std::time::Instant;
+        let mut app = AppState::default();
+        let now = Instant::now();
+        app.push_toast(app::ToastKind::Info, "first", now);
+        app.push_toast(app::ToastKind::Info, "second", now);
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts.front().unwrap().text, "first");
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_capital_x_clears_all_toasts_in_normal_mode() {
+        use std::time::Instant;
+        let mut app = AppState::default();
+        let now = Instant::now();
+        app.push_toast(app::ToastKind::Info, "a", now);
+        app.push_toast(app::ToastKind::Error, "b", now);
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert!(app.toasts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_x_in_command_mode_inserts_text_and_keeps_toast() {
+        use std::time::Instant;
+        let mut app = AppState::default();
+        app.enter_command_mode();
+        app.push_toast(app::ToastKind::Info, "stay", Instant::now());
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.command_input, "xX");
+        assert_eq!(app.toasts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_x_in_compose_mode_inserts_text_and_keeps_toast() {
+        use std::time::Instant;
+        let account_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.enter_composer(account_id);
+        app.push_toast(app::ToastKind::Info, "stay", Instant::now());
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.composer.as_ref().unwrap().to, "x");
+        assert_eq!(app.toasts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_x_in_confirm_delete_does_not_dismiss_toast() {
+        use std::time::Instant;
+        let account_id = Uuid::new_v4();
+        let folder_id = Uuid::new_v4();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        app.begin_delete_confirmation(message.id);
+        app.push_toast(app::ToastKind::Info, "stay", Instant::now());
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.mode, InputMode::ConfirmDelete);
     }
 }

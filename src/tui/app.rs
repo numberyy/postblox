@@ -1,3 +1,6 @@
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
+
 use uuid::Uuid;
 
 use crate::models::{Account, Attachment, Folder, Message};
@@ -9,6 +12,32 @@ pub const FLAGGED_FLAG: &str = "\\Flagged";
 pub const MAX_COMMAND_CHARS: usize = 128;
 pub const MAX_COMPOSE_HEADER_CHARS: usize = 4096;
 pub const MAX_COMPOSE_BODY_CHARS: usize = 100_000;
+
+/// Maximum number of simultaneously visible toasts. Pushing past this
+/// drops the oldest toast.
+pub const MAX_TOASTS: usize = 3;
+
+/// TTL for non-error toasts.
+pub const TOAST_TTL_INFO: Duration = Duration::from_secs(3);
+/// TTL for error toasts. Errors stick around longer so they don't get
+/// missed when several land at once.
+pub const TOAST_TTL_ERROR: Duration = Duration::from_secs(6);
+
+/// Coalescing windows. Identical text from the same source within the
+/// window refreshes the existing toast's expiry instead of pushing a
+/// duplicate.
+pub const COALESCE_ACCOUNT_SYNCED: Duration = Duration::from_secs(5);
+pub const COALESCE_SYNC_ERROR: Duration = Duration::from_secs(10);
+
+/// Status pane icons.
+pub const ICON_IDLE: &str = "●";
+pub const ICON_POLLING: &str = "~";
+pub const ICON_SYNCING: &str = "…";
+pub const ICON_ERROR: &str = "!";
+
+/// Maximum chars of `last_error` to render after the selected
+/// account's status icon.
+pub const MAX_SELECTED_ERROR_CHARS: usize = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivePane {
@@ -660,6 +689,47 @@ impl ComposerState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Info,
+    Success,
+    Warn,
+    Error,
+}
+
+impl ToastKind {
+    pub fn ttl(self) -> Duration {
+        match self {
+            Self::Error => TOAST_TTL_ERROR,
+            _ => TOAST_TTL_INFO,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Toast {
+    pub id: u64,
+    pub kind: ToastKind,
+    pub text: String,
+    pub expires_at: Instant,
+}
+
+/// TUI-side mirror of the wire `sync.state` enum. Kept independent so
+/// the tui module doesn't pull crate-internal types into its surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncStateUi {
+    Idle,
+    Polling,
+    Syncing,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountStatus {
+    pub state: SyncStateUi,
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub active: ActivePane,
@@ -689,6 +759,9 @@ pub struct AppState {
     pub error: Option<String>,
     pub theme: ThemeName,
     pub composer: Option<ComposerState>,
+    pub toasts: VecDeque<Toast>,
+    pub next_toast_id: u64,
+    pub account_states: HashMap<Uuid, AccountStatus>,
 }
 
 impl Default for AppState {
@@ -721,6 +794,9 @@ impl Default for AppState {
             error: None,
             theme: ThemeName::default(),
             composer: None,
+            toasts: VecDeque::new(),
+            next_toast_id: 0,
+            account_states: HashMap::new(),
         }
     }
 }
@@ -1149,6 +1225,123 @@ impl AppState {
 
     pub fn clear_error(&mut self) {
         self.error = None;
+    }
+
+    /// Push a toast onto the back of the deque. If the deque is full,
+    /// the oldest toast (front) is dropped.
+    pub fn push_toast(&mut self, kind: ToastKind, text: impl Into<String>, now: Instant) -> u64 {
+        let id = self.next_toast_id;
+        self.next_toast_id = self.next_toast_id.wrapping_add(1);
+        let toast = Toast {
+            id,
+            kind,
+            text: text.into(),
+            expires_at: now + kind.ttl(),
+        };
+        if self.toasts.len() >= MAX_TOASTS {
+            self.toasts.pop_front();
+        }
+        self.toasts.push_back(toast);
+        id
+    }
+
+    /// Refresh the expiry of an existing toast that matches `kind` and
+    /// `text`, provided it was pushed within `window` of `now`.
+    /// Returns true if a coalesce happened.
+    fn coalesce_toast(
+        &mut self,
+        kind: ToastKind,
+        text: &str,
+        now: Instant,
+        window: Duration,
+    ) -> bool {
+        let ttl = kind.ttl();
+        // A toast was originally pushed at `expires_at - ttl`. We
+        // coalesce iff `now - push_time <= window`, equivalently
+        // `expires_at + window >= now + ttl`.
+        if let Some(existing) = self.toasts.iter_mut().rev().find(|toast| {
+            toast.kind == kind && toast.text == text && toast.expires_at + window >= now + ttl
+        }) {
+            existing.expires_at = now + ttl;
+            return true;
+        }
+        false
+    }
+
+    /// Drop the most recently pushed toast (back of deque).
+    pub fn dismiss_newest_toast(&mut self) -> bool {
+        self.toasts.pop_back().is_some()
+    }
+
+    /// Clear every toast.
+    pub fn clear_toasts(&mut self) -> bool {
+        let had = !self.toasts.is_empty();
+        self.toasts.clear();
+        had
+    }
+
+    /// Drop expired toasts. Caller passes the current `Instant` so
+    /// tests can drive expiry deterministically.
+    pub fn tick_toasts(&mut self, now: Instant) {
+        self.toasts.retain(|toast| toast.expires_at > now);
+    }
+
+    /// Apply a `sync.state` transition. Updates the per-account map
+    /// and, on `Error`, pushes (or coalesces) an Error toast.
+    pub fn apply_sync_state(
+        &mut self,
+        account_id: Uuid,
+        state: SyncStateUi,
+        last_error: Option<String>,
+        now: Instant,
+    ) {
+        if state == SyncStateUi::Error {
+            let message = last_error.clone().unwrap_or_else(|| "sync error".into());
+            let label = self.account_label_for_toast(account_id);
+            let text = format!("{label}: {message}");
+            if !self.coalesce_toast(ToastKind::Error, &text, now, COALESCE_SYNC_ERROR) {
+                self.push_toast(ToastKind::Error, text, now);
+            }
+        }
+        self.account_states.insert(
+            account_id,
+            AccountStatus {
+                state,
+                last_error: if state == SyncStateUi::Error {
+                    last_error.or_else(|| Some("sync error".into()))
+                } else {
+                    None
+                },
+            },
+        );
+    }
+
+    /// Push a `mail.new` toast resolved against current accounts/folders.
+    pub fn push_mail_new_toast(&mut self, account_id: Uuid, folder_id: Option<Uuid>, now: Instant) {
+        let folder = folder_id
+            .and_then(|id| self.folders.iter().find(|f| f.id == id))
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| "folder".into());
+        let account = self.account_label_for_toast(account_id);
+        let text = format!("New mail in {folder} ({account})");
+        self.push_toast(ToastKind::Info, text, now);
+    }
+
+    /// Push (or coalesce) an `account.synced` toast for `account_id`.
+    pub fn push_account_synced_toast(&mut self, account_id: Uuid, now: Instant) {
+        let label = self.account_label_for_toast(account_id);
+        let text = format!("Synced {label}");
+        if !self.coalesce_toast(ToastKind::Info, &text, now, COALESCE_ACCOUNT_SYNCED) {
+            self.push_toast(ToastKind::Info, text, now);
+        }
+    }
+
+    fn account_label_for_toast(&self, account_id: Uuid) -> String {
+        self.accounts
+            .iter()
+            .find(|a| a.id == account_id)
+            .map(|a| a.label.clone())
+            .unwrap_or_else(|| short_id(account_id))
     }
 
     pub fn selected_account_id(&self) -> Option<Uuid> {
@@ -1793,6 +1986,10 @@ pub fn flags_from_value(value: &serde_json::Value) -> Vec<String> {
 
 pub fn has_flag(flags: &[String], flag: &str) -> bool {
     flags.iter().any(|existing| existing == flag)
+}
+
+fn short_id(id: Uuid) -> String {
+    id.simple().to_string().chars().take(8).collect()
 }
 
 pub fn set_flag_preserving(flags: &[String], flag: &str, enabled: bool) -> Vec<String> {
@@ -2874,5 +3071,217 @@ mod tests {
         app.discard_composer();
         assert_eq!(app.mode, InputMode::Normal);
         assert!(app.composer.is_none());
+    }
+
+    #[test]
+    fn test_toast_deque_caps_at_three_dropping_oldest() {
+        let mut app = AppState::default();
+        let now = Instant::now();
+        let first = app.push_toast(ToastKind::Info, "one", now);
+        let _second = app.push_toast(ToastKind::Info, "two", now);
+        let _third = app.push_toast(ToastKind::Info, "three", now);
+        let fourth = app.push_toast(ToastKind::Info, "four", now);
+
+        assert_eq!(app.toasts.len(), MAX_TOASTS);
+        assert!(app.toasts.iter().all(|t| t.id != first));
+        assert!(app.toasts.iter().any(|t| t.id == fourth));
+        let texts: Vec<_> = app.toasts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["two", "three", "four"]);
+    }
+
+    #[test]
+    fn test_toast_tick_drops_only_expired() {
+        let mut app = AppState::default();
+        let start = Instant::now();
+        app.push_toast(ToastKind::Info, "info", start);
+        app.push_toast(ToastKind::Error, "error", start);
+
+        // Just before info expiry: both still visible.
+        app.tick_toasts(start + TOAST_TTL_INFO - Duration::from_millis(1));
+        assert_eq!(app.toasts.len(), 2);
+
+        // Just after info expiry: info gone, error still around.
+        app.tick_toasts(start + TOAST_TTL_INFO + Duration::from_millis(1));
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].kind, ToastKind::Error);
+
+        // Just before error expiry: still there.
+        app.tick_toasts(start + TOAST_TTL_ERROR - Duration::from_millis(1));
+        assert_eq!(app.toasts.len(), 1);
+
+        // Just after: gone.
+        app.tick_toasts(start + TOAST_TTL_ERROR + Duration::from_millis(1));
+        assert!(app.toasts.is_empty());
+    }
+
+    #[test]
+    fn test_account_synced_toast_coalesces_within_5_seconds() {
+        let mut app = AppState::default();
+        let acct = account("Work");
+        let acct_id = acct.id;
+        app.apply_accounts(vec![acct]);
+        let start = Instant::now();
+
+        app.push_account_synced_toast(acct_id, start);
+        assert_eq!(app.toasts.len(), 1);
+        let original_expiry = app.toasts.back().unwrap().expires_at;
+
+        let later = start + Duration::from_secs(2);
+        app.push_account_synced_toast(acct_id, later);
+
+        assert_eq!(app.toasts.len(), 1, "second toast should have coalesced");
+        let new_expiry = app.toasts.back().unwrap().expires_at;
+        assert!(new_expiry > original_expiry);
+        assert_eq!(new_expiry, later + TOAST_TTL_INFO);
+    }
+
+    #[test]
+    fn test_account_synced_toast_does_not_coalesce_after_window() {
+        let mut app = AppState::default();
+        let acct = account("Work");
+        let acct_id = acct.id;
+        app.apply_accounts(vec![acct]);
+        let start = Instant::now();
+
+        app.push_account_synced_toast(acct_id, start);
+        // Advance time past the prior toast's expiry so it has aged out
+        // of the coalesce window.
+        let later = start + COALESCE_ACCOUNT_SYNCED + Duration::from_millis(1);
+        app.push_account_synced_toast(acct_id, later);
+
+        assert_eq!(app.toasts.len(), 2);
+    }
+
+    #[test]
+    fn test_sync_state_error_coalesces_identical_text_within_10s() {
+        let mut app = AppState::default();
+        let acct = account("Work");
+        let acct_id = acct.id;
+        app.apply_accounts(vec![acct]);
+        let start = Instant::now();
+
+        app.apply_sync_state(
+            acct_id,
+            SyncStateUi::Error,
+            Some("login refused".into()),
+            start,
+        );
+        assert_eq!(app.toasts.len(), 1);
+        let first_expiry = app.toasts.back().unwrap().expires_at;
+
+        // Same text within 10s → coalesce.
+        app.apply_sync_state(
+            acct_id,
+            SyncStateUi::Error,
+            Some("login refused".into()),
+            start + Duration::from_secs(4),
+        );
+        assert_eq!(app.toasts.len(), 1);
+        assert!(app.toasts.back().unwrap().expires_at > first_expiry);
+
+        // Beyond the 10s window → second toast pushed.
+        app.apply_sync_state(
+            acct_id,
+            SyncStateUi::Error,
+            Some("login refused".into()),
+            start + Duration::from_secs(20),
+        );
+        assert_eq!(app.toasts.len(), 2);
+    }
+
+    #[test]
+    fn test_dismiss_newest_toast_pops_back_only() {
+        let mut app = AppState::default();
+        let now = Instant::now();
+        app.push_toast(ToastKind::Info, "one", now);
+        app.push_toast(ToastKind::Info, "two", now);
+
+        assert!(app.dismiss_newest_toast());
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts.front().unwrap().text, "one");
+
+        assert!(app.dismiss_newest_toast());
+        assert!(!app.dismiss_newest_toast());
+    }
+
+    #[test]
+    fn test_clear_toasts_drops_everything() {
+        let mut app = AppState::default();
+        let now = Instant::now();
+        app.push_toast(ToastKind::Info, "one", now);
+        app.push_toast(ToastKind::Error, "two", now);
+
+        assert!(app.clear_toasts());
+        assert!(app.toasts.is_empty());
+        assert!(!app.clear_toasts());
+    }
+
+    #[test]
+    fn test_apply_sync_state_updates_account_states_map() {
+        let mut app = AppState::default();
+        let acct = account("Work");
+        let acct_id = acct.id;
+        app.apply_accounts(vec![acct]);
+        let now = Instant::now();
+
+        app.apply_sync_state(acct_id, SyncStateUi::Polling, None, now);
+        assert_eq!(
+            app.account_states.get(&acct_id).map(|s| s.state),
+            Some(SyncStateUi::Polling)
+        );
+        assert!(app.account_states[&acct_id].last_error.is_none());
+
+        app.apply_sync_state(acct_id, SyncStateUi::Error, Some("boom".into()), now);
+        assert_eq!(app.account_states[&acct_id].state, SyncStateUi::Error);
+        assert_eq!(
+            app.account_states[&acct_id].last_error.as_deref(),
+            Some("boom")
+        );
+
+        // Recovering clears the error text but keeps the entry.
+        app.apply_sync_state(acct_id, SyncStateUi::Idle, None, now);
+        assert_eq!(app.account_states[&acct_id].state, SyncStateUi::Idle);
+        assert!(app.account_states[&acct_id].last_error.is_none());
+    }
+
+    #[test]
+    fn test_apply_sync_state_error_without_last_error_falls_back_to_default() {
+        let mut app = AppState::default();
+        let acct = account("Work");
+        let acct_id = acct.id;
+        app.apply_accounts(vec![acct]);
+        let now = Instant::now();
+
+        app.apply_sync_state(acct_id, SyncStateUi::Error, None, now);
+
+        let status = &app.account_states[&acct_id];
+        assert_eq!(status.last_error.as_deref(), Some("sync error"));
+        assert_eq!(app.toasts.len(), 1);
+        assert!(app.toasts[0].text.contains("sync error"));
+    }
+
+    #[test]
+    fn test_account_states_stored_for_selected_error_60_char_truncation() {
+        // The 60-char truncation is applied at render time. This test
+        // confirms the raw error text is preserved on the model so
+        // render_status can do its own truncation deterministically.
+        let mut app = AppState::default();
+        let acct = account("Work");
+        let acct_id = acct.id;
+        app.apply_accounts(vec![acct]);
+        let long_error = "a".repeat(120);
+
+        app.apply_sync_state(
+            acct_id,
+            SyncStateUi::Error,
+            Some(long_error.clone()),
+            Instant::now(),
+        );
+
+        let stored = app.account_states[&acct_id].last_error.as_deref().unwrap();
+        assert_eq!(stored.len(), 120);
+        assert!(MAX_SELECTED_ERROR_CHARS < stored.len());
+        // The toast also carries the full error for the user.
+        assert!(app.toasts.back().unwrap().text.contains(&long_error));
     }
 }

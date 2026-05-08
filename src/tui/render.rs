@@ -4,7 +4,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{ActivePane, AppState, ComposeField, InputMode, FLAGGED_FLAG, SEEN_FLAG};
+use super::app::{
+    ActivePane, AppState, ComposeField, InputMode, SyncStateUi, ToastKind, FLAGGED_FLAG,
+    ICON_ERROR, ICON_IDLE, ICON_POLLING, ICON_SYNCING, MAX_SELECTED_ERROR_CHARS, SEEN_FLAG,
+};
 use super::theme::Theme;
 
 pub fn render(frame: &mut Frame<'_>, app: &AppState) {
@@ -14,9 +17,14 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState) {
         return;
     }
 
+    let toast_rows = app.toasts.len() as u16;
     let root = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(toast_rows),
+            Constraint::Length(1),
+        ])
         .split(frame.area());
 
     let main = Layout::default()
@@ -58,7 +66,45 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState) {
     } else {
         render_detail(frame, main[1], app, &theme);
     }
-    render_status(frame, root[1], app, &theme);
+    render_toasts(frame, root[1], app, &theme);
+    render_status(frame, root[2], app, &theme);
+}
+
+fn render_toasts(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    if app.toasts.is_empty() || area.height == 0 {
+        return;
+    }
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Length(1); app.toasts.len()])
+        .split(area);
+    let max_width = area.width as usize;
+    for (toast, row) in app.toasts.iter().zip(rows.iter()) {
+        let style = match toast.kind {
+            ToastKind::Info => theme.status,
+            ToastKind::Success => theme.unread,
+            ToastKind::Warn => theme.flagged,
+            ToastKind::Error => theme.error,
+        };
+        let text = truncate_for_width(&toast.text, max_width);
+        frame.render_widget(Paragraph::new(text).style(style), *row);
+    }
+}
+
+fn truncate_for_width(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut chars = text.chars().count();
+    if chars <= max_width {
+        return text.to_string();
+    }
+    let keep = max_width.saturating_sub(1);
+    let mut out: String = text.chars().take(keep).collect();
+    out.push('…');
+    chars = out.chars().count();
+    debug_assert!(chars <= max_width);
+    out
 }
 
 fn render_accounts(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
@@ -539,7 +585,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
             } else {
                 app.status.clone()
             };
-            let text = if app.active == ActivePane::Details {
+            let body = if app.active == ActivePane::Details {
                 format!(
                     " {status} | Details: Tab pane • d details • ↑/↓/j/k lines • PgUp/PgDn/Ctrl-U/D page • ←/→ cursor • Home/End line • v select • Esc clear VIS • a attach • q quit "
                 )
@@ -548,6 +594,8 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
                     " {status} | q quit • c compose • : command • ←/→ pane • Tab pane • ↑/↓ move • j/k move • Enter open • d details/delete • a attach • e export/archive • m move • o open • r refresh • s sync • u seen • f/* flag • t theme "
                 )
             };
+            let icons = sync_state_prefix(app);
+            let text = compose_status_text(&icons, &body, area.width as usize);
             let style = if app.error.is_some() {
                 theme.error
             } else {
@@ -557,6 +605,61 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
         }
     };
     frame.render_widget(Paragraph::new(text).style(style), area);
+}
+
+/// Build the per-account icon prefix shown at the start of the normal-mode
+/// status line. Returns an empty string if no accounts have a known state.
+fn sync_state_prefix(app: &AppState) -> String {
+    let selected_id = app.selected_account_id();
+    let mut parts: Vec<String> = Vec::new();
+    for account in &app.accounts {
+        let Some(status) = app.account_states.get(&account.id) else {
+            continue;
+        };
+        let icon = match status.state {
+            SyncStateUi::Idle => ICON_IDLE,
+            SyncStateUi::Polling => ICON_POLLING,
+            SyncStateUi::Syncing => ICON_SYNCING,
+            SyncStateUi::Error => ICON_ERROR,
+        };
+        let mut piece = format!("{icon} {}", account.label);
+        if Some(account.id) == selected_id && status.state == SyncStateUi::Error {
+            if let Some(err) = status.last_error.as_deref() {
+                let trimmed: String = err.chars().take(MAX_SELECTED_ERROR_CHARS).collect();
+                if !trimmed.is_empty() {
+                    piece.push_str(": ");
+                    piece.push_str(&trimmed);
+                }
+            }
+        }
+        parts.push(piece);
+    }
+    parts.join(" · ")
+}
+
+fn compose_status_text(icons: &str, body: &str, width: usize) -> String {
+    if icons.is_empty() {
+        return body.to_string();
+    }
+    if width == 0 {
+        return icons.to_string();
+    }
+    let prefix = format!(" {icons} ");
+    let prefix_chars = prefix.chars().count();
+    let body_chars = body.chars().count();
+    if prefix_chars + body_chars <= width {
+        let mut out = prefix;
+        out.push_str(body);
+        return out;
+    }
+    if prefix_chars >= width {
+        // Icons take priority; truncate icons to the available width.
+        return prefix.chars().take(width).collect();
+    }
+    let remaining = width - prefix_chars;
+    let mut out = prefix;
+    out.extend(body.chars().take(remaining));
+    out
 }
 
 fn pane_block(title: &'static str, active: bool, theme: &Theme) -> Block<'static> {
@@ -937,5 +1040,127 @@ mod tests {
         let selected = buffer.cell((1, 17)).unwrap().style();
         assert_eq!(selected.fg, Some(Color::Black));
         assert_eq!(selected.bg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn test_render_status_prefixes_account_sync_icons() {
+        use std::time::Instant;
+        let mut app = AppState::default();
+        let personal = AccountItem {
+            id: Uuid::new_v4(),
+            label: "Personal".into(),
+            email: "p@example.com".into(),
+            status: "idle".into(),
+        };
+        let work = AccountItem {
+            id: Uuid::new_v4(),
+            label: "Work".into(),
+            email: "w@example.com".into(),
+            status: "idle".into(),
+        };
+        let side = AccountItem {
+            id: Uuid::new_v4(),
+            label: "Side".into(),
+            email: "s@example.com".into(),
+            status: "idle".into(),
+        };
+        let personal_id = personal.id;
+        let work_id = work.id;
+        let side_id = side.id;
+        app.apply_accounts(vec![personal, work, side]);
+        let now = Instant::now();
+        app.apply_sync_state(personal_id, SyncStateUi::Idle, None, now);
+        app.apply_sync_state(work_id, SyncStateUi::Polling, None, now);
+        app.apply_sync_state(side_id, SyncStateUi::Error, Some("auth failed".into()), now);
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(text.contains("● Personal"));
+        assert!(text.contains("~ Work"));
+        assert!(text.contains("! Side"));
+        assert!(text.contains(" · "));
+    }
+
+    #[test]
+    fn test_render_status_appends_selected_error_text() {
+        use std::time::Instant;
+        let mut app = AppState::default();
+        let acct = AccountItem {
+            id: Uuid::new_v4(),
+            label: "Work".into(),
+            email: "w@example.com".into(),
+            status: "idle".into(),
+        };
+        let acct_id = acct.id;
+        app.apply_accounts(vec![acct]);
+        app.apply_sync_state(
+            acct_id,
+            SyncStateUi::Error,
+            Some("server says no".into()),
+            Instant::now(),
+        );
+        // The default selected_account is 0, so the only account is selected.
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(text.contains("! Work: server says no"));
+    }
+
+    #[test]
+    fn test_render_selected_error_text_truncated_to_60_chars() {
+        use std::time::Instant;
+        let mut app = AppState::default();
+        let acct = AccountItem {
+            id: Uuid::new_v4(),
+            label: "Work".into(),
+            email: "w@example.com".into(),
+            status: "idle".into(),
+        };
+        let acct_id = acct.id;
+        app.apply_accounts(vec![acct]);
+        let long_error = "a".repeat(120);
+        app.apply_sync_state(
+            acct_id,
+            SyncStateUi::Error,
+            Some(long_error.clone()),
+            Instant::now(),
+        );
+        // Suppress the toast that apply_sync_state pushed so it can't
+        // bleed into our buffer text check.
+        app.clear_toasts();
+
+        // Use a wide terminal so truncation isn't happening because of
+        // viewport width.
+        let backend = TestBackend::new(240, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        // Read only the bottom (status) row.
+        let height = 12u16;
+        let status_y = height - 1;
+        let status_text: String = (0..240)
+            .map(|x| buffer.cell((x, status_y)).unwrap().symbol().to_owned())
+            .collect();
+
+        assert!(status_text.contains(&"a".repeat(60)));
+        assert!(!status_text.contains(&"a".repeat(61)));
+    }
+
+    #[test]
+    fn test_render_renders_toast_row_above_status_line() {
+        use std::time::Instant;
+        let mut app = AppState::default();
+        let now = Instant::now();
+        app.push_toast(ToastKind::Info, "Synced Work", now);
+        app.push_toast(ToastKind::Error, "Work: login refused", now);
+
+        let buffer = render_to_buffer(&app);
+        let text = buffer_text(&buffer);
+
+        assert!(text.contains("Synced Work"));
+        assert!(text.contains("Work: login refused"));
+        // Toasts must sit just above the status line — i.e. should
+        // appear once each in the buffer.
+        let synced_count = text.matches("Synced Work").count();
+        assert_eq!(synced_count, 1);
     }
 }
