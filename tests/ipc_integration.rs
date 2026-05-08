@@ -3011,3 +3011,304 @@ async fn tui_reducer_creates_toast_for_mail_new_event() {
     assert!(toast.text.contains("INBOX"));
     assert!(toast.text.contains("Work"));
 }
+
+#[tokio::test]
+async fn draft_create_with_attachments_persists_rows() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let acc = c
+        .request("account.create", account_args("a@x.com"))
+        .await
+        .unwrap();
+    let acc_id = acc.data["id"].as_str().unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note.txt");
+    tokio::fs::write(&path, b"hello attach").await.unwrap();
+
+    let created = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": acc_id,
+                "to_addrs": ["bob@x.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "with attach",
+                "text_body": "body",
+                "attachments": [{"path": path.display().to_string()}],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(created.ok, "{:?}", created.error);
+    let draft_id: uuid::Uuid = created.data["id"].as_str().unwrap().parse().unwrap();
+
+    let rows = postblox::db::draft_attachments::list_for_draft(&h.pool, draft_id)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].filename, "note.txt");
+    assert_eq!(rows[0].content_type, "text/plain");
+    assert_eq!(rows[0].size_bytes, b"hello attach".len() as i64);
+    let bytes = postblox::db::draft_attachments::load_content(&h.pool, rows[0].id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(bytes, b"hello attach");
+}
+
+#[tokio::test]
+async fn draft_update_replaces_attachments() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let acc = c
+        .request("account.create", account_args("a@x.com"))
+        .await
+        .unwrap();
+    let acc_id = acc.data["id"].as_str().unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first.txt");
+    let second = dir.path().join("second.bin");
+    tokio::fs::write(&first, b"first").await.unwrap();
+    tokio::fs::write(&second, b"second-bytes").await.unwrap();
+
+    let created = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": acc_id,
+                "to_addrs": ["bob@x.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "before",
+                "text_body": "body",
+                "attachments": [{"path": first.display().to_string()}],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(created.ok, "{:?}", created.error);
+    let draft_id: uuid::Uuid = created.data["id"].as_str().unwrap().parse().unwrap();
+
+    // Replace with a different file.
+    let updated = c
+        .request(
+            "draft.update",
+            json!({
+                "id": draft_id.to_string(),
+                "to_addrs": ["bob@x.com"],
+                "subject": "after",
+                "attachments": [
+                    {"path": second.display().to_string(), "filename": "renamed.bin"},
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(updated.ok, "{:?}", updated.error);
+    let rows = postblox::db::draft_attachments::list_for_draft(&h.pool, draft_id)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].filename, "renamed.bin");
+    assert_eq!(rows[0].size_bytes, b"second-bytes".len() as i64);
+
+    // Omitting `attachments` leaves rows alone.
+    let touched = c
+        .request(
+            "draft.update",
+            json!({
+                "id": draft_id.to_string(),
+                "to_addrs": ["bob@x.com"],
+                "subject": "subject only",
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(touched.ok, "{:?}", touched.error);
+    let rows_after = postblox::db::draft_attachments::list_for_draft(&h.pool, draft_id)
+        .await
+        .unwrap();
+    assert_eq!(rows_after.len(), 1);
+    assert_eq!(rows_after[0].id, rows[0].id);
+
+    // Empty array clears attachments.
+    let cleared = c
+        .request(
+            "draft.update",
+            json!({
+                "id": draft_id.to_string(),
+                "to_addrs": ["bob@x.com"],
+                "subject": "cleared",
+                "attachments": [],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(cleared.ok, "{:?}", cleared.error);
+    assert!(
+        postblox::db::draft_attachments::list_for_draft(&h.pool, draft_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn draft_create_attachment_over_limit_returns_attachment_too_large() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let acc = c
+        .request("account.create", account_args("a@x.com"))
+        .await
+        .unwrap();
+    let acc_id = acc.data["id"].as_str().unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.bin");
+    let oversize = postblox::db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES as usize + 1;
+    tokio::fs::write(&path, vec![0u8; oversize]).await.unwrap();
+
+    let resp = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": acc_id,
+                "to_addrs": ["bob@x.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "too big",
+                "text_body": "body",
+                "attachments": [{"path": path.display().to_string()}],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("attachment_too_large")
+    );
+
+    // Draft was rolled back on attachment failure.
+    let acc_uuid: uuid::Uuid = acc_id.parse().unwrap();
+    let drafts = postblox::db::drafts::list_by_account(&h.pool, acc_uuid)
+        .await
+        .unwrap();
+    assert!(drafts.is_empty(), "expected rollback, got {drafts:?}");
+}
+
+#[tokio::test]
+async fn draft_create_attachment_missing_path_returns_bad_args() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let acc = c
+        .request("account.create", account_args("a@x.com"))
+        .await
+        .unwrap();
+    let acc_id = acc.data["id"].as_str().unwrap();
+
+    let resp = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": acc_id,
+                "to_addrs": ["bob@x.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "x",
+                "text_body": "y",
+                "attachments": [{"path": "/nonexistent/postblox-test.bin"}],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+    let acc_uuid: uuid::Uuid = acc_id.parse().unwrap();
+    let drafts = postblox::db::drafts::list_by_account(&h.pool, acc_uuid)
+        .await
+        .unwrap();
+    assert!(drafts.is_empty(), "expected rollback, got {drafts:?}");
+}
+
+#[tokio::test]
+async fn message_send_with_attachments_builds_multipart_mime() {
+    let smtp = Arc::new(MockSmtp::ok());
+    let h = make_harness_with_smtp(smtp.clone()).await;
+    let account_id = setup_account_with_secret(&h).await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invoice.pdf");
+    let body = b"%PDF-1.4 fake bytes";
+    tokio::fs::write(&path, body).await.unwrap();
+
+    let draft = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": account_id,
+                "to_addrs": ["to@example.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "with file",
+                "text_body": "see attached",
+                "html_body": null,
+                "attachments": [{"path": path.display().to_string()}],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(draft.ok, "{:?}", draft.error);
+    let draft_id = draft.data["id"].as_str().unwrap().to_string();
+
+    let sent = c
+        .request(
+            "message.send",
+            json!({"account_id": account_id, "draft_id": draft_id}),
+        )
+        .await
+        .unwrap();
+    assert!(sent.ok, "{:?}", sent.error);
+
+    let calls = smtp.calls();
+    assert_eq!(calls.len(), 1);
+    let mime = String::from_utf8(calls[0].mime.clone()).unwrap();
+    assert!(
+        mime.contains("Content-Type: multipart/mixed"),
+        "missing multipart/mixed: {mime}"
+    );
+    assert!(mime.contains("Content-Type: application/pdf; name=\"invoice.pdf\""));
+    assert!(
+        mime.contains("Content-Disposition: attachment; filename=\"invoice.pdf\""),
+        "filename missing: {mime}"
+    );
+    assert!(mime.contains("Content-Transfer-Encoding: base64"));
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(body);
+    let stripped: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
+    let mime_clean: String = mime.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        mime_clean.contains(&stripped),
+        "base64 body not present in MIME"
+    );
+
+    let audit = c
+        .request("audit.list_recent", json!({"limit": 5}))
+        .await
+        .unwrap();
+    assert!(audit.ok);
+    let entries = audit.data.as_array().unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|e| { e["action"] == "message.send" && e["details"]["attachment_count"] == 1 }),
+        "expected attachment_count in audit details: {entries:?}"
+    );
+}

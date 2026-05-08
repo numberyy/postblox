@@ -5,8 +5,9 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use ratatui::Frame;
 
 use super::app::{
-    ActivePane, AppState, ComposeField, InputMode, SyncStateUi, ToastKind, FLAGGED_FLAG,
-    ICON_ERROR, ICON_IDLE, ICON_POLLING, ICON_SYNCING, MAX_SELECTED_ERROR_CHARS, SEEN_FLAG,
+    human_size, ActivePane, AppState, ComposeField, InputMode, SyncStateUi, ToastKind,
+    FLAGGED_FLAG, ICON_ERROR, ICON_IDLE, ICON_POLLING, ICON_SYNCING, MAX_COMPOSE_ATTACHMENT_BYTES,
+    MAX_SELECTED_ERROR_CHARS, SEEN_FLAG,
 };
 use super::theme::Theme;
 
@@ -488,6 +489,11 @@ fn render_composer(frame: &mut Frame<'_>, app: &AppState, theme: &Theme) {
         return;
     };
 
+    // Attachments panel is fixed-height: header + up to 5 rows + footer.
+    // 7 total when present; 0 rows are reserved when empty (panel is
+    // always visible so the user knows the slot exists and the
+    // shortcut hint applies).
+    let attachments_height = compose_attachments_panel_height(composer);
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -496,6 +502,7 @@ fn render_composer(frame: &mut Frame<'_>, app: &AppState, theme: &Theme) {
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Min(5),
+            Constraint::Length(attachments_height),
         ])
         .split(root[0]);
 
@@ -542,7 +549,76 @@ fn render_composer(frame: &mut Frame<'_>, app: &AppState, theme: &Theme) {
         composer,
         theme,
     );
+    render_compose_attachments(frame, rows[5], app, composer, theme);
     render_status(frame, root[1], app, theme);
+}
+
+/// Visible-row height for the attachments panel. Attachments scroll
+/// after 5 entries; the bordered block adds 2 rows so the title +
+/// summary stay legible.
+fn compose_attachments_panel_height(composer: &super::app::ComposerState) -> u16 {
+    const VISIBLE_ROWS: u16 = 5;
+    let count = composer.attachments.len() as u16;
+    let inner = count.clamp(1, VISIBLE_ROWS);
+    inner.saturating_add(2)
+}
+
+fn render_compose_attachments(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &AppState,
+    composer: &super::app::ComposerState,
+    theme: &Theme,
+) {
+    let total = composer.aggregate_attachment_size();
+    let count = composer.attachments.len();
+    let summary = format!(
+        "Attachments: {count} file{plural}, {used} / {cap}",
+        plural = if count == 1 { "" } else { "s" },
+        used = human_size(total),
+        cap = human_size(MAX_COMPOSE_ATTACHMENT_BYTES),
+    );
+
+    if app.mode == InputMode::ComposeAttachPath {
+        let prompt = format!("Attach: {}", composer.attach_input);
+        let block = pane_block_owned(format!(" {summary} "), false, theme);
+        let paragraph = Paragraph::new(prompt.clone())
+            .block(block)
+            .style(theme.command);
+        frame.render_widget(paragraph, area);
+        // Position the cursor at the end of the typed path. "Attach: "
+        // is 8 chars; account for the bordered inset.
+        let cursor_col = "Attach: ".len() + composer.attach_input.chars().count();
+        set_cursor_in_area(frame, area, cursor_col, 0);
+        return;
+    }
+
+    if composer.attachments.is_empty() {
+        let block = pane_block_owned(format!(" {summary} "), false, theme);
+        let hint = "(Ctrl-A to attach a file)";
+        let paragraph = Paragraph::new(hint).block(block).style(theme.text);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = composer
+        .attachments
+        .iter()
+        .map(|att| {
+            let line = Line::from(vec![
+                Span::raw(att.filename.clone()),
+                Span::raw("  "),
+                Span::styled(human_size(att.size_bytes), theme.muted),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+    let mut state = selection_state(count, composer.selected_attachment);
+    let list = List::new(items)
+        .block(pane_block_owned(format!(" {summary} "), false, theme))
+        .highlight_style(theme.selection)
+        .highlight_symbol("> ");
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_composer_field(
@@ -635,8 +711,15 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
         ),
         InputMode::Compose => (
             format!(
-                " {} | Tab fields • arrows/Home/End edit • Enter next/newline • PgUp/PgDn body • v select • Ctrl-S save • Ctrl-X send • Esc cancel ",
+                " {} | Tab fields • PgUp/PgDn body • v select • Ctrl-A attach • Ctrl-K remove • Ctrl-S save • Ctrl-X send • Esc cancel ",
                 app.status
+            ),
+            theme.command,
+        ),
+        InputMode::ComposeAttachPath => (
+            format!(
+                " Attach: {} | Enter add • Esc cancel ",
+                app.compose_attach_input().unwrap_or("")
             ),
             theme.command,
         ),
@@ -1103,7 +1186,11 @@ mod tests {
         assert!(text.contains("PgUp/PgDn"));
         assert!(text.contains("v select"));
 
-        let selected = buffer.cell((1, 17)).unwrap().style();
+        // Selected lines render at the rows where line 15 / line 16 land
+        // after the visible-scroll clamp; coordinates depend on the
+        // composer layout (which now reserves a fixed-height attachments
+        // panel below the body).
+        let selected = buffer.cell((1, 15)).unwrap().style();
         assert_eq!(selected.fg, Some(Color::Black));
         assert_eq!(selected.bg, Some(Color::Yellow));
     }

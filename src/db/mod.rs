@@ -10,6 +10,7 @@ use sqlx::SqlitePool;
 pub mod accounts;
 pub mod attachments;
 pub mod audit;
+pub mod draft_attachments;
 pub mod drafts;
 pub mod folders;
 pub mod mcp;
@@ -96,6 +97,7 @@ mod tests {
             "accounts",
             "attachments",
             "audit_log",
+            "draft_attachments",
             "drafts",
             "folders",
             "mcp_approvals",

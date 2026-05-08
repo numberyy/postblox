@@ -363,6 +363,7 @@ pub(crate) fn draft_create_args(draft: &ComposerDraft) -> Value {
         "subject": &draft.subject,
         "text_body": &draft.text_body,
         "html_body": &draft.html_body,
+        "attachments": draft_attachment_specs(draft),
     })
 }
 
@@ -375,7 +376,24 @@ pub(crate) fn draft_update_args(draft_id: Uuid, draft: &ComposerDraft) -> Value 
         "subject": &draft.subject,
         "text_body": &draft.text_body,
         "html_body": &draft.html_body,
+        "attachments": draft_attachment_specs(draft),
     })
+}
+
+fn draft_attachment_specs(draft: &ComposerDraft) -> Value {
+    Value::Array(
+        draft
+            .attachments
+            .iter()
+            .map(|a| {
+                json!({
+                    "path": a.path.display().to_string(),
+                    "filename": &a.filename,
+                    "content_type": &a.content_type,
+                })
+            })
+            .collect(),
+    )
 }
 
 pub(crate) fn message_send_args(account_id: Uuid, draft_id: Uuid) -> Value {
@@ -535,6 +553,7 @@ mod tests {
             subject: Some("Hello".into()),
             text_body: Some("Body".into()),
             html_body: None,
+            attachments: Vec::new(),
         };
 
         assert_eq!(
@@ -548,6 +567,7 @@ mod tests {
                 "subject": "Hello",
                 "text_body": "Body",
                 "html_body": null,
+                "attachments": [],
             })
         );
         assert_eq!(
@@ -560,6 +580,7 @@ mod tests {
                 "subject": "Hello",
                 "text_body": "Body",
                 "html_body": null,
+                "attachments": [],
             })
         );
         assert_eq!(

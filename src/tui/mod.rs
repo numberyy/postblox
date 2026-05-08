@@ -436,6 +436,10 @@ async fn handle_key<C: Mailbox + ?Sized>(
         InputMode::Compose | InputMode::ConfirmDiscard => {
             return handle_composer_key(key, app, client).await;
         }
+        InputMode::ComposeAttachPath => {
+            handle_compose_attach_key(key, app);
+            return false;
+        }
         InputMode::ConfirmDelete => {
             return handle_delete_confirmation_key(key, app, client).await;
         }
@@ -724,6 +728,22 @@ async fn handle_composer_key<C: Mailbox + ?Sized>(
             send_composer(app, client).await;
             false
         }
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.begin_compose_attach() {
+                app.set_status("Attach: type a path, Enter to add, Esc to cancel");
+            }
+            false
+        }
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl-K removes the selected compose attachment. The
+            // composer body already binds Ctrl-D for half-page-down,
+            // so we use a different chord here to avoid clobbering it.
+            match app.remove_selected_compose_attachment() {
+                Some(name) => app.set_status(format!("Removed attachment: {name}")),
+                None => app.set_status("No attachment to remove"),
+            }
+            false
+        }
         KeyCode::Esc => {
             if app.clear_composer_body_selection() {
                 app.set_status("Body selection cleared");
@@ -847,6 +867,35 @@ async fn handle_composer_key<C: Mailbox + ?Sized>(
             false
         }
         _ => false,
+    }
+}
+
+fn handle_compose_attach_key(key: KeyEvent, app: &mut AppState) {
+    match key.code {
+        KeyCode::Esc => {
+            app.cancel_compose_attach();
+            app.set_status("Compose");
+        }
+        KeyCode::Enter => match app.confirm_compose_attach() {
+            Ok(name) => {
+                app.set_status(format!("Attached {name}"));
+            }
+            Err(err) => {
+                let text = err.toast_text();
+                app.push_toast(app::ToastKind::Error, text.clone(), Instant::now());
+                app.set_error(text);
+                app.cancel_compose_attach();
+            }
+        },
+        KeyCode::Backspace => {
+            app.backspace_compose_attach();
+        }
+        KeyCode::Char(ch) => {
+            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.push_compose_attach_char(ch);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -3152,6 +3201,7 @@ mod tests {
                     subject: None,
                     text_body: None,
                     html_body: None,
+                    attachments: Vec::new(),
                 }),
                 Call::SendDraft(account_id, draft_id),
             ]

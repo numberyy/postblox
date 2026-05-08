@@ -873,11 +873,19 @@ async fn require_role_folder(
 
 async fn op_draft_create(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
     let actor = actor_from_args(&args);
+    // Pull attachments out before NewDraft deserialisation; the inner
+    // type rejects unknown fields when deserialised standalone.
+    let attachments = take_attachment_specs(&args)?;
     let new: db::drafts::NewDraft =
         serde_json::from_value(args).map_err(|e| RpcError::bad_args(e.to_string()))?;
     let draft = db::drafts::create(pool, &new)
         .await
         .map_err(|e| RpcError::internal(format!("drafts::create: {e}")))?;
+    if let Err(e) = replace_draft_attachments(pool, draft.id, attachments).await {
+        // Roll back the half-written draft so callers can retry cleanly.
+        let _ = db::drafts::delete(pool, draft.id).await;
+        return Err(e);
+    }
     audit_actor(
         pool,
         &actor,
@@ -912,6 +920,7 @@ fn default_addrs() -> Value {
 
 async fn op_draft_update(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
     let actor = actor_from_args(&args);
+    let attachments = take_attachment_specs(&args)?;
     let upd: DraftUpdate =
         serde_json::from_value(args).map_err(|e| RpcError::bad_args(e.to_string()))?;
     let patch = db::drafts::DraftPatch {
@@ -925,6 +934,12 @@ async fn op_draft_update(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
     let draft = db::drafts::update(pool, upd.id, &patch)
         .await
         .map_err(|e| RpcError::internal(format!("drafts::update: {e}")))?;
+    // Only touch attachments when the caller explicitly supplied the
+    // field; absence means "leave as-is" (matches the body/subject
+    // partial-update contract).
+    if attachments.is_some() && draft.is_some() {
+        replace_draft_attachments(pool, upd.id, attachments).await?;
+    }
     audit_actor(
         pool,
         &actor,
@@ -934,6 +949,109 @@ async fn op_draft_update(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
     )
     .await;
     encode_one(&draft)
+}
+
+#[derive(Debug, Deserialize)]
+struct DraftAttachmentSpec {
+    path: String,
+    #[serde(default)]
+    content_type: Option<String>,
+    #[serde(default)]
+    filename: Option<String>,
+}
+
+/// Pull the optional `attachments` array off a draft.create/update args
+/// payload. Returns `None` if the field is absent or null, so callers
+/// can distinguish "leave alone" from "replace with empty".
+fn take_attachment_specs(args: &Value) -> Result<Option<Vec<DraftAttachmentSpec>>, RpcError> {
+    match args.get("attachments") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let specs: Vec<DraftAttachmentSpec> = serde_json::from_value(value.clone())
+                .map_err(|e| RpcError::bad_args(format!("bad 'attachments': {e}")))?;
+            Ok(Some(specs))
+        }
+    }
+}
+
+async fn replace_draft_attachments(
+    pool: &SqlitePool,
+    draft_id: uuid::Uuid,
+    specs: Option<Vec<DraftAttachmentSpec>>,
+) -> Result<(), RpcError> {
+    let Some(specs) = specs else {
+        return Ok(());
+    };
+    db::draft_attachments::delete_all_for_draft(pool, draft_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("draft_attachments::delete_all: {e}")))?;
+    let mut aggregate: i64 = 0;
+    for spec in specs {
+        let path = Path::new(&spec.path);
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|e| map_attachment_read_error(&spec.path, e))?;
+        let size = bytes.len() as i64;
+        if size > db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES {
+            return Err(RpcError::new(
+                "attachment_too_large",
+                format!(
+                    "attachment '{}' is {size} bytes, exceeds {} byte limit",
+                    spec.path,
+                    db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES
+                ),
+            ));
+        }
+        aggregate = aggregate.saturating_add(size);
+        if aggregate > db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES {
+            return Err(RpcError::new(
+                "attachment_too_large",
+                format!(
+                    "aggregate draft attachments {aggregate} bytes exceed {} byte limit",
+                    db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES
+                ),
+            ));
+        }
+        let filename = spec.filename.unwrap_or_else(|| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment.bin")
+                .to_string()
+        });
+        let content_type = spec
+            .content_type
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| guess_content_type(path));
+        db::draft_attachments::create(
+            pool,
+            &db::draft_attachments::NewDraftAttachment {
+                draft_id,
+                filename,
+                content_type,
+                content: bytes,
+            },
+        )
+        .await
+        .map_err(|e| RpcError::internal(format!("draft_attachments::create: {e}")))?;
+    }
+    Ok(())
+}
+
+fn map_attachment_read_error(path: &str, err: std::io::Error) -> RpcError {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => RpcError::bad_args(format!("file not found: {path}")),
+        std::io::ErrorKind::PermissionDenied => {
+            RpcError::bad_args(format!("permission denied: {path}"))
+        }
+        _ => RpcError::bad_args(format!("cannot read {path}: {err}")),
+    }
+}
+
+fn guess_content_type(path: &Path) -> String {
+    mime_guess::from_path(path)
+        .first()
+        .map(|m| m.essence_str().to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string())
 }
 
 async fn op_draft_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
@@ -1018,7 +1136,9 @@ async fn op_message_send(
 
     let message_id = format!("<{}@postblox.local>", uuid::Uuid::new_v4());
     let subject = draft.subject.clone().unwrap_or_default();
-    let mime = crate::mail::builder::build_mime(
+    let attachments = load_draft_mime_attachments(pool, draft_id).await?;
+    let attachment_count = attachments.len();
+    let mime = crate::mail::builder::build_mime_with_attachments(
         &account.email,
         &to,
         &cc,
@@ -1026,6 +1146,7 @@ async fn op_message_send(
         draft.text_body.as_deref(),
         draft.html_body.as_deref(),
         &message_id,
+        &attachments,
     );
 
     smtp.submit(SmtpSubmitRequest {
@@ -1052,10 +1173,36 @@ async fn op_message_send(
         &json!({
             "account_id": account_id,
             "message_id": message_id,
+            "attachment_count": attachment_count,
         }),
     )
     .await;
     Ok(json!({"ok": true, "message_id": message_id}))
+}
+
+async fn load_draft_mime_attachments(
+    pool: &SqlitePool,
+    draft_id: uuid::Uuid,
+) -> Result<Vec<crate::mail::builder::MimeAttachment>, RpcError> {
+    let rows = db::draft_attachments::list_for_draft(pool, draft_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("draft_attachments::list_for_draft: {e}")))?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let bytes = db::draft_attachments::load_content(pool, row.id)
+            .await
+            .map_err(|e| RpcError::internal(format!("draft_attachments::load_content: {e}")))?
+            .ok_or_else(|| {
+                RpcError::internal(format!("draft attachment {} disappeared mid-send", row.id))
+            })?;
+        out.push(crate::mail::builder::MimeAttachment {
+            filename: row.filename,
+            content_type: row.content_type,
+            data: bytes,
+            content_id: None,
+        });
+    }
+    Ok(out)
 }
 
 fn parse_addr_array(value: &Value, field: &str) -> Result<Vec<String>, RpcError> {

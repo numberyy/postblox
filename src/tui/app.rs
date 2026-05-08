@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use uuid::Uuid;
@@ -12,6 +13,15 @@ pub const FLAGGED_FLAG: &str = "\\Flagged";
 pub const MAX_COMMAND_CHARS: usize = 128;
 pub const MAX_COMPOSE_HEADER_CHARS: usize = 4096;
 pub const MAX_COMPOSE_BODY_CHARS: usize = 100_000;
+
+/// Maximum bytes for any single compose attachment AND the per-draft
+/// aggregate. Mirrors the daemon-side limit (`CLAUDE.md`: "Attachment
+/// size: max 25 MB") so the TUI can reject before round-tripping.
+pub const MAX_COMPOSE_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
+
+/// Maximum chars accepted in the inline path-input prompt opened with
+/// `Ctrl-A` while composing.
+pub const MAX_COMPOSE_PATH_CHARS: usize = 4096;
 
 /// Maximum number of simultaneously visible toasts. Pushing past this
 /// drops the oldest toast.
@@ -81,6 +91,7 @@ pub enum InputMode {
     Normal,
     Command,
     Compose,
+    ComposeAttachPath,
     ConfirmDiscard,
     ConfirmDelete,
     QuickSearch,
@@ -356,6 +367,14 @@ pub struct MessageListSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposerAttachment {
+    pub path: PathBuf,
+    pub filename: String,
+    pub size_bytes: u64,
+    pub content_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerDraft {
     pub account_id: Uuid,
     pub in_reply_to_msg: Option<Uuid>,
@@ -365,6 +384,40 @@ pub struct ComposerDraft {
     pub subject: Option<String>,
     pub text_body: Option<String>,
     pub html_body: Option<String>,
+    pub attachments: Vec<ComposerAttachment>,
+}
+
+/// Reasons a path the user typed into the compose attach prompt was
+/// rejected. Surfaces concise toast text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachError {
+    NotFound(PathBuf),
+    NotAFile(PathBuf),
+    TooLarge { size: u64 },
+    AggregateTooLarge { total: u64 },
+    Io { path: PathBuf, message: String },
+}
+
+impl AttachError {
+    pub fn toast_text(&self) -> String {
+        match self {
+            Self::NotFound(path) => format!("File not found: {}", path.display()),
+            Self::NotAFile(path) => format!("Not a regular file: {}", path.display()),
+            Self::TooLarge { size } => format!(
+                "Attachment too large: {} > {}",
+                human_size(*size),
+                human_size(MAX_COMPOSE_ATTACHMENT_BYTES)
+            ),
+            Self::AggregateTooLarge { total } => format!(
+                "Aggregate over limit: {} > {}",
+                human_size(*total),
+                human_size(MAX_COMPOSE_ATTACHMENT_BYTES)
+            ),
+            Self::Io { path, message } => {
+                format!("Cannot read {}: {}", path.display(), message)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,6 +440,9 @@ pub struct ComposerState {
     pub body_selection_focus: usize,
     pub body_preferred_column: Option<usize>,
     pub dirty: bool,
+    pub attachments: Vec<ComposerAttachment>,
+    pub selected_attachment: usize,
+    pub attach_input: String,
 }
 
 impl ComposerState {
@@ -410,7 +466,21 @@ impl ComposerState {
             body_selection_focus: 0,
             body_preferred_column: None,
             dirty: false,
+            attachments: Vec::new(),
+            selected_attachment: 0,
+            attach_input: String::new(),
         }
+    }
+
+    pub fn attachments(&self) -> &[ComposerAttachment] {
+        &self.attachments
+    }
+
+    pub fn aggregate_attachment_size(&self) -> u64 {
+        self.attachments
+            .iter()
+            .map(|a| a.size_bytes)
+            .fold(0u64, u64::saturating_add)
     }
 
     fn focused_text(&self) -> &str {
@@ -448,6 +518,7 @@ impl ComposerState {
         [&self.to, &self.cc, &self.bcc, &self.subject, &self.body]
             .iter()
             .any(|value| !value.trim().is_empty())
+            || !self.attachments.is_empty()
     }
 
     fn draft(&self) -> ComposerDraft {
@@ -460,6 +531,7 @@ impl ComposerState {
             subject: non_empty_string(&self.subject),
             text_body: non_empty_string(&self.body),
             html_body: None,
+            attachments: self.attachments.clone(),
         }
     }
 
@@ -1974,6 +2046,121 @@ impl AppState {
         true
     }
 
+    /// Open the inline path-input prompt for adding a compose
+    /// attachment. Returns `false` if no composer is active.
+    pub fn begin_compose_attach(&mut self) -> bool {
+        let Some(composer) = &mut self.composer else {
+            return false;
+        };
+        composer.attach_input.clear();
+        self.mode = InputMode::ComposeAttachPath;
+        true
+    }
+
+    pub fn cancel_compose_attach(&mut self) {
+        if let Some(composer) = &mut self.composer {
+            composer.attach_input.clear();
+        }
+        self.mode = InputMode::Compose;
+    }
+
+    pub fn push_compose_attach_char(&mut self, ch: char) -> bool {
+        let Some(composer) = &mut self.composer else {
+            return false;
+        };
+        if ch.is_control() || composer.attach_input.chars().count() >= MAX_COMPOSE_PATH_CHARS {
+            return false;
+        }
+        composer.attach_input.push(ch);
+        true
+    }
+
+    pub fn backspace_compose_attach(&mut self) -> bool {
+        let Some(composer) = &mut self.composer else {
+            return false;
+        };
+        composer.attach_input.pop().is_some()
+    }
+
+    pub fn compose_attach_input(&self) -> Option<&str> {
+        self.composer
+            .as_ref()
+            .map(|composer| composer.attach_input.as_str())
+    }
+
+    /// Try to add the path the user typed in the inline prompt as an
+    /// attachment. Returns `Ok(filename)` on success; `Err(AttachError)`
+    /// otherwise. On success the input is cleared and we return to
+    /// `Compose` mode.
+    pub fn confirm_compose_attach(&mut self) -> Result<String, AttachError> {
+        let Some(composer) = &mut self.composer else {
+            return Err(AttachError::Io {
+                path: PathBuf::new(),
+                message: "no composer".into(),
+            });
+        };
+        let raw = composer.attach_input.trim().to_string();
+        if raw.is_empty() {
+            return Err(AttachError::NotFound(PathBuf::from("(empty)")));
+        }
+        let path = PathBuf::from(&raw);
+        let attachment = probe_attachment(&path)?;
+        let aggregate = composer
+            .aggregate_attachment_size()
+            .saturating_add(attachment.size_bytes);
+        if aggregate > MAX_COMPOSE_ATTACHMENT_BYTES {
+            return Err(AttachError::AggregateTooLarge { total: aggregate });
+        }
+        let filename = attachment.filename.clone();
+        composer.attachments.push(attachment);
+        composer.attach_input.clear();
+        composer.dirty = true;
+        // Land selection on the just-added attachment so `d` works
+        // intuitively right after Enter.
+        composer.selected_attachment = composer.attachments.len() - 1;
+        self.mode = InputMode::Compose;
+        Ok(filename)
+    }
+
+    /// Remove the currently selected attachment. Index clamps to the
+    /// end of the new list. Returns the removed filename if any.
+    pub fn remove_selected_compose_attachment(&mut self) -> Option<String> {
+        let composer = self.composer.as_mut()?;
+        if composer.attachments.is_empty() {
+            return None;
+        }
+        let index = composer
+            .selected_attachment
+            .min(composer.attachments.len() - 1);
+        let removed = composer.attachments.remove(index);
+        if composer.attachments.is_empty() {
+            composer.selected_attachment = 0;
+        } else if composer.selected_attachment >= composer.attachments.len() {
+            composer.selected_attachment = composer.attachments.len() - 1;
+        }
+        composer.dirty = true;
+        Some(removed.filename)
+    }
+
+    pub fn move_compose_attachment_selection(&mut self, delta: isize) -> bool {
+        let Some(composer) = &mut self.composer else {
+            return false;
+        };
+        if composer.attachments.is_empty() {
+            return false;
+        }
+        move_index(
+            &mut composer.selected_attachment,
+            composer.attachments.len(),
+            delta,
+        )
+    }
+
+    pub fn selected_compose_attachment(&self) -> Option<&ComposerAttachment> {
+        let composer = self.composer.as_ref()?;
+        composer.attachments.get(composer.selected_attachment)
+    }
+
     pub fn cycle_theme(&mut self) -> ThemeName {
         self.theme = self.theme.next();
         self.theme
@@ -2204,6 +2391,61 @@ fn non_empty_string(value: &str) -> Option<String> {
     } else {
         Some(value.to_string())
     }
+}
+
+/// Format a byte size in IEC units up to GiB. Single decimal place.
+pub fn human_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * 1024 * 1024;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Resolve the content-type for a path by extension; falls back to
+/// `application/octet-stream` for unknown types.
+pub fn guess_content_type_for_path(path: &Path) -> String {
+    mime_guess::from_path(path)
+        .first()
+        .map(|m| m.essence_str().to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string())
+}
+
+/// Probe a candidate attachment path: returns metadata + content-type
+/// or a structured error suitable for toast surfacing.
+pub fn probe_attachment(path: &Path) -> Result<ComposerAttachment, AttachError> {
+    let metadata = std::fs::metadata(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => AttachError::NotFound(path.to_path_buf()),
+        _ => AttachError::Io {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        },
+    })?;
+    if !metadata.is_file() {
+        return Err(AttachError::NotAFile(path.to_path_buf()));
+    }
+    let size = metadata.len();
+    if size > MAX_COMPOSE_ATTACHMENT_BYTES {
+        return Err(AttachError::TooLarge { size });
+    }
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("attachment.bin")
+        .to_string();
+    Ok(ComposerAttachment {
+        path: path.to_path_buf(),
+        filename,
+        size_bytes: size,
+        content_type: guess_content_type_for_path(path),
+    })
 }
 
 fn split_addresses(value: &str) -> Vec<String> {
@@ -3596,5 +3838,292 @@ mod tests {
         assert!(MAX_SELECTED_ERROR_CHARS < stored.len());
         // The toast also carries the full error for the user.
         assert!(app.toasts.back().unwrap().text.contains(&long_error));
+    }
+
+    // ---------------- Compose attachments (Slice 6) ----------------
+
+    fn temp_attach_file(name: &str, bytes: &[u8]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn test_compose_attach_path_mode_collects_chars_and_cancels_on_esc() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+
+        assert!(app.begin_compose_attach());
+        assert_eq!(app.mode, InputMode::ComposeAttachPath);
+        for ch in "/tmp/x.txt".chars() {
+            assert!(app.push_compose_attach_char(ch));
+        }
+        assert_eq!(app.compose_attach_input(), Some("/tmp/x.txt"));
+        assert!(app.backspace_compose_attach());
+        assert_eq!(app.compose_attach_input(), Some("/tmp/x.tx"));
+
+        app.cancel_compose_attach();
+        assert_eq!(app.mode, InputMode::Compose);
+        assert_eq!(app.compose_attach_input(), Some(""));
+    }
+
+    #[test]
+    fn test_compose_attach_path_mode_rejects_control_chars_and_caps_length() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        app.begin_compose_attach();
+
+        assert!(!app.push_compose_attach_char('\n'));
+        assert!(!app.push_compose_attach_char('\0'));
+        assert_eq!(app.compose_attach_input(), Some(""));
+
+        // Fill the input to its cap.
+        for _ in 0..MAX_COMPOSE_PATH_CHARS {
+            assert!(app.push_compose_attach_char('a'));
+        }
+        assert!(!app.push_compose_attach_char('a'));
+    }
+
+    #[test]
+    fn test_confirm_compose_attach_adds_attachment_with_filename_size_and_type() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        let (_dir, path) = temp_attach_file("notes.txt", b"hello world");
+        app.begin_compose_attach();
+        for ch in path.display().to_string().chars() {
+            app.push_compose_attach_char(ch);
+        }
+
+        let name = app.confirm_compose_attach().expect("confirm ok");
+        assert_eq!(name, "notes.txt");
+        assert_eq!(app.mode, InputMode::Compose);
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.attachments.len(), 1);
+        let attached = &composer.attachments[0];
+        assert_eq!(attached.filename, "notes.txt");
+        assert_eq!(attached.size_bytes, b"hello world".len() as u64);
+        assert_eq!(attached.content_type, "text/plain");
+        assert_eq!(composer.selected_attachment, 0);
+        assert!(composer.dirty);
+        assert!(composer.attach_input.is_empty());
+    }
+
+    #[test]
+    fn test_confirm_compose_attach_unknown_extension_falls_back_to_octet_stream() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        let (_dir, path) = temp_attach_file("blob.weird", &[1, 2, 3]);
+        app.begin_compose_attach();
+        for ch in path.display().to_string().chars() {
+            app.push_compose_attach_char(ch);
+        }
+
+        app.confirm_compose_attach().unwrap();
+        assert_eq!(
+            app.composer.as_ref().unwrap().attachments[0].content_type,
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn test_confirm_compose_attach_missing_file_yields_not_found_toast_text() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        app.begin_compose_attach();
+        for ch in "/nonexistent/path/does-not-exist.txt".chars() {
+            app.push_compose_attach_char(ch);
+        }
+
+        let err = app.confirm_compose_attach().unwrap_err();
+        assert!(matches!(err, AttachError::NotFound(_)));
+        assert!(err.toast_text().starts_with("File not found:"));
+    }
+
+    #[test]
+    fn test_confirm_compose_attach_directory_rejected_as_not_a_file() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        let dir = tempfile::tempdir().unwrap();
+        app.begin_compose_attach();
+        for ch in dir.path().display().to_string().chars() {
+            app.push_compose_attach_char(ch);
+        }
+
+        let err = app.confirm_compose_attach().unwrap_err();
+        assert!(matches!(err, AttachError::NotAFile(_)));
+    }
+
+    #[test]
+    fn test_confirm_compose_attach_over_25mib_rejected_with_toast_text() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        // One byte over the cap.
+        let size = (MAX_COMPOSE_ATTACHMENT_BYTES + 1) as usize;
+        std::fs::write(&path, vec![0u8; size]).unwrap();
+        app.begin_compose_attach();
+        for ch in path.display().to_string().chars() {
+            app.push_compose_attach_char(ch);
+        }
+
+        let err = app.confirm_compose_attach().unwrap_err();
+        assert!(matches!(err, AttachError::TooLarge { .. }));
+        assert!(err.toast_text().contains("Attachment too large"));
+        // Composer attachments untouched after rejection.
+        assert!(app.composer.as_ref().unwrap().attachments.is_empty());
+    }
+
+    #[test]
+    fn test_confirm_compose_attach_aggregate_over_limit_is_rejected() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        // Pre-seed a fake attachment that already eats most of the cap.
+        let composer = app.composer.as_mut().unwrap();
+        composer.attachments.push(ComposerAttachment {
+            path: PathBuf::from("/tmp/seed.bin"),
+            filename: "seed.bin".into(),
+            size_bytes: MAX_COMPOSE_ATTACHMENT_BYTES - 10,
+            content_type: "application/octet-stream".into(),
+        });
+
+        // Add a small real file whose size pushes the aggregate past the cap.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("more.bin");
+        std::fs::write(&path, vec![0u8; 100]).unwrap();
+        app.begin_compose_attach();
+        for ch in path.display().to_string().chars() {
+            app.push_compose_attach_char(ch);
+        }
+
+        let err = app.confirm_compose_attach().unwrap_err();
+        assert!(matches!(err, AttachError::AggregateTooLarge { .. }));
+        assert!(err.toast_text().contains("Aggregate over limit"));
+        assert_eq!(app.composer.as_ref().unwrap().attachments.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_selected_compose_attachment_clamps_index_at_end() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        let composer = app.composer.as_mut().unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            composer.attachments.push(ComposerAttachment {
+                path: PathBuf::from(format!("/tmp/{name}")),
+                filename: name.to_string(),
+                size_bytes: 1,
+                content_type: "text/plain".into(),
+            });
+        }
+        composer.selected_attachment = 2;
+
+        let removed = app.remove_selected_compose_attachment().unwrap();
+        assert_eq!(removed, "c.txt");
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.attachments.len(), 2);
+        // Index clamped to last surviving entry.
+        assert_eq!(composer.selected_attachment, 1);
+        assert!(composer.dirty);
+
+        // Remove from middle keeps the new last in range.
+        app.remove_selected_compose_attachment();
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.attachments.len(), 1);
+        assert_eq!(composer.selected_attachment, 0);
+
+        app.remove_selected_compose_attachment();
+        assert!(app.composer.as_ref().unwrap().attachments.is_empty());
+        assert_eq!(app.composer.as_ref().unwrap().selected_attachment, 0);
+
+        // Empty list: removal is a no-op.
+        assert!(app.remove_selected_compose_attachment().is_none());
+    }
+
+    #[test]
+    fn test_move_compose_attachment_selection_navigates_within_bounds() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        let composer = app.composer.as_mut().unwrap();
+        for name in ["a", "b", "c"] {
+            composer.attachments.push(ComposerAttachment {
+                path: PathBuf::from(format!("/tmp/{name}")),
+                filename: name.into(),
+                size_bytes: 1,
+                content_type: "text/plain".into(),
+            });
+        }
+
+        assert!(app.move_compose_attachment_selection(1));
+        assert_eq!(app.composer.as_ref().unwrap().selected_attachment, 1);
+        assert!(app.move_compose_attachment_selection(1));
+        assert_eq!(app.composer.as_ref().unwrap().selected_attachment, 2);
+        // At end: no further movement.
+        assert!(!app.move_compose_attachment_selection(1));
+        assert!(app.move_compose_attachment_selection(-2));
+        assert_eq!(app.composer.as_ref().unwrap().selected_attachment, 0);
+        assert!(!app.move_compose_attachment_selection(-1));
+    }
+
+    #[test]
+    fn test_composer_state_survives_attach_path_mode_toggle() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        for ch in "to@x.com".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+        app.next_composer_field();
+        app.next_composer_field();
+        app.next_composer_field();
+        for ch in "Subject text".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+
+        app.begin_compose_attach();
+        for ch in "/tmp/whatever".chars() {
+            app.push_compose_attach_char(ch);
+        }
+        app.cancel_compose_attach();
+
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.to, "to@x.com");
+        assert_eq!(composer.subject, "Subject text");
+        assert!(composer.attach_input.is_empty());
+    }
+
+    #[test]
+    fn test_composer_draft_payload_includes_attachments() {
+        let mut app = AppState::default();
+        app.enter_composer(Uuid::new_v4());
+        let (_dir, path) = temp_attach_file("doc.txt", b"abc");
+        app.begin_compose_attach();
+        for ch in path.display().to_string().chars() {
+            app.push_compose_attach_char(ch);
+        }
+        app.confirm_compose_attach().unwrap();
+
+        let draft = app.composer_draft().unwrap();
+        assert_eq!(draft.attachments.len(), 1);
+        assert_eq!(draft.attachments[0].filename, "doc.txt");
+        assert_eq!(draft.attachments[0].size_bytes, 3);
+    }
+
+    #[test]
+    fn test_attach_error_toast_text_includes_human_readable_size() {
+        let err = AttachError::TooLarge {
+            size: 26 * 1024 * 1024,
+        };
+        let text = err.toast_text();
+        assert!(text.contains("MiB"));
+        assert!(text.contains("Attachment too large"));
+    }
+
+    #[test]
+    fn test_human_size_formats_bytes_kib_mib_gib() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1024), "1.0 KiB");
+        assert_eq!(human_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(human_size(2 * 1024 * 1024 * 1024), "2.0 GiB");
     }
 }
