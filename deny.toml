@@ -18,6 +18,8 @@ exceptions = [
     { crate = "quoted_printable@0.5.2", allow = ["0BSD"] },
     { crate = "webpki-root-certs@1.0.7", allow = ["CDLA-Permissive-2.0"] },
     { crate = "webpki-roots@1.0.7", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "clipboard-win@5.4.1", allow = ["BSL-1.0"] },
+    { crate = "error-code@3.3.2", allow = ["BSL-1.0"] },
 ]
 
 [bans]

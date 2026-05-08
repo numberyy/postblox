@@ -66,6 +66,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 keyring = { version = "3.6", features = ["apple-native", "linux-native-sync-persistent", "crypto-rust"] }
 mime_guess = { version = "2", default-features = false }
+arboard = { version = "3", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

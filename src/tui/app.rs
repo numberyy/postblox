@@ -1008,6 +1008,17 @@ pub struct AppState {
     pub detail_preferred_column: Option<usize>,
     pub attachments: Vec<AttachmentItem>,
     pub attachment_preview: Option<AttachmentPreviewItem>,
+    /// True when keyboard input within `ActivePane::Attachments` should
+    /// drive the preview viewport (scroll, visual select, yank) instead
+    /// of the attachment list. Toggled with Enter / Esc; reset whenever
+    /// the underlying preview goes away.
+    pub preview_focused: bool,
+    /// Top-line offset into the preview text. Bound by viewport height
+    /// so we never scroll past the last line.
+    pub preview_scroll: usize,
+    /// Visual line-mode anchor (the line the user pressed `v` on) and
+    /// the current focus line. `None` means no active selection.
+    pub preview_selection: Option<(usize, usize)>,
     pub selected_account: usize,
     pub selected_folder: usize,
     pub selected_thread: usize,
@@ -1054,6 +1065,9 @@ impl Default for AppState {
             detail_preferred_column: None,
             attachments: Vec::new(),
             attachment_preview: None,
+            preview_focused: false,
+            preview_scroll: 0,
+            preview_selection: None,
             selected_account: 0,
             selected_folder: 0,
             selected_thread: 0,
@@ -1159,10 +1173,14 @@ impl AppState {
                     self.normalize_active_pane();
                     return false;
                 }
+                if self.preview_focused {
+                    return self.move_preview_line(delta);
+                }
                 let changed =
                     move_index(&mut self.selected_attachment, self.attachments.len(), delta);
                 if changed {
                     self.attachment_preview = None;
+                    self.reset_preview_navigation_state();
                 }
                 changed
             }
@@ -1321,16 +1339,196 @@ impl AppState {
             .is_some_and(|preview| Some(preview.attachment_id) != self.selected_attachment_id())
         {
             self.attachment_preview = None;
+            self.reset_preview_navigation_state();
         }
         if self.attachments.is_empty() {
             self.attachment_preview = None;
             self.pending_open_attachment = None;
+            self.reset_preview_navigation_state();
         }
         self.normalize_active_pane();
     }
 
     pub fn apply_attachment_preview(&mut self, preview: AttachmentPreviewItem) {
+        let same_attachment = self
+            .attachment_preview
+            .as_ref()
+            .map(|existing| existing.attachment_id)
+            == Some(preview.attachment_id);
         self.attachment_preview = Some(preview);
+        if !same_attachment {
+            self.reset_preview_navigation_state();
+        }
+    }
+
+    /// Renderable preview text. Mirrors what the user sees in the
+    /// preview pane so scroll, selection, and yank operate on a single
+    /// source of truth.
+    pub fn preview_text(&self) -> Option<String> {
+        let preview = self.attachment_preview.as_ref()?;
+        let mut text = preview.message.clone();
+        if let Some(body) = &preview.text {
+            text.push_str("\n\n");
+            text.push_str(body);
+        }
+        if preview.truncated {
+            text.push_str("\n\n[truncated]");
+        }
+        Some(text)
+    }
+
+    pub fn preview_lines(&self) -> Vec<String> {
+        self.preview_text()
+            .map(|text| text.split('\n').map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn preview_line_count(&self) -> usize {
+        self.preview_lines().len()
+    }
+
+    /// Maximum legal `preview_scroll` value for a viewport of
+    /// `viewport_height` lines. Anything larger leaves blank rows at
+    /// the bottom, so we clamp.
+    pub fn preview_max_scroll(&self, viewport_height: usize) -> usize {
+        let viewport_height = viewport_height.max(1);
+        self.preview_line_count().saturating_sub(viewport_height)
+    }
+
+    pub fn preview_visible_scroll(&self, viewport_height: usize) -> usize {
+        self.preview_scroll
+            .min(self.preview_max_scroll(viewport_height))
+    }
+
+    /// Scroll the preview by `delta` lines. Positive values scroll
+    /// down. Returns true if the offset moved.
+    pub fn scroll_preview(&mut self, delta: isize, viewport_height: usize) -> bool {
+        if !self.is_preview_focus_active() {
+            return false;
+        }
+        let max = self.preview_max_scroll(viewport_height);
+        let old = self.preview_scroll.min(max);
+        let next = if delta < 0 {
+            old.saturating_sub(delta.unsigned_abs())
+        } else {
+            old.saturating_add(delta as usize).min(max)
+        };
+        self.preview_scroll = next;
+        next != old
+    }
+
+    pub fn scroll_preview_to_top(&mut self) -> bool {
+        if !self.is_preview_focus_active() {
+            return false;
+        }
+        let changed = self.preview_scroll != 0;
+        self.preview_scroll = 0;
+        changed
+    }
+
+    pub fn scroll_preview_to_bottom(&mut self, viewport_height: usize) -> bool {
+        if !self.is_preview_focus_active() {
+            return false;
+        }
+        let max = self.preview_max_scroll(viewport_height);
+        let changed = self.preview_scroll != max;
+        self.preview_scroll = max;
+        changed
+    }
+
+    /// Move the preview "cursor" line by `delta`. If a visual selection
+    /// is active, extend it; otherwise just scroll the viewport so the
+    /// new line stays visible.
+    pub fn move_preview_line(&mut self, delta: isize) -> bool {
+        if !self.is_preview_focus_active() {
+            return false;
+        }
+        if let Some((anchor, focus)) = self.preview_selection {
+            let max_line = self.preview_line_count().saturating_sub(1);
+            let next = clamp_isize(focus as isize + delta, 0, max_line as isize) as usize;
+            if next == focus {
+                return false;
+            }
+            self.preview_selection = Some((anchor, next));
+            true
+        } else {
+            self.scroll_preview(delta, 1)
+        }
+    }
+
+    pub fn preview_selected_line_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
+        let (anchor, focus) = self.preview_selection?;
+        let max_line = self.preview_line_count().saturating_sub(1);
+        if max_line == 0 && self.preview_line_count() == 0 {
+            return None;
+        }
+        let start = anchor.min(focus).min(max_line);
+        let end = anchor.max(focus).min(max_line);
+        Some(start..=end)
+    }
+
+    /// Toggle visual line-mode selection, anchoring on the current
+    /// preview cursor (taken to be the top of the viewport).
+    pub fn toggle_preview_selection(&mut self) -> bool {
+        if !self.is_preview_focus_active() {
+            return false;
+        }
+        if self.preview_selection.is_some() {
+            self.preview_selection = None;
+            return true;
+        }
+        let line = self
+            .preview_scroll
+            .min(self.preview_line_count().saturating_sub(1).max(0));
+        self.preview_selection = Some((line, line));
+        true
+    }
+
+    pub fn clear_preview_selection(&mut self) -> bool {
+        let had = self.preview_selection.is_some();
+        self.preview_selection = None;
+        had
+    }
+
+    /// Build the clipboard payload for `y`. With an active selection,
+    /// joins the selected line range with `\n`. With no selection,
+    /// returns `None` so the caller can decide what to do.
+    pub fn preview_yank_text(&self) -> Option<String> {
+        let range = self.preview_selected_line_range()?;
+        let lines = self.preview_lines();
+        let start = *range.start();
+        let end = *range.end();
+        if start >= lines.len() {
+            return None;
+        }
+        let end = end.min(lines.len().saturating_sub(1));
+        Some(lines[start..=end].join("\n"))
+    }
+
+    pub fn focus_preview(&mut self) -> bool {
+        if self.attachment_preview.is_none() {
+            return false;
+        }
+        if self.preview_focused {
+            return false;
+        }
+        self.preview_focused = true;
+        true
+    }
+
+    pub fn defocus_preview(&mut self) -> bool {
+        if !self.preview_focused {
+            return false;
+        }
+        self.preview_focused = false;
+        self.preview_selection = None;
+        true
+    }
+
+    pub fn is_preview_focus_active(&self) -> bool {
+        self.preview_focused
+            && self.attachment_preview.is_some()
+            && self.active == ActivePane::Attachments
     }
 
     pub fn attachments_pane_visible(&self) -> bool {
@@ -1539,6 +1737,8 @@ impl AppState {
             return false;
         }
         self.active = if self.active == ActivePane::Attachments {
+            self.preview_focused = false;
+            self.preview_selection = None;
             ActivePane::Messages
         } else {
             ActivePane::Attachments
@@ -2556,7 +2756,14 @@ impl AppState {
         self.attachment_preview = None;
         self.selected_attachment = 0;
         self.pending_open_attachment = None;
+        self.reset_preview_navigation_state();
         self.normalize_active_pane();
+    }
+
+    fn reset_preview_navigation_state(&mut self) {
+        self.preview_focused = false;
+        self.preview_scroll = 0;
+        self.preview_selection = None;
     }
 
     fn detail_text_content(&self) -> Option<String> {
@@ -2832,6 +3039,10 @@ fn clamp_index(index: &mut usize, len: usize) {
     } else {
         *index = (*index).min(len - 1);
     }
+}
+
+fn clamp_isize(value: isize, min: isize, max: isize) -> isize {
+    value.max(min).min(max.max(min))
 }
 
 pub fn flags_from_value(value: &serde_json::Value) -> Vec<String> {
@@ -3726,6 +3937,300 @@ mod tests {
         assert_eq!(app.detail_scroll, 0);
         assert_eq!(app.detail_selected_line_range(), None);
         assert_eq!(app.detail_cursor_line_column(), (0, 0));
+    }
+
+    fn preview_focused_app(body: &str) -> AppState {
+        // Body becomes preview.text. The header line is the preview
+        // `message` field, then a blank separator, then the body lines.
+        let attachment = attachment("notes.txt");
+        let attachment_id = attachment.id;
+        let message_id = attachment.message_id;
+        let mut app = AppState::default();
+        app.apply_detail(Some(detail(message_id, "body")));
+        app.apply_attachments(vec![attachment]);
+        app.active = ActivePane::Attachments;
+        app.apply_attachment_preview(AttachmentPreviewItem {
+            attachment_id,
+            text: Some(body.into()),
+            message: "Inline preview".into(),
+            truncated: false,
+            preview_bytes: body.len(),
+        });
+        assert!(app.focus_preview());
+        app
+    }
+
+    #[derive(Default)]
+    struct CapturingClipboard {
+        last: Option<String>,
+        fail: Option<String>,
+    }
+
+    impl CapturingClipboard {
+        fn ok() -> Self {
+            Self::default()
+        }
+
+        fn failing(reason: &str) -> Self {
+            Self {
+                fail: Some(reason.into()),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl crate::tui::ClipboardSink for CapturingClipboard {
+        fn copy(&mut self, text: &str) -> Result<(), String> {
+            if let Some(reason) = self.fail.clone() {
+                return Err(reason);
+            }
+            self.last = Some(text.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_preview_text_renders_message_then_body_then_truncated_marker() {
+        let mut app = preview_focused_app("alpha\nbeta");
+        // Default preview was non-truncated; flip it now.
+        if let Some(p) = app.attachment_preview.as_mut() {
+            p.truncated = true;
+        }
+        let text = app.preview_text().unwrap();
+        assert!(text.starts_with("Inline preview\n\n"));
+        assert!(text.ends_with("\n\n[truncated]"));
+        assert!(text.contains("alpha"));
+        assert!(text.contains("beta"));
+    }
+
+    #[test]
+    fn test_scroll_preview_clamps_to_max_offset() {
+        // 10 body lines + 2 header rows ("Inline preview", "")
+        // gives 12 total preview lines.
+        let body = (1..=10)
+            .map(|n| format!("body {n:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = preview_focused_app(&body);
+        assert_eq!(app.preview_line_count(), 12);
+
+        // Scroll past the end: max for height 6 is 12 - 6 = 6.
+        assert!(app.scroll_preview(20, 6));
+        assert_eq!(app.preview_scroll, 6);
+        // Already at max — no change.
+        assert!(!app.scroll_preview(1, 6));
+        assert_eq!(app.preview_scroll, 6);
+        // Scroll up by 4 -> 2.
+        assert!(app.scroll_preview(-4, 6));
+        assert_eq!(app.preview_scroll, 2);
+        // Scroll up past 0 clamps.
+        assert!(app.scroll_preview(-99, 6));
+        assert_eq!(app.preview_scroll, 0);
+    }
+
+    #[test]
+    fn test_scroll_preview_top_and_bottom_helpers() {
+        let body = (1..=10)
+            .map(|n| format!("body {n:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = preview_focused_app(&body);
+        assert!(app.scroll_preview_to_bottom(6));
+        assert_eq!(app.preview_scroll, 6);
+        assert!(app.scroll_preview_to_top());
+        assert_eq!(app.preview_scroll, 0);
+    }
+
+    #[test]
+    fn test_scroll_preview_requires_focus() {
+        let body = "alpha\nbeta\ngamma\ndelta\nepsilon";
+        let mut app = preview_focused_app(body);
+        // Defocus: scroll calls become no-ops.
+        assert!(app.defocus_preview());
+        assert!(!app.scroll_preview(2, 6));
+        assert_eq!(app.preview_scroll, 0);
+        assert!(!app.scroll_preview_to_bottom(6));
+    }
+
+    #[test]
+    fn test_toggle_preview_selection_anchors_at_viewport_top_and_extends_with_movement() {
+        let body = (1..=10)
+            .map(|n| format!("body {n:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = preview_focused_app(&body);
+        // Scroll so anchor lands on a non-zero line. The fully-rendered
+        // preview is 12 lines; viewport 6 caps max scroll at 6.
+        assert!(app.scroll_preview(3, 6));
+        assert_eq!(app.preview_scroll, 3);
+        assert!(app.toggle_preview_selection());
+        assert_eq!(app.preview_selected_line_range(), Some(3..=3));
+
+        // j extends the focus end.
+        assert!(app.move_preview_line(2));
+        assert_eq!(app.preview_selected_line_range(), Some(3..=5));
+
+        // k moves the focus end back below the anchor; the range
+        // sorts so start <= end.
+        assert!(app.move_preview_line(-3));
+        assert_eq!(app.preview_selected_line_range(), Some(2..=3));
+
+        // Out-of-bounds movement clamps.
+        assert!(app.move_preview_line(99));
+        assert_eq!(
+            app.preview_selected_line_range(),
+            Some(3..=app.preview_line_count() - 1)
+        );
+
+        // Toggle off.
+        assert!(app.toggle_preview_selection());
+        assert_eq!(app.preview_selected_line_range(), None);
+    }
+
+    #[test]
+    fn test_clear_preview_selection_via_escape_does_not_yank() {
+        let mut app = preview_focused_app("alpha\nbeta\ngamma");
+        assert!(app.toggle_preview_selection());
+        assert!(app.move_preview_line(1));
+        assert!(app.preview_selection.is_some());
+
+        assert!(app.clear_preview_selection());
+        assert_eq!(app.preview_selection, None);
+        assert_eq!(app.preview_yank_text(), None);
+    }
+
+    #[test]
+    fn test_preview_yank_builds_clipboard_string_from_selected_lines() {
+        let body = "alpha\nbeta\ngamma\ndelta";
+        let mut app = preview_focused_app(body);
+        // Lines: 0 "Inline preview", 1 "", 2 "alpha", 3 "beta",
+        // 4 "gamma", 5 "delta".
+        app.preview_scroll = 2;
+        assert!(app.toggle_preview_selection());
+        assert!(app.move_preview_line(2));
+        let yanked = app.preview_yank_text().expect("yank");
+        assert_eq!(yanked, "alpha\nbeta\ngamma");
+    }
+
+    #[test]
+    fn test_handle_preview_key_yank_writes_to_clipboard_sink() {
+        use crate::tui::handle_preview_focus_key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let body = "first\nsecond\nthird";
+        let mut app = preview_focused_app(body);
+        app.preview_scroll = 2;
+        assert!(handle_preview_focus_key(
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
+            &mut app,
+            &mut CapturingClipboard::ok(),
+        ));
+        assert!(handle_preview_focus_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut app,
+            &mut CapturingClipboard::ok(),
+        ));
+        let mut clipboard = CapturingClipboard::ok();
+        assert!(handle_preview_focus_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut app,
+            &mut clipboard,
+        ));
+        assert_eq!(clipboard.last.as_deref(), Some("first\nsecond"));
+        assert!(app.status.contains("2 line"));
+    }
+
+    #[test]
+    fn test_handle_preview_key_yank_failure_sets_error() {
+        use crate::tui::handle_preview_focus_key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = preview_focused_app("only-line");
+        assert!(handle_preview_focus_key(
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
+            &mut app,
+            &mut CapturingClipboard::ok(),
+        ));
+        let mut clipboard = CapturingClipboard::failing("no display");
+        assert!(handle_preview_focus_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut app,
+            &mut clipboard,
+        ));
+        assert_eq!(app.error.as_deref(), Some("Clipboard error: no display"));
+    }
+
+    #[test]
+    fn test_handle_preview_key_g_and_capital_g_jump_to_top_and_bottom() {
+        use crate::tui::handle_preview_focus_key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let body = (1..=12)
+            .map(|n| format!("body {n:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = preview_focused_app(&body);
+
+        assert!(handle_preview_focus_key(
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+            &mut app,
+            &mut CapturingClipboard::ok(),
+        ));
+        assert_eq!(app.preview_scroll, app.preview_max_scroll(6));
+
+        assert!(handle_preview_focus_key(
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            &mut app,
+            &mut CapturingClipboard::ok(),
+        ));
+        assert_eq!(app.preview_scroll, 0);
+    }
+
+    #[test]
+    fn test_handle_preview_key_escape_clears_selection_then_focus() {
+        use crate::tui::handle_preview_focus_key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = preview_focused_app("alpha\nbeta\ngamma");
+        assert!(app.toggle_preview_selection());
+
+        assert!(handle_preview_focus_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            &mut CapturingClipboard::ok(),
+        ));
+        // First Esc clears selection, focus remains.
+        assert!(app.preview_focused);
+        assert_eq!(app.preview_selection, None);
+
+        assert!(handle_preview_focus_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            &mut CapturingClipboard::ok(),
+        ));
+        // Second Esc defocuses.
+        assert!(!app.preview_focused);
+    }
+
+    #[test]
+    fn test_apply_attachment_preview_resets_navigation_when_attachment_changes() {
+        let mut app = preview_focused_app("alpha\nbeta\ngamma");
+        app.preview_scroll = 2;
+        assert!(app.toggle_preview_selection());
+        assert!(app.preview_focused);
+
+        let other_id = Uuid::new_v4();
+        app.apply_attachment_preview(AttachmentPreviewItem {
+            attachment_id: other_id,
+            text: Some("brand new".into()),
+            message: "Inline preview".into(),
+            truncated: false,
+            preview_bytes: 9,
+        });
+
+        assert_eq!(app.preview_scroll, 0);
+        assert_eq!(app.preview_selection, None);
+        assert!(!app.preview_focused);
     }
 
     #[test]

@@ -494,27 +494,50 @@ fn render_attachment_list(frame: &mut Frame<'_>, area: Rect, app: &AppState, the
 }
 
 fn render_attachment_preview(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
-    let text = if let Some(preview) = &app.attachment_preview {
-        let mut text = preview.message.clone();
-        if let Some(body) = &preview.text {
-            text.push_str("\n\n");
-            text.push_str(body);
+    let preview_focused = app.is_preview_focus_active();
+    let block_title = if preview_focused {
+        if app.preview_selection.is_some() {
+            "Preview • VIS"
+        } else {
+            "Preview •"
         }
-        if preview.truncated {
-            text.push_str("\n\n[truncated]");
-        }
-        text
     } else {
-        "Select an attachment".into()
+        "Preview"
     };
-    let paragraph = Paragraph::new(text)
-        .block(
-            Block::default()
-                .title("Preview")
-                .borders(Borders::ALL)
-                .border_style(theme.pane)
-                .title_style(theme.pane),
-        )
+    let block = Block::default()
+        .title(block_title)
+        .borders(Borders::ALL)
+        .border_style(theme.pane)
+        .title_style(theme.pane);
+
+    let Some(preview_text) = app.preview_text() else {
+        let paragraph = Paragraph::new("Select an attachment")
+            .block(block)
+            .style(theme.text)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+        return;
+    };
+    let lines: Vec<&str> = preview_text.split('\n').collect();
+    let viewport_height = area.height.saturating_sub(2) as usize;
+    let scroll = app.preview_visible_scroll(viewport_height.max(1));
+    let selection = app.preview_selected_line_range();
+    let visible: Vec<Line> = lines
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(viewport_height.max(1))
+        .map(|(idx, line)| {
+            if selection.as_ref().is_some_and(|range| range.contains(&idx)) {
+                let visible = if line.is_empty() { " " } else { *line };
+                Line::styled(visible.to_string(), theme.selection)
+            } else {
+                Line::raw((*line).to_string())
+            }
+        })
+        .collect();
+    let paragraph = Paragraph::new(visible)
+        .block(block)
         .style(theme.text)
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
@@ -775,7 +798,11 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
             } else {
                 app.status.clone()
             };
-            let body = if app.active == ActivePane::Details {
+            let body = if app.is_preview_focus_active() {
+                format!(
+                    " {status} | Preview: j/k scroll • PgUp/PgDn page • g/G top/bottom • v select • y copy • Esc cancel "
+                )
+            } else if app.active == ActivePane::Details {
                 format!(
                     " {status} | Details: Tab pane • d details • ↑/↓/j/k lines • PgUp/PgDn/Ctrl-U/D page • ←/→ cursor • Home/End line • v select • Esc clear VIS • a attach • q quit "
                 )
@@ -1128,6 +1155,66 @@ mod tests {
         assert!(text.contains("Attachments"));
         assert!(text.contains("notes.txt"));
         assert!(text.contains("safe text preview"));
+    }
+
+    #[test]
+    fn test_render_preview_focus_applies_scroll_offset_and_selection_style() {
+        let mut app = AppState::default();
+        let message_id = Uuid::new_v4();
+        let attachment_id = Uuid::new_v4();
+        app.apply_folder_messages(vec![MessageItem {
+            id: message_id,
+            thread_id: None,
+            subject: "With attachment".into(),
+            from: "alice@example.com".into(),
+            date: "2026-05-07 10:00".into(),
+            snippet: "Preview".into(),
+            flags: Vec::new(),
+        }]);
+        app.apply_detail(Some(MessageDetail {
+            id: message_id,
+            subject: "With attachment".into(),
+            from: "alice@example.com".into(),
+            snippet: "Preview".into(),
+            body: "Body".into(),
+            flags: Vec::new(),
+        }));
+        app.apply_attachments(vec![AttachmentItem {
+            id: attachment_id,
+            message_id,
+            filename: "notes.txt".into(),
+            content_type: "text/plain".into(),
+            size_bytes: 12,
+            disposition: "attachment".into(),
+            storage_path: "/tmp/notes.txt".into(),
+        }]);
+        let body = (0..20).map(|n| format!("LN{n:02}")).collect::<Vec<_>>();
+        app.apply_attachment_preview(AttachmentPreviewItem {
+            attachment_id,
+            text: Some(body.join("\n")),
+            message: "Inline preview".into(),
+            truncated: false,
+            preview_bytes: 0,
+        });
+        app.active = ActivePane::Attachments;
+        assert!(app.focus_preview());
+        app.preview_scroll = 5;
+        // Anchor selection at line 5; extend to line 6 with j.
+        assert!(app.toggle_preview_selection());
+        assert!(app.move_preview_line(1));
+
+        let buffer = render_to_buffer(&app);
+        let text = buffer_text(&buffer);
+
+        // Lines 0..2 are header + blank, body lines start at idx 2.
+        // After scroll=5, the first visible line is `LN03`. The
+        // earlier lines (`LN00`..`LN02`) must not appear.
+        assert!(!text.contains("LN00"));
+        assert!(!text.contains("LN01"));
+        assert!(!text.contains("LN02"));
+        assert!(text.contains("LN03"));
+        // Block title flips to indicate visual mode.
+        assert!(text.contains("Preview • VIS"));
     }
 
     #[test]

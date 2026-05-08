@@ -36,6 +36,10 @@ const KEY_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
 const COMPOSER_BODY_KEY_VIEWPORT_LINES: usize = 3;
 const DETAIL_KEY_VIEWPORT_LINES: usize = 6;
+/// Lines of preview shown in the right column. Matches the single-pane
+/// height we render today; used by `j/k`/Page keys when there is no
+/// frame around to measure.
+const PREVIEW_KEY_VIEWPORT_LINES: usize = 6;
 
 #[derive(Debug, Error)]
 pub enum TuiError {
@@ -517,6 +521,13 @@ async fn handle_key<C: Mailbox + ?Sized>(
         return false;
     }
 
+    if app.is_preview_focus_active() {
+        let mut clipboard = SystemClipboard;
+        if handle_preview_focus_key(key, app, &mut clipboard) {
+            return false;
+        }
+    }
+
     match key.code {
         KeyCode::Char(':') => {
             app.enter_command_mode();
@@ -678,7 +689,16 @@ async fn handle_key<C: Mailbox + ?Sized>(
                 app.active = ActivePane::Messages;
                 refresh_detail(app, client).await;
             } else if app.active == ActivePane::Attachments {
-                refresh_attachment_preview(app, client).await;
+                if app.attachment_preview.is_some() && !app.preview_focused {
+                    app.focus_preview();
+                    app.set_status("Preview: j/k scroll  v select  y copy  Esc cancel");
+                } else {
+                    refresh_attachment_preview(app, client).await;
+                    if app.attachment_preview.is_some() {
+                        app.focus_preview();
+                        app.set_status("Preview: j/k scroll  v select  y copy  Esc cancel");
+                    }
+                }
             } else {
                 refresh_after_selection_change(app, client).await;
             }
@@ -949,6 +969,108 @@ fn handle_open_confirmation_key(key: KeyEvent, app: &mut AppState) -> bool {
             false
         }
         _ => false,
+    }
+}
+
+/// Clipboard sink used by the preview yank handler. Pulled behind a
+/// trait so tests can assert what gets copied without spawning a real
+/// system clipboard (Wayland-less CI etc.).
+pub(crate) trait ClipboardSink {
+    fn copy(&mut self, text: &str) -> Result<(), String>;
+}
+
+/// Production sink: hands off to `arboard`. Failures (no display
+/// server, Wayland sandbox, etc.) bubble up as `Err(message)` so the
+/// caller can surface a toast.
+struct SystemClipboard;
+
+impl ClipboardSink for SystemClipboard {
+    fn copy(&mut self, text: &str) -> Result<(), String> {
+        let mut clipboard = arboard::Clipboard::new().map_err(|err| err.to_string())?;
+        clipboard.set_text(text).map_err(|err| err.to_string())
+    }
+}
+
+pub(crate) fn handle_preview_focus_key<S: ClipboardSink>(
+    key: KeyEvent,
+    app: &mut AppState,
+    clipboard: &mut S,
+) -> bool {
+    let viewport = PREVIEW_KEY_VIEWPORT_LINES;
+    let half_page = (viewport / 2).max(1) as isize;
+    match key.code {
+        KeyCode::Esc => {
+            if app.clear_preview_selection() {
+                app.set_status("Preview selection cleared");
+            } else if app.defocus_preview() {
+                app.set_status("Attachments");
+            }
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.move_preview_line(1);
+            app.scroll_preview(1, viewport);
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.move_preview_line(-1);
+            app.scroll_preview(-1, viewport);
+            true
+        }
+        KeyCode::PageDown => {
+            app.scroll_preview(half_page, viewport);
+            true
+        }
+        KeyCode::PageUp => {
+            app.scroll_preview(-half_page, viewport);
+            true
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.scroll_preview(half_page, viewport);
+            true
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.scroll_preview(-half_page, viewport);
+            true
+        }
+        KeyCode::Char('g') => {
+            app.scroll_preview_to_top();
+            true
+        }
+        KeyCode::Char('G') => {
+            app.scroll_preview_to_bottom(viewport);
+            true
+        }
+        KeyCode::Char('v') => {
+            app.toggle_preview_selection();
+            true
+        }
+        KeyCode::Char('y') => {
+            yank_preview(app, clipboard);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn yank_preview<S: ClipboardSink>(app: &mut AppState, clipboard: &mut S) {
+    let Some(text) = app.preview_yank_text() else {
+        app.set_status("No preview selection");
+        return;
+    };
+    if text.is_empty() {
+        app.set_status("Selection is empty");
+        return;
+    }
+    let line_count = text.matches('\n').count() + 1;
+    match clipboard.copy(&text) {
+        Ok(()) => {
+            let plural = if line_count == 1 { "" } else { "s" };
+            app.set_status(format!("{line_count} line{plural} copied"));
+        }
+        Err(err) => {
+            app.set_error(format!("Clipboard error: {err}"));
+        }
     }
 }
 
