@@ -24,7 +24,8 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 
 use super::hub::{Hub, Topic};
 use super::protocol::{Request, Response, RpcError};
@@ -58,6 +59,7 @@ pub const WRITER_MAILBOX: usize = 128;
 /// accept loop and close the socket file.
 pub struct ServerHandle {
     join: Option<JoinHandle<()>>,
+    cancel: CancellationToken,
     path: PathBuf,
 }
 
@@ -66,22 +68,28 @@ impl ServerHandle {
         &self.path
     }
 
-    /// Abort the accept loop and remove the socket file.
+    /// Cancel the accept loop, drain in-flight per-connection handshakes,
+    /// then remove the socket file.
     pub async fn shutdown(mut self) {
-        // Best-effort cleanup during shutdown; ignore errors so other tasks don't block.
+        self.cancel.cancel();
         if let Some(handle) = self.join.take() {
-            handle.abort();
-            let _ = handle.await;
+            // Accept loop drains its own JoinSet before returning, so
+            // awaiting here also waits for in-flight handshakes.
+            if let Err(e) = handle.await {
+                tracing::warn!(error = %e, "ipc accept loop join failed");
+            }
         }
+        // Best-effort cleanup during shutdown; ignore errors so other tasks don't block.
         let _ = tokio::fs::remove_file(&self.path).await;
     }
 }
 
 impl Drop for ServerHandle {
     fn drop(&mut self) {
-        if let Some(handle) = self.join.take() {
-            handle.abort();
-        }
+        // Signal the accept loop and any per-connection task observing the
+        // token; we can't await in Drop so the runtime will reap detached
+        // tasks once they observe the cancel.
+        self.cancel.cancel();
         // Best-effort cleanup; we can't await in Drop.
         let _ = std::fs::remove_file(&self.path);
     }
@@ -107,23 +115,48 @@ pub async fn listen<D: Dispatcher>(
 
     let listener = UnixListener::bind(path)?;
     let path_buf = path.to_path_buf();
-    let join = tokio::spawn(accept_loop(listener, dispatcher, hub));
+    let cancel = CancellationToken::new();
+    let join = tokio::spawn(accept_loop(listener, dispatcher, hub, cancel.clone()));
     Ok(ServerHandle {
         join: Some(join),
+        cancel,
         path: path_buf,
     })
 }
 
-async fn accept_loop<D: Dispatcher>(listener: UnixListener, dispatcher: Arc<D>, hub: Arc<Hub>) {
+async fn accept_loop<D: Dispatcher>(
+    listener: UnixListener,
+    dispatcher: Arc<D>,
+    hub: Arc<Hub>,
+    cancel: CancellationToken,
+) {
     let conn_count = Arc::new(AtomicU64::new(0));
+    let mut tasks: JoinSet<()> = JoinSet::new();
     loop {
-        let stream = match listener.accept().await {
-            Ok((s, _)) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "accept failed");
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let stream = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            // Reap finished connection tasks so the JoinSet doesn't grow
+            // unboundedly during the lifetime of the server. Accept-time
+            // gating via MAX_CONNECTIONS still bounds in-flight work.
+            Some(res) = tasks.join_next(), if !tasks.is_empty() => {
+                if let Err(e) = res {
+                    if !e.is_cancelled() {
+                        tracing::debug!(error = %e, "connection task join failed");
+                    }
+                }
                 continue;
             }
+            accept = listener.accept() => match accept {
+                Ok((s, _)) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "accept failed");
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => continue,
+                    }
+                }
+            },
         };
         let active = conn_count.load(Ordering::Relaxed);
         if active as usize >= MAX_CONNECTIONS {
@@ -135,12 +168,25 @@ async fn accept_loop<D: Dispatcher>(listener: UnixListener, dispatcher: Arc<D>, 
         let dispatcher = dispatcher.clone();
         let hub = hub.clone();
         let counter = conn_count.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, dispatcher, hub).await {
+        let conn_cancel = cancel.clone();
+        tasks.spawn(async move {
+            if let Err(e) = handle_connection(stream, dispatcher, hub, conn_cancel).await {
                 tracing::debug!(error = %e, "connection ended with error");
             }
             counter.fetch_sub(1, Ordering::Relaxed);
         });
+    }
+
+    // Drain in-flight per-connection handshakes after the cancel signal.
+    // Each handle_connection completes naturally once its client closes;
+    // awaiting here turns the previous abort-and-orphan behaviour into a
+    // cooperative drain.
+    while let Some(res) = tasks.join_next().await {
+        if let Err(e) = res {
+            if !e.is_cancelled() {
+                tracing::debug!(error = %e, "connection task join failed during shutdown");
+            }
+        }
     }
 }
 
@@ -170,6 +216,7 @@ async fn handle_connection<D: Dispatcher>(
     stream: UnixStream,
     dispatcher: Arc<D>,
     hub: Arc<Hub>,
+    cancel: CancellationToken,
 ) -> Result<(), WireError> {
     let (mut reader, mut writer) = stream.into_split();
     let (out_tx, mut out_rx) = mpsc::channel::<OutFrame>(WRITER_MAILBOX);
@@ -206,13 +253,19 @@ async fn handle_connection<D: Dispatcher>(
     let next_sub_id = Arc::new(AtomicU64::new(1));
 
     // Reader loop. Reuses a single read buffer across inbound frames so
-    // a chatty client doesn't allocate per request.
+    // a chatty client doesn't allocate per request. The cancel token
+    // lets `ServerHandle::shutdown` cooperatively close idle readers
+    // instead of orphaning them with `JoinHandle::abort`.
     let mut read_buf: Vec<u8> = Vec::with_capacity(1024);
     let reader_result: Result<(), WireError> = loop {
-        let req: Request = match read_frame_with_buf(&mut reader, &mut read_buf).await {
-            Ok(r) => r,
-            Err(WireError::Closed) => break Ok(()),
-            Err(e) => break Err(e),
+        let req: Request = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break Ok(()),
+            frame = read_frame_with_buf(&mut reader, &mut read_buf) => match frame {
+                Ok(r) => r,
+                Err(WireError::Closed) => break Ok(()),
+                Err(e) => break Err(e),
+            },
         };
 
         let dispatcher = dispatcher.clone();
@@ -519,5 +572,43 @@ mod tests {
         let resp = client.request("subscribe", json!({})).await.unwrap();
         assert!(!resp.ok);
         assert_eq!(resp.error.unwrap().code, "bad_args");
+    }
+
+    /// E-H6 regression: shutdown must drive the accept loop to completion
+    /// cooperatively (CancellationToken) and drain in-flight per-connection
+    /// handshakes (JoinSet) instead of `JoinHandle::abort`-ing them.
+    #[tokio::test]
+    async fn test_shutdown_drains_in_flight_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shutdown.sock");
+        let hub = Arc::new(Hub::new());
+        let dispatcher = Arc::new(EchoDispatcher {
+            calls: AtomicU32::new(0),
+        });
+        let server = listen(&path, dispatcher.clone(), hub.clone())
+            .await
+            .unwrap();
+
+        // Establish a real connection so the server-side per-connection
+        // task is mid-handshake (reader awaiting the next frame, writer
+        // task idle on its mpsc) when shutdown is signalled.
+        let mut client = Client::connect(&path).await.unwrap();
+        let resp = client.request("ping", json!({})).await.unwrap();
+        assert!(resp.ok);
+
+        // Shutdown must complete without panicking even with an active
+        // connection. The accept loop drains its JoinSet before returning.
+        tokio::time::timeout(std::time::Duration::from_secs(2), server.shutdown())
+            .await
+            .expect("graceful shutdown must complete promptly");
+
+        // Socket file is removed.
+        assert!(!path.exists(), "socket file should be cleaned up");
+
+        // Existing client observes EOF on its read half once the server
+        // drops the connection. New connect attempts fail because the
+        // listener is gone.
+        let connect = Client::connect(&path).await;
+        assert!(connect.is_err(), "no listener after shutdown");
     }
 }
