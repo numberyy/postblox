@@ -28,6 +28,15 @@ pub enum DbError {
 
 /// Open the database at `path`, creating it if missing, and run pending
 /// migrations. Enables WAL + foreign keys.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`DbError::Sqlx`] if the parent directory cannot be created, the
+///   pool cannot acquire a connection within the configured timeout, or
+///   the SQLite connect string is rejected.
+/// - [`DbError::Migrate`] if applying the bundled migrations fails
+///   (typically a schema mismatch on an existing file).
 pub async fn connect(path: &Path) -> Result<SqlitePool, DbError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {

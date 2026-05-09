@@ -84,6 +84,14 @@ const FIND_BY_MSGID_HEADER_QUERY: &str = concat!(
 const EXISTING_UIDS_PREFIX: &str = "SELECT uid FROM messages WHERE folder_id = ? AND uid IN (";
 const EXISTING_UIDS_SUFFIX: &str = ")";
 
+/// Insert a message row and return the persisted record. The FTS5
+/// trigger reindexes the message synchronously.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the insert fails — typically a `UNIQUE`
+/// violation on `(folder_id, uid)`, a FK violation when `account_id` /
+/// `folder_id` / `thread_id` is unknown, or any other SQLite error.
 pub async fn create(pool: &SqlitePool, new: &NewMessage) -> Result<Message, DbError> {
     let id = Uuid::new_v4();
     Ok(sqlx::query_as(INSERT_RETURNING_QUERY)
@@ -112,6 +120,12 @@ pub async fn create(pool: &SqlitePool, new: &NewMessage) -> Result<Message, DbEr
         .await?)
 }
 
+/// Look up a message by id; `Ok(None)` if missing.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
+/// row is reported as `Ok(None)`, not an error.
 pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Message>, DbError> {
     Ok(sqlx::query_as(GET_BY_ID_QUERY)
         .bind(id)
@@ -119,6 +133,12 @@ pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Message>, DbError
         .await?)
 }
 
+/// Look up a message by `(folder_id, uid)`; `Ok(None)` if missing.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
+/// row is reported as `Ok(None)`, not an error.
 pub async fn get_by_folder_uid(
     pool: &SqlitePool,
     folder_id: Uuid,
@@ -131,6 +151,12 @@ pub async fn get_by_folder_uid(
         .await?)
 }
 
+/// List messages in a folder, newest first, with `limit` clamped to
+/// `[1, 500]` and `offset` clamped to `>= 0`.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails.
 pub async fn list_by_folder(
     pool: &SqlitePool,
     folder_id: Uuid,
@@ -145,6 +171,11 @@ pub async fn list_by_folder(
         .await?)
 }
 
+/// List the messages in a thread, oldest first.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails.
 pub async fn list_by_thread(pool: &SqlitePool, thread_id: Uuid) -> Result<Vec<Message>, DbError> {
     Ok(sqlx::query_as(LIST_BY_THREAD_QUERY)
         .bind(thread_id)
@@ -154,6 +185,11 @@ pub async fn list_by_thread(pool: &SqlitePool, thread_id: Uuid) -> Result<Vec<Me
 
 /// Find a message by its RFC822 Message-ID header within an account. Used
 /// by the threading matcher to walk In-Reply-To / References chains.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
+/// header / unknown account is reported as `Ok(None)`, not an error.
 pub async fn find_by_msgid_header(
     pool: &SqlitePool,
     account_id: Uuid,
@@ -168,6 +204,12 @@ pub async fn find_by_msgid_header(
 
 /// Return the subset of `uids` that already exist in `folder_id`. Used by
 /// IMAP sync to skip messages we've already fetched.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the dynamic-`IN` query or row decode
+/// fails. An empty `uids` slice short-circuits to `Ok(empty)` without
+/// touching the database.
 pub async fn existing_uids(
     pool: &SqlitePool,
     folder_id: Uuid,
@@ -198,6 +240,13 @@ pub async fn existing_uids(
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
+/// Reassign a message to a different thread (or clear with `None`).
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the update fails (FK violation when
+/// `thread_id` is unknown, or any other SQLite error). A missing `id`
+/// is a silent no-op.
 pub async fn set_thread(
     pool: &SqlitePool,
     id: Uuid,
@@ -211,6 +260,13 @@ pub async fn set_thread(
     Ok(())
 }
 
+/// Replace the flag list for a message. Triggers FTS reindex via the
+/// `AFTER UPDATE` trigger.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the update fails. A missing id is a
+/// silent no-op.
 pub async fn set_flags(
     pool: &SqlitePool,
     id: Uuid,
@@ -228,6 +284,12 @@ pub async fn set_flags(
 /// matched. Used by archive / move ops; on the wire IMAP this is what a
 /// MOVE would do server-side, but here we reflect the change locally
 /// and let the next IMAP sync reconcile.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the update fails (FK violation when
+/// `folder_id` is unknown, or any other SQLite error). A missing `id`
+/// is reported as `Ok(false)`, not an error.
 pub async fn set_folder(pool: &SqlitePool, id: Uuid, folder_id: Uuid) -> Result<bool, DbError> {
     let r = sqlx::query("UPDATE messages SET folder_id = ? WHERE id = ?")
         .bind(folder_id)
@@ -237,6 +299,12 @@ pub async fn set_folder(pool: &SqlitePool, id: Uuid, folder_id: Uuid) -> Result<
     Ok(r.rows_affected() > 0)
 }
 
+/// Delete a message by id. Returns `true` if a row was removed.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the delete fails. A missing row is
+/// reported as `Ok(false)`, not an error.
 pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM messages WHERE id = ?")
         .bind(id)
@@ -245,6 +313,13 @@ pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     Ok(r.rows_affected() > 0)
 }
 
+/// Delete a message identified by `(folder_id, uid)`. Returns `true` if
+/// a row was removed.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the delete fails. A missing row is
+/// reported as `Ok(false)`, not an error.
 pub async fn delete_by_folder_uid(
     pool: &SqlitePool,
     folder_id: Uuid,
@@ -260,6 +335,11 @@ pub async fn delete_by_folder_uid(
 
 /// Wipe every message in a folder. Used when the server's
 /// `UIDVALIDITY` changed under us and we have to refetch from scratch.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the delete fails. Unknown `folder_id`
+/// is reported as `Ok(0)`, not an error.
 pub async fn delete_all_in_folder(pool: &SqlitePool, folder_id: Uuid) -> Result<u64, DbError> {
     let r = sqlx::query("DELETE FROM messages WHERE folder_id = ?")
         .bind(folder_id)

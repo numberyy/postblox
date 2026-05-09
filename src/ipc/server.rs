@@ -39,6 +39,19 @@ use super::wire::{read_frame_with_buf, WireError};
 /// dispatch, so handlers never see an unknown op.
 #[async_trait::async_trait]
 pub trait Dispatcher: Send + Sync + 'static {
+    /// Handle one already-parsed op and return its JSON payload (or a
+    /// typed RPC error to ship back to the client).
+    ///
+    /// # Errors
+    ///
+    /// Implementations return [`RpcError`] for any failure they want to
+    /// surface to the client; the wire layer wraps it in a
+    /// [`Response::err`]. Common variants:
+    /// - `RpcError::bad_args` for malformed `args`.
+    /// - `RpcError::internal` for backend (DB / IO / IMAP / SMTP)
+    ///   failures the dispatcher chooses to expose as a generic
+    ///   internal error.
+    /// - Tool-specific codes set by handlers themselves.
     async fn dispatch(&self, op: Op, args: Value) -> Result<Value, RpcError>;
 }
 
@@ -101,6 +114,14 @@ impl Drop for ServerHandle {
 
 /// Bind a Unix socket at `path` (removing any stale file first), spawn
 /// the accept loop, and return a handle.
+///
+/// # Errors
+///
+/// Returns [`ServerError::Io`] if the parent directory cannot be
+/// created or the `bind(2)` call fails (port-in-use analogue: another
+/// process already owns the socket path and removal failed). Stale
+/// file cleanup before bind is best-effort; failures there are
+/// logged, not surfaced.
 pub async fn listen<D: Dispatcher>(
     path: &Path,
     dispatcher: Arc<D>,

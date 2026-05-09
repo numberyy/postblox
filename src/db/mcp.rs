@@ -11,6 +11,11 @@ use crate::models::{ApprovalState, GateAction, McpApproval, McpGate};
 
 const GATE_SELECT: &str = "id, tool, arg_pattern, action, note, created_at";
 
+/// Insert an MCP gate row and return the persisted record.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the insert fails.
 pub async fn create_gate(
     pool: &SqlitePool,
     tool: &str,
@@ -33,16 +38,32 @@ pub async fn create_gate(
         .await?)
 }
 
+/// List every MCP gate, ordered by tool then creation time.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails.
 pub async fn list_gates(pool: &SqlitePool) -> Result<Vec<McpGate>, DbError> {
     let q = format!("SELECT {GATE_SELECT} FROM mcp_gates ORDER BY tool, created_at");
     Ok(sqlx::query_as(&q).fetch_all(pool).await?)
 }
 
+/// List MCP gates that target a specific tool, oldest first.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails.
 pub async fn list_gates_for_tool(pool: &SqlitePool, tool: &str) -> Result<Vec<McpGate>, DbError> {
     let q = format!("SELECT {GATE_SELECT} FROM mcp_gates WHERE tool = ? ORDER BY created_at");
     Ok(sqlx::query_as(&q).bind(tool).fetch_all(pool).await?)
 }
 
+/// Delete an MCP gate by id. Returns `true` if a row was removed.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the delete fails. A missing row is
+/// reported as `Ok(false)`, not an error.
 pub async fn delete_gate(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM mcp_gates WHERE id = ?")
         .bind(id)
@@ -55,6 +76,11 @@ pub async fn delete_gate(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
 
 const APPROVAL_SELECT: &str = "id, tool, args, summary, state, decided_at, decided_by, created_at";
 
+/// Insert a pending MCP approval row and return the persisted record.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the insert fails.
 pub async fn create_approval(
     pool: &SqlitePool,
     tool: &str,
@@ -75,11 +101,23 @@ pub async fn create_approval(
         .await?)
 }
 
+/// Look up an MCP approval by id; `Ok(None)` if missing.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
+/// row is reported as `Ok(None)`, not an error.
 pub async fn get_approval(pool: &SqlitePool, id: Uuid) -> Result<Option<McpApproval>, DbError> {
     let q = format!("SELECT {APPROVAL_SELECT} FROM mcp_approvals WHERE id = ?");
     Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
 
+/// List approvals, optionally filtered by state. Newest first, with a
+/// rowid tie-break for deterministic pagination.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails.
 pub async fn list_approvals(
     pool: &SqlitePool,
     state: Option<ApprovalState>,
@@ -120,6 +158,17 @@ pub async fn list_approvals(
 
 /// Move an approval to a terminal state. Returns `Ok(true)` only if the
 /// row was still pending — prevents double-decision races.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the update fails. A missing id, or a row
+/// already in a terminal state, is reported as `Ok(false)` (no rows
+/// matched the `state = 'pending'` filter), not an error.
+///
+/// # Panics
+///
+/// In debug builds, panics via `debug_assert!` if `new_state` is not one
+/// of `Allowed`, `Denied`, or `Expired`. Release builds skip the check.
 pub async fn decide(
     pool: &SqlitePool,
     id: Uuid,

@@ -26,6 +26,13 @@ const SELECT: &str = "\
     text_body, html_body, in_reply_to, references_header, remote_folder_id, \
     remote_uid, created_at, updated_at";
 
+/// Insert a new draft row and return the persisted record.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the insert fails — typically a FK
+/// violation when `account_id` (or `in_reply_to_msg`) is unknown, or
+/// any other SQLite error.
 pub async fn create(pool: &SqlitePool, new: &NewDraft) -> Result<Draft, DbError> {
     let id = Uuid::new_v4();
     let q = format!(
@@ -60,6 +67,13 @@ pub struct DraftPatch<'a> {
     pub html_body: Option<&'a str>,
 }
 
+/// Apply a patch to a draft and return the updated row, or `Ok(None)`
+/// if no row matched the id.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the update fails. A missing id is
+/// reported as `Ok(None)`, not an error.
 pub async fn update(
     pool: &SqlitePool,
     id: Uuid,
@@ -83,6 +97,13 @@ pub async fn update(
         .await?)
 }
 
+/// Mark a draft as synced to a remote folder/uid pair.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the update fails (FK violation when
+/// `folder_id` is unknown, or any other SQLite error). A missing
+/// `id` is a silent no-op (rows_affected = 0).
 pub async fn set_remote(
     pool: &SqlitePool,
     id: Uuid,
@@ -98,16 +119,33 @@ pub async fn set_remote(
     Ok(())
 }
 
+/// Look up a draft by id; `Ok(None)` if missing.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
+/// row is reported as `Ok(None)`, not an error.
 pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Draft>, DbError> {
     let q = format!("SELECT {SELECT} FROM drafts WHERE id = ?");
     Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
 
+/// List drafts for an account, most-recently updated first.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails.
 pub async fn list_by_account(pool: &SqlitePool, account_id: Uuid) -> Result<Vec<Draft>, DbError> {
     let q = format!("SELECT {SELECT} FROM drafts WHERE account_id = ? ORDER BY updated_at DESC");
     Ok(sqlx::query_as(&q).bind(account_id).fetch_all(pool).await?)
 }
 
+/// Delete a draft by id. Returns `true` if a row was removed.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the delete fails. A missing row is
+/// reported as `Ok(false)`, not an error.
 pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM drafts WHERE id = ?")
         .bind(id)

@@ -15,6 +15,11 @@ pub struct NewAuditEntry {
     pub details: Value,
 }
 
+/// Insert an audit-log entry and return the persisted record.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the insert or the follow-up `SELECT` fails.
 pub async fn record(pool: &SqlitePool, new: &NewAuditEntry) -> Result<AuditEntry, DbError> {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO audit_log (id, actor, action, target, details) VALUES (?,?,?,?,?)")
@@ -33,6 +38,11 @@ pub async fn record(pool: &SqlitePool, new: &NewAuditEntry) -> Result<AuditEntry
     )
 }
 
+/// List recent audit entries, newest first, with a stable rowid tie-break.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails.
 pub async fn list_recent(
     pool: &SqlitePool,
     limit: i64,
@@ -50,6 +60,11 @@ pub async fn list_recent(
     .await?)
 }
 
+/// List recent audit entries for a single actor, newest first.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails.
 pub async fn list_by_actor(
     pool: &SqlitePool,
     actor: &str,

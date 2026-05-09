@@ -23,6 +23,13 @@ pub struct NewDraftAttachment {
     pub content: Vec<u8>,
 }
 
+/// Insert a draft attachment row (bytes stored inline) and return the
+/// metadata record.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the insert or the follow-up `SELECT` fails
+/// (FK violation when `draft_id` is unknown, or any other SQLite error).
 pub async fn create(
     pool: &SqlitePool,
     new: &NewDraftAttachment,
@@ -49,6 +56,12 @@ pub async fn create(
     .await?)
 }
 
+/// List the metadata for every attachment on a draft, oldest first.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. Unknown
+/// `draft_id` returns `Ok(Vec::new())`, not an error.
 pub async fn list_for_draft(
     pool: &SqlitePool,
     draft_id: Uuid,
@@ -61,6 +74,12 @@ pub async fn list_for_draft(
     .await?)
 }
 
+/// Load the inline attachment bytes for the given id; `Ok(None)` if missing.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
+/// row is reported as `Ok(None)`, not an error.
 pub async fn load_content(pool: &SqlitePool, id: Uuid) -> Result<Option<Vec<u8>>, DbError> {
     let row: Option<(Vec<u8>,)> =
         sqlx::query_as("SELECT content FROM draft_attachments WHERE id = ?")
@@ -70,6 +89,12 @@ pub async fn load_content(pool: &SqlitePool, id: Uuid) -> Result<Option<Vec<u8>>
     Ok(row.map(|r| r.0))
 }
 
+/// Sum `size_bytes` across every attachment on a draft. Returns `0` when
+/// there are no rows. Used by callers to enforce the per-draft cap.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the aggregate query fails.
 pub async fn aggregate_size_for_draft(pool: &SqlitePool, draft_id: Uuid) -> Result<i64, DbError> {
     let row: (Option<i64>,) =
         sqlx::query_as("SELECT SUM(size_bytes) FROM draft_attachments WHERE draft_id = ?")
@@ -79,6 +104,12 @@ pub async fn aggregate_size_for_draft(pool: &SqlitePool, draft_id: Uuid) -> Resu
     Ok(row.0.unwrap_or(0))
 }
 
+/// Delete every attachment for a draft. Returns the number of rows removed.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the delete fails (FK or IO). Unknown
+/// `draft_id` returns `Ok(0)`, not an error.
 pub async fn delete_all_for_draft(pool: &SqlitePool, draft_id: Uuid) -> Result<u64, DbError> {
     let r = sqlx::query("DELETE FROM draft_attachments WHERE draft_id = ?")
         .bind(draft_id)

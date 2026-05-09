@@ -8,6 +8,13 @@ use crate::models::Thread;
 const SELECT: &str = "\
     id, account_id, external_id, subject, last_message_at, message_count, created_at";
 
+/// Insert a thread row and return the persisted record.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the insert fails — typically a `UNIQUE`
+/// violation on `(account_id, external_id)` or a FK violation when
+/// `account_id` is unknown, but also any other SQLite error.
 pub async fn create(
     pool: &SqlitePool,
     account_id: Uuid,
@@ -28,11 +35,23 @@ pub async fn create(
         .await?)
 }
 
+/// Look up a thread by id; `Ok(None)` if missing.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
+/// row is reported as `Ok(None)`, not an error.
 pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Thread>, DbError> {
     let q = format!("SELECT {SELECT} FROM threads WHERE id = ?");
     Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
 
+/// Look up a thread by `(account_id, external_id)`; `Ok(None)` if missing.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
+/// row is reported as `Ok(None)`, not an error.
 pub async fn get_by_external_id(
     pool: &SqlitePool,
     account_id: Uuid,
@@ -48,6 +67,10 @@ pub async fn get_by_external_id(
 
 /// Recent threads for an account, newest first. Used by sidebar/list views
 /// and by the in-Rust thread-matcher.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails.
 pub async fn list_recent(
     pool: &SqlitePool,
     account_id: Uuid,
@@ -69,6 +92,11 @@ pub async fn list_recent(
 
 /// Recompute the thread's `message_count` and `last_message_at` from its
 /// messages. Cheap because messages are indexed by thread_id.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the update fails. A missing id is a
+/// silent no-op (rows_affected = 0), not an error.
 pub async fn refresh_aggregates(pool: &SqlitePool, id: Uuid) -> Result<(), DbError> {
     sqlx::query(
         "UPDATE threads SET \
@@ -84,6 +112,15 @@ pub async fn refresh_aggregates(pool: &SqlitePool, id: Uuid) -> Result<(), DbErr
     Ok(())
 }
 
+/// Advance `last_message_at` to `when` only if `when` is strictly newer
+/// than the current value (or the column is `NULL`). Older timestamps
+/// are ignored, so retries during catch-up sync are safe.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the update fails. A missing id, or a
+/// `when` that is not strictly newer, is a silent no-op (rows_affected
+/// = 0), not an error.
 pub async fn touch_last_message_at(
     pool: &SqlitePool,
     id: Uuid,
@@ -101,6 +138,12 @@ pub async fn touch_last_message_at(
     Ok(())
 }
 
+/// Delete a thread by id. Returns `true` if a row was removed.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the delete fails (FK or IO). A missing
+/// row is reported as `Ok(false)`, not an error.
 pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM threads WHERE id = ?")
         .bind(id)

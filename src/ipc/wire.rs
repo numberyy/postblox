@@ -32,6 +32,17 @@ pub enum WireError {
 /// Allocates a fresh read buffer per call. Hot per-connection reader
 /// loops should prefer [`read_frame_with_buf`] to reuse a single
 /// allocation across frames.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`WireError::Closed`] on clean EOF before the length prefix.
+/// - [`WireError::Io`] on any other read error from the underlying
+///   transport.
+/// - [`WireError::EmptyPayload`] if the length prefix is `0`.
+/// - [`WireError::FrameTooLarge`] if the prefix exceeds
+///   [`MAX_FRAME_BYTES`].
+/// - [`WireError::Json`] if the payload is not valid JSON for `T`.
 pub async fn read_frame<R, T>(reader: &mut R) -> Result<T, WireError>
 where
     R: AsyncRead + Unpin,
@@ -44,6 +55,17 @@ where
 /// Like [`read_frame`], but reuses `buf` across calls to avoid the
 /// per-frame allocation. The buffer is `resize`d in place; capacity is
 /// retained between calls.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`WireError::Closed`] on clean EOF before the length prefix.
+/// - [`WireError::Io`] on any other read error from the underlying
+///   transport.
+/// - [`WireError::EmptyPayload`] if the length prefix is `0`.
+/// - [`WireError::FrameTooLarge`] if the prefix exceeds
+///   [`MAX_FRAME_BYTES`].
+/// - [`WireError::Json`] if the payload is not valid JSON for `T`.
 pub async fn read_frame_with_buf<R, T>(reader: &mut R, buf: &mut Vec<u8>) -> Result<T, WireError>
 where
     R: AsyncRead + Unpin,
@@ -70,6 +92,15 @@ where
 }
 
 /// Encode `value` as JSON and write a single frame. Flushes the writer.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`WireError::Json`] if `value` cannot be serialised.
+/// - [`WireError::FrameTooLarge`] if the encoded payload exceeds
+///   [`MAX_FRAME_BYTES`].
+/// - [`WireError::Io`] if any of the prefix write, payload write, or
+///   flush fails on the underlying transport.
 pub async fn write_frame<W, T>(writer: &mut W, value: &T) -> Result<(), WireError>
 where
     W: AsyncWrite + Unpin,

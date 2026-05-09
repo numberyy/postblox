@@ -25,6 +25,13 @@ const SELECT: &str = "\
     smtp_host, smtp_port, smtp_use_tls, smtp_starttls, secret_ref, last_synced_at, \
     sync_status, sync_error, created_at, updated_at";
 
+/// Insert a new account row and return the persisted record.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the insert fails — most commonly a
+/// `UNIQUE` violation on `email`, but also any other SQLite constraint
+/// or IO error from the pool.
 pub async fn create(pool: &SqlitePool, new: &NewAccount) -> Result<Account, DbError> {
     let id = Uuid::new_v4();
     let q = format!(
@@ -49,21 +56,44 @@ pub async fn create(pool: &SqlitePool, new: &NewAccount) -> Result<Account, DbEr
         .await?)
 }
 
+/// List all accounts, oldest first.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails.
 pub async fn list(pool: &SqlitePool) -> Result<Vec<Account>, DbError> {
     let q = format!("SELECT {SELECT} FROM accounts ORDER BY created_at");
     Ok(sqlx::query_as(&q).fetch_all(pool).await?)
 }
 
+/// Look up an account by id; `Ok(None)` if not present.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
+/// row is reported as `Ok(None)`, not an error.
 pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Account>, DbError> {
     let q = format!("SELECT {SELECT} FROM accounts WHERE id = ?");
     Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
 
+/// Look up an account by email; `Ok(None)` if not present.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
+/// row is reported as `Ok(None)`, not an error.
 pub async fn get_by_email(pool: &SqlitePool, email: &str) -> Result<Option<Account>, DbError> {
     let q = format!("SELECT {SELECT} FROM accounts WHERE email = ?");
     Ok(sqlx::query_as(&q).bind(email).fetch_optional(pool).await?)
 }
 
+/// Delete an account by id. Returns `true` if a row was removed.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the delete fails (FK or IO). A missing
+/// row is reported as `Ok(false)`, not an error.
 pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     let res = sqlx::query("DELETE FROM accounts WHERE id = ?")
         .bind(id)
@@ -72,6 +102,12 @@ pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     Ok(res.rows_affected() > 0)
 }
 
+/// Update the `secret_ref` pointer for an account. Pass `None` to clear.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the update fails. A missing id is a
+/// silent no-op (rows_affected = 0), not an error.
 pub async fn set_secret_ref(
     pool: &SqlitePool,
     id: Uuid,
@@ -88,6 +124,14 @@ pub async fn set_secret_ref(
     Ok(())
 }
 
+/// Update the per-account sync status, optional last error message,
+/// and optional `last_synced_at` (preserves the existing value when
+/// the parameter is `None`).
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the update fails. A missing id is a
+/// silent no-op (rows_affected = 0), not an error.
 pub async fn update_sync(
     pool: &SqlitePool,
     id: Uuid,

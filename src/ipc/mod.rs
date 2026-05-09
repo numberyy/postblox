@@ -45,7 +45,9 @@ mod default_path_tests {
         let p = default_socket_path();
         assert_eq!(p, std::path::PathBuf::from("/run/user/1000/postblox.sock"));
         match prev {
+            // SAFETY: single-threaded test cleanup; restores prior value.
             Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
+            // SAFETY: single-threaded test cleanup; clears the variable.
             None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
         }
     }

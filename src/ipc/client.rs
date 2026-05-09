@@ -55,6 +55,12 @@ pub struct Client {
 
 impl Client {
     /// Connect to the daemon socket at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Io`] if the `connect(2)` call fails (no
+    /// daemon listening, permission denied, broken socket file). All
+    /// other variants only fire after the connection is established.
     pub async fn connect(path: &Path) -> Result<Self, ClientError> {
         let stream = UnixStream::connect(path).await?;
         let (mut reader, writer) = stream.into_split();
@@ -114,6 +120,17 @@ impl Client {
     /// Send a request, then await the matching response. Concurrent
     /// `request` calls on the same client are fine — each gets its own
     /// oneshot keyed by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`ClientError::Json`] if `args` (combined with op metadata)
+    ///   cannot be serialised.
+    /// - [`ClientError::Wire`] if the encoded frame exceeds
+    ///   [`crate::ipc::wire::MAX_FRAME_BYTES`].
+    /// - [`ClientError::Io`] if the socket write fails.
+    /// - [`ClientError::Closed`] if the reader task exits before the
+    ///   matching response arrives (typically the daemon disconnected).
     pub async fn request(&mut self, op: &str, args: Value) -> Result<Response, ClientError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -136,6 +153,14 @@ impl Client {
     /// Pipeline-style: ship the request without awaiting. The matching
     /// response will arrive on [`Client::next_response`] in arbitrary
     /// order. Returns the request id.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`ClientError::Json`] if `args` cannot be serialised.
+    /// - [`ClientError::Wire`] if the encoded frame exceeds
+    ///   [`crate::ipc::wire::MAX_FRAME_BYTES`].
+    /// - [`ClientError::Io`] if the socket write fails.
     pub async fn send_request(&mut self, op: &str, args: Value) -> Result<u64, ClientError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let req = Request {
@@ -148,11 +173,28 @@ impl Client {
     }
 
     /// Pull the next response that wasn't claimed by a `request` call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Closed`] if the reader task exited (the
+    /// daemon disconnected, the wire decoded badly, or the connection
+    /// was dropped).
     pub async fn next_response(&mut self) -> Result<Response, ClientError> {
         self.responses_rx.recv().await.ok_or(ClientError::Closed)
     }
 
     /// Subscribe to a topic. Returns the daemon-allocated `sub_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - Any error from [`Client::request`] (`Io`, `Wire`, `Json`, or
+    ///   `Closed`) for the underlying RPC.
+    /// - [`ClientError::Server`] if the daemon rejects the subscribe
+    ///   (e.g. unknown topic, per-connection subscription cap reached).
+    /// - [`ClientError::EmptyResponse`] if the daemon's success
+    ///   response omits the `sub_id` field — should never happen
+    ///   against a current daemon.
     pub async fn subscribe(&mut self, topic: Topic) -> Result<u64, ClientError> {
         let resp = self
             .request("subscribe", json!({"topic": topic.as_str()}))
@@ -174,6 +216,11 @@ impl Client {
     }
 
     /// Pull the next event off the inbound queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientError::Closed`] if the reader task exited (the
+    /// daemon disconnected or the wire decoded badly).
     pub async fn next_event(&mut self) -> Result<Event, ClientError> {
         self.events_rx.recv().await.ok_or(ClientError::Closed)
     }

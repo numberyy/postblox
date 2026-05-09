@@ -18,6 +18,12 @@ pub struct NewAttachment {
     pub storage_path: String,
 }
 
+/// Insert an attachment row and return the persisted record.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the insert or the follow-up `SELECT` fails
+/// (FK violation when `message_id` is unknown, or any other SQLite error).
 pub async fn create(pool: &SqlitePool, new: &NewAttachment) -> Result<Attachment, DbError> {
     let id = Uuid::new_v4();
     sqlx::query(
@@ -42,6 +48,12 @@ pub async fn create(pool: &SqlitePool, new: &NewAttachment) -> Result<Attachment
     )
 }
 
+/// List every attachment row for a message, oldest first.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. Unknown
+/// `message_id` returns `Ok(Vec::new())`, not an error.
 pub async fn list_for_message(
     pool: &SqlitePool,
     message_id: Uuid,
@@ -54,6 +66,12 @@ pub async fn list_for_message(
     .await?)
 }
 
+/// Look up an attachment by id; `Ok(None)` if missing.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
+/// row is reported as `Ok(None)`, not an error.
 pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Attachment>, DbError> {
     Ok(
         sqlx::query_as::<_, Attachment>(&format!("SELECT {COLS} FROM attachments WHERE id = ?"))

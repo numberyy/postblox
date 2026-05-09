@@ -20,6 +20,12 @@ pub fn quote_term(term: &str) -> String {
 /// Run an FTS5 MATCH against `messages_fts`, joining back to messages.
 /// Results are ordered by FTS rank (BM25). Results are unfiltered by
 /// account/folder; callers can post-filter with the IDs they care about.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails — most
+/// commonly an FTS5 syntax error in `fts_query` (use [`quote_term`] to
+/// neutralise user input), but also any other SQLite error.
 pub async fn search(
     pool: &SqlitePool,
     fts_query: &str,
@@ -61,6 +67,12 @@ const SEARCH_ALL_QUERY: &str = concat!(
 );
 
 /// Like [`search`], but optionally restricts hits to a specific account.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails — most
+/// commonly an FTS5 syntax error in `fts_query` (use [`quote_term`] to
+/// neutralise user input), but also any other SQLite error.
 pub async fn search_scoped(
     pool: &SqlitePool,
     fts_query: &str,

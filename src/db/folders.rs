@@ -18,6 +18,13 @@ const SELECT: &str = "\
     id, account_id, name, delimiter, role, uid_validity, uid_next, last_seen_uid, \
     selectable, created_at";
 
+/// Insert a folder row and return the persisted record.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the insert fails — typically a FK
+/// violation when `account_id` is unknown or a `UNIQUE` violation on
+/// `(account_id, name)`, but also any other SQLite error.
 pub async fn create(pool: &SqlitePool, new: &NewFolder) -> Result<Folder, DbError> {
     let id = Uuid::new_v4();
     let q = format!(
@@ -37,6 +44,18 @@ pub async fn create(pool: &SqlitePool, new: &NewFolder) -> Result<Folder, DbErro
 
 /// Insert if missing, otherwise update name/delimiter/role/selectable.
 /// Used by IMAP LIST sync.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if any of the look-up, insert, update, or
+/// post-update reload fails.
+///
+/// # Panics
+///
+/// Panics with a `BUG:` message if the row that was just upserted
+/// cannot be re-read from the same connection — that would imply a
+/// concurrent delete inside the same transaction window, which is not
+/// possible with this code path.
 pub async fn upsert(pool: &SqlitePool, new: &NewFolder) -> Result<Folder, DbError> {
     if let Some(existing) = get_by_name(pool, new.account_id, &new.name).await? {
         sqlx::query("UPDATE folders SET delimiter = ?, role = ?, selectable = ? WHERE id = ?")
@@ -53,16 +72,33 @@ pub async fn upsert(pool: &SqlitePool, new: &NewFolder) -> Result<Folder, DbErro
     create(pool, new).await
 }
 
+/// List folders for an account, alphabetically by name.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails.
 pub async fn list_by_account(pool: &SqlitePool, account_id: Uuid) -> Result<Vec<Folder>, DbError> {
     let q = format!("SELECT {SELECT} FROM folders WHERE account_id = ? ORDER BY name");
     Ok(sqlx::query_as(&q).bind(account_id).fetch_all(pool).await?)
 }
 
+/// Look up a folder by id; `Ok(None)` if missing.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
+/// row is reported as `Ok(None)`, not an error.
 pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Folder>, DbError> {
     let q = format!("SELECT {SELECT} FROM folders WHERE id = ?");
     Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
 
+/// Look up a folder by `(account_id, name)`; `Ok(None)` if missing.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
+/// row is reported as `Ok(None)`, not an error.
 pub async fn get_by_name(
     pool: &SqlitePool,
     account_id: Uuid,
@@ -76,6 +112,13 @@ pub async fn get_by_name(
         .await?)
 }
 
+/// Update the IMAP UID state for a folder. Each `Option` argument writes
+/// only when `Some`; `None` preserves the existing value.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the update fails. A missing id is a
+/// silent no-op (rows_affected = 0), not an error.
 pub async fn update_uid_state(
     pool: &SqlitePool,
     id: Uuid,
@@ -97,6 +140,12 @@ pub async fn update_uid_state(
     Ok(())
 }
 
+/// Delete a folder by id. Returns `true` if a row was removed.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the delete fails (FK or IO). A missing
+/// row is reported as `Ok(false)`, not an error.
 pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM folders WHERE id = ?")
         .bind(id)
