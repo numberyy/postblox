@@ -310,7 +310,7 @@ fn bounded_http_client(timeout: StdDuration) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(timeout)
         .build()
-        .expect("valid bounded OAuth HTTP client")
+        .expect("BUG: reqwest client builder accepts plain timeout config")
 }
 
 pub fn authorization_url(

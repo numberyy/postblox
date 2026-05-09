@@ -319,6 +319,7 @@ pub async fn wait_for_idle_change<C: Connector>(
         .iter()
         .any(|cap| matches!(cap, Capability::Atom(name) if name.eq_ignore_ascii_case("IDLE")));
     if !supports_idle {
+        // best-effort logout; ignore failure since the session is already closing.
         let _ = session.logout().await;
         return Err(ImapError::Unsupported(
             "server does not advertise IDLE".into(),
@@ -342,6 +343,7 @@ pub async fn wait_for_idle_change<C: Connector>(
     };
 
     let mut session = idle.done().await.map_err(ImapError::from)?;
+    // best-effort logout; ignore failure since the session is already closing.
     let _ = session.logout().await;
 
     match response? {

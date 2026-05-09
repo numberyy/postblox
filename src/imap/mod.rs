@@ -82,6 +82,7 @@ impl<C: Connector> ImapAuth for ConnectorAuth<C> {
             client::connect_with_credential(&self.connector, host, port, username, credential)
                 .await?;
         let folders = list_folders(&mut session).await?;
+        // best-effort logout; ignore failure since the session is already closing.
         let _ = session.logout().await;
         Ok(folders)
     }
@@ -102,6 +103,7 @@ impl<C: Connector> ImapSync for ConnectorAuth<C> {
             client::connect_with_credential(&self.connector, host, port, username, credential)
                 .await?;
         let out = fetch_uid_range(&mut session, folder, from_uid).await;
+        // best-effort logout; ignore failure since the session is already closing.
         let _ = session.logout().await;
         out
     }

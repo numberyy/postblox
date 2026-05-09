@@ -9,6 +9,7 @@
 //! for ping/db-read, or `messages,elapsed_ms,msgs_per_sec` for parse. Stderr
 //! gets human-readable progress; bench/run.sh consumes stdout.
 
+use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -55,8 +56,10 @@ async fn bench_ping(n: usize) -> anyhow::Result<()> {
 
     // Warmup so the first JIT / page-fault doesn't skew the median.
     for _ in 0..16 {
-        let resp = client.request("ping", json!({})).await?;
-        if !resp.ok {
+        let resp = client
+            .request(black_box("ping"), black_box(json!({})))
+            .await?;
+        if !black_box(&resp).ok {
             return Err(anyhow!("ping failed during warmup"));
         }
     }
@@ -64,9 +67,11 @@ async fn bench_ping(n: usize) -> anyhow::Result<()> {
     let mut samples_us: Vec<u64> = Vec::with_capacity(n);
     for _ in 0..n {
         let t0 = Instant::now();
-        let resp = client.request("ping", json!({})).await?;
+        let resp = client
+            .request(black_box("ping"), black_box(json!({})))
+            .await?;
         let elapsed = t0.elapsed();
-        if !resp.ok {
+        if !black_box(&resp).ok {
             return Err(anyhow!("ping returned !ok"));
         }
         samples_us.push(elapsed.as_micros() as u64);
@@ -82,8 +87,10 @@ async fn bench_db_read(n: usize) -> anyhow::Result<()> {
         .with_context(|| format!("connect to {}", path.display()))?;
 
     for _ in 0..16 {
-        let resp = client.request("account.list", json!({})).await?;
-        if !resp.ok {
+        let resp = client
+            .request(black_box("account.list"), black_box(json!({})))
+            .await?;
+        if !black_box(&resp).ok {
             return Err(anyhow!("account.list failed during warmup"));
         }
     }
@@ -91,9 +98,11 @@ async fn bench_db_read(n: usize) -> anyhow::Result<()> {
     let mut samples_us: Vec<u64> = Vec::with_capacity(n);
     for _ in 0..n {
         let t0 = Instant::now();
-        let resp = client.request("account.list", json!({})).await?;
+        let resp = client
+            .request(black_box("account.list"), black_box(json!({})))
+            .await?;
         let elapsed = t0.elapsed();
-        if !resp.ok {
+        if !black_box(&resp).ok {
             return Err(anyhow!("account.list returned !ok"));
         }
         samples_us.push(elapsed.as_micros() as u64);
@@ -107,14 +116,16 @@ fn bench_parse(n: usize) {
 
     // Warmup
     for raw in corpus.iter().take(16) {
-        let _ = mail::parser::parse(raw).expect("warmup parse");
+        let parsed = mail::parser::parse(black_box(raw.as_slice())).expect("warmup parse");
+        black_box(parsed);
     }
 
     let t0 = Instant::now();
     let mut parsed = 0u64;
     for i in 0..n {
-        let raw = &corpus[i % corpus.len()];
-        let _ = mail::parser::parse(raw).expect("parse");
+        let raw = black_box(&corpus[i % corpus.len()]);
+        let email = mail::parser::parse(raw.as_slice()).expect("parse");
+        black_box(email);
         parsed += 1;
     }
     let elapsed = t0.elapsed();

@@ -150,6 +150,8 @@ impl FileSecretStore {
 #[async_trait]
 impl SecretStore for FileSecretStore {
     async fn put(&self, account_id: Uuid, secret: Secret) -> Result<(), SecretError> {
+        // SAFETY: serialise read-modify-write of the encrypted secrets file;
+        // tokio::sync::Mutex is await-safe, so holding across .await is intentional.
         let _guard = self.inner.write_lock.lock().await;
         let mut map = self.read_map().await?;
         map.insert(account_id, secret.as_str().to_string());
@@ -168,6 +170,8 @@ impl SecretStore for FileSecretStore {
     }
 
     async fn delete(&self, account_id: Uuid) -> Result<(), SecretError> {
+        // SAFETY: serialise read-modify-write of the encrypted secrets file;
+        // tokio::sync::Mutex is await-safe, so holding across .await is intentional.
         let _guard = self.inner.write_lock.lock().await;
         let mut map = self.read_map().await?;
         if map.remove(&account_id).is_some() {

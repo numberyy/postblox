@@ -52,7 +52,7 @@ pub fn parse(raw: &[u8]) -> Result<ParsedEmail, MailError> {
 
     let from = message
         .from()
-        .and_then(|a| extract_addresses(a).into_iter().next())
+        .and_then(|a| a.iter().find_map(|x| x.address().map(str::to_string)))
         .unwrap_or_default();
 
     let to = message.to().map(extract_addresses).unwrap_or_default();
@@ -73,7 +73,7 @@ pub fn parse(raw: &[u8]) -> Result<ParsedEmail, MailError> {
 
     let raw_headers = build_raw_headers(&message);
 
-    let mut attachments = Vec::new();
+    let mut attachments = Vec::with_capacity(message.parts.len().min(8));
     for (i, part) in message.parts.iter().enumerate() {
         let disposition = part.content_disposition();
         let disposition_type = disposition.map(|d| d.ctype());
@@ -108,7 +108,13 @@ pub fn parse(raw: &[u8]) -> Result<ParsedEmail, MailError> {
             .map(|ct| {
                 let ctype = ct.ctype();
                 match ct.subtype() {
-                    Some(sub) => format!("{ctype}/{sub}"),
+                    Some(sub) => {
+                        let mut s = String::with_capacity(ctype.len() + 1 + sub.len());
+                        s.push_str(ctype);
+                        s.push('/');
+                        s.push_str(sub);
+                        s
+                    }
                     None => ctype.to_string(),
                 }
             })
@@ -232,7 +238,13 @@ fn header_value_to_json(value: &HeaderValue) -> serde_json::Value {
         HeaderValue::ContentType(ct) => {
             let ctype = ct.ctype();
             match ct.subtype() {
-                Some(sub) => serde_json::Value::String(format!("{ctype}/{sub}")),
+                Some(sub) => {
+                    let mut s = String::with_capacity(ctype.len() + 1 + sub.len());
+                    s.push_str(ctype);
+                    s.push('/');
+                    s.push_str(sub);
+                    serde_json::Value::String(s)
+                }
                 None => serde_json::Value::String(ctype.to_string()),
             }
         }

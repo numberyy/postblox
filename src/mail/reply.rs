@@ -297,10 +297,17 @@ fn prefix_each_line(text: &str, prefix: &str) -> String {
     if text.is_empty() {
         return prefix.to_string();
     }
-    text.split('\n')
-        .map(|line| format!("{prefix}{line}"))
-        .collect::<Vec<_>>()
-        .join("\r\n")
+    let mut out = String::with_capacity(text.len() + prefix.len() * 16);
+    let mut first = true;
+    for line in text.split('\n') {
+        if !first {
+            out.push_str("\r\n");
+        }
+        out.push_str(prefix);
+        out.push_str(line);
+        first = false;
+    }
+    out
 }
 
 fn format_rfc2822(dt: DateTime<Utc>) -> String {

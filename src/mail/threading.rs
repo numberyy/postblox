@@ -39,10 +39,11 @@ pub fn assign_thread(message: &ParsedEmail, existing_threads: &[ThreadRef]) -> T
             let now = Utc::now();
             let cutoff = now - Duration::days(7);
 
+            // Cheap freshness check first — skips normalization for stale threads.
             let best = existing_threads
                 .iter()
                 .filter(|t| {
-                    normalize_subject(&t.subject) == normalized && t.last_message_at > cutoff
+                    t.last_message_at > cutoff && normalize_subject(&t.subject) == normalized
                 })
                 .max_by_key(|t| t.last_message_at);
 

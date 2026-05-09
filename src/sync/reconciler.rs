@@ -171,6 +171,7 @@ pub async fn reconcile_folder(
         if let Err(error) =
             crate::attachments::persist_parsed_for_message(pool, row.id, &parsed.attachments).await
         {
+            // best-effort rollback of the half-inserted message; original error takes priority.
             let _ = db::messages::delete(pool, row.id).await;
             return Err(error.into());
         }
