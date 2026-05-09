@@ -503,7 +503,7 @@ async fn handle_key<C: Mailbox + ?Sized>(
             return handle_composer_key(key, app, client).await;
         }
         InputMode::ComposeAttachPath => {
-            handle_compose_attach_key(key, app);
+            handle_compose_attach_key(key, app).await;
             return false;
         }
         InputMode::ConfirmDelete => {
@@ -763,7 +763,7 @@ async fn run_forward<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
             .fetch_attachment_for_forward(meta.attachment_id)
             .await
         {
-            Ok(bytes) => match materialise_forward_attachment(&bytes) {
+            Ok(bytes) => match materialise_forward_attachment(&bytes).await {
                 Ok(attachment) => attachments.push(attachment),
                 Err(_) => failed_attachments.push(meta.filename.clone()),
             },
@@ -792,19 +792,17 @@ async fn run_forward<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
 /// Decode the bytes returned by `attachment.fetch_for_forward` and
 /// stash them in a temp file the composer can attach. The composer
 /// API only takes file paths, so we materialise the bytes once.
-fn materialise_forward_attachment(
+async fn materialise_forward_attachment(
     bytes: &ipc::ForwardAttachmentBytes,
 ) -> Result<app::ComposerAttachment, std::io::Error> {
-    use std::io::Write;
     let decoded = bytes
         .decoded_bytes()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     let dir = std::env::temp_dir().join("postblox-forward");
-    std::fs::create_dir_all(&dir)?;
+    tokio::fs::create_dir_all(&dir).await?;
     let unique = format!("{}-{}", Uuid::new_v4().simple(), bytes.filename);
     let path = dir.join(unique);
-    let mut file = std::fs::File::create(&path)?;
-    file.write_all(&decoded)?;
+    tokio::fs::write(&path, &decoded).await?;
     Ok(app::ComposerAttachment {
         path,
         filename: bytes.filename.clone(),
@@ -816,16 +814,14 @@ fn materialise_forward_attachment(
 /// Same temp-file dance as `materialise_forward_attachment` but for
 /// a draft attachment fetched via `draft.get`. Used when re-opening a
 /// saved draft into the composer.
-fn materialise_draft_attachment(
+async fn materialise_draft_attachment(
     bytes: &app::DraftAttachmentBytes,
 ) -> Result<app::ComposerAttachment, std::io::Error> {
-    use std::io::Write;
     let dir = std::env::temp_dir().join("postblox-drafts");
-    std::fs::create_dir_all(&dir)?;
+    tokio::fs::create_dir_all(&dir).await?;
     let unique = format!("{}-{}", Uuid::new_v4().simple(), bytes.filename);
     let path = dir.join(unique);
-    let mut file = std::fs::File::create(&path)?;
-    file.write_all(&bytes.bytes)?;
+    tokio::fs::write(&path, &bytes.bytes).await?;
     Ok(app::ComposerAttachment {
         path,
         filename: bytes.filename.clone(),
@@ -837,12 +833,12 @@ fn materialise_draft_attachment(
 /// Build a `ComposerDraft` from a `DraftSummary`. The address arrays
 /// are decoded from the JSON columns; attachments are written to temp
 /// files so the existing `draft.update` flow can re-upload them.
-fn composer_draft_from_summary(
+async fn composer_draft_from_summary(
     summary: &app::DraftSummary,
 ) -> Result<app::ComposerDraft, std::io::Error> {
     let mut attachments = Vec::with_capacity(summary.attachments.len());
     for att in &summary.attachments {
-        attachments.push(materialise_draft_attachment(att)?);
+        attachments.push(materialise_draft_attachment(att).await?);
     }
     Ok(app::ComposerDraft {
         account_id: summary.draft.account_id,
@@ -1253,13 +1249,13 @@ async fn handle_composer_key<C: Mailbox + ?Sized>(
     }
 }
 
-fn handle_compose_attach_key(key: KeyEvent, app: &mut AppState) {
+async fn handle_compose_attach_key(key: KeyEvent, app: &mut AppState) {
     match key.code {
         KeyCode::Esc => {
             app.cancel_compose_attach();
             app.set_status("Compose");
         }
-        KeyCode::Enter => match app.confirm_compose_attach() {
+        KeyCode::Enter => match app.confirm_compose_attach().await {
             Ok(name) => {
                 app.set_status(format!("Attached {name}"));
             }
@@ -1549,11 +1545,11 @@ impl FolderWrite {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 enum CommandRunError {
-    #[error("No account selected")]
+    #[error("no account selected")]
     AccountNotSelected,
-    #[error("No folder selected")]
+    #[error("no folder selected")]
     FolderUnavailable,
-    #[error("No message selected")]
+    #[error("no message selected")]
     MessageMissing,
 }
 
@@ -1884,13 +1880,12 @@ async fn send_composer<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) 
         return;
     };
 
-    let draft_id = if app.composer_draft_id().is_none() || app.composer_is_dirty() {
-        match save_composer(app, client).await {
-            Some(draft_id) => draft_id,
+    let draft_id = match app.composer_draft_id() {
+        Some(id) if !app.composer_is_dirty() => id,
+        _ => match save_composer(app, client).await {
+            Some(id) => id,
             None => return,
-        }
-    } else {
-        app.composer_draft_id().expect("checked above")
+        },
     };
 
     app.clear_error();
@@ -2179,7 +2174,7 @@ async fn open_selected_draft<C: Mailbox + ?Sized>(app: &mut AppState, client: &m
             return;
         }
     };
-    let composer_draft = match composer_draft_from_summary(&summary) {
+    let composer_draft = match composer_draft_from_summary(&summary).await {
         Ok(draft) => draft,
         Err(error) => {
             let message = format!("Cannot reopen draft: {error}");
@@ -2933,11 +2928,11 @@ mod tests {
         let mut client = MockMailbox::default();
 
         execute_command(Command::Sync, &mut app, &mut client).await;
-        assert_eq!(app.error.as_deref(), Some("No account selected"));
+        assert_eq!(app.error.as_deref(), Some("no account selected"));
 
         app.clear_error();
         execute_command(Command::Seen, &mut app, &mut client).await;
-        assert_eq!(app.error.as_deref(), Some("No message selected"));
+        assert_eq!(app.error.as_deref(), Some("no message selected"));
         assert!(client.calls.is_empty());
     }
 
@@ -4329,7 +4324,7 @@ mod tests {
         run_command_line("compose".into(), &mut app, &mut client).await;
 
         assert!(app.composer.is_none());
-        assert_eq!(app.error.as_deref(), Some("No account selected"));
+        assert_eq!(app.error.as_deref(), Some("no account selected"));
     }
 
     #[tokio::test]

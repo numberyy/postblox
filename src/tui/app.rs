@@ -2570,7 +2570,7 @@ impl AppState {
     /// attachment. Returns `Ok(filename)` on success; `Err(AttachError)`
     /// otherwise. On success the input is cleared and we return to
     /// `Compose` mode.
-    pub fn confirm_compose_attach(&mut self) -> Result<String, AttachError> {
+    pub async fn confirm_compose_attach(&mut self) -> Result<String, AttachError> {
         let Some(composer) = &mut self.composer else {
             return Err(AttachError::Io {
                 path: PathBuf::new(),
@@ -2582,7 +2582,7 @@ impl AppState {
             return Err(AttachError::NotFound(PathBuf::from("(empty)")));
         }
         let path = PathBuf::from(&raw);
-        let attachment = probe_attachment(&path)?;
+        let attachment = probe_attachment(&path).await?;
         let aggregate = composer
             .aggregate_attachment_size()
             .saturating_add(attachment.size_bytes);
@@ -2937,14 +2937,16 @@ pub fn guess_content_type_for_path(path: &Path) -> String {
 
 /// Probe a candidate attachment path: returns metadata + content-type
 /// or a structured error suitable for toast surfacing.
-pub fn probe_attachment(path: &Path) -> Result<ComposerAttachment, AttachError> {
-    let metadata = std::fs::metadata(path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => AttachError::NotFound(path.to_path_buf()),
-        _ => AttachError::Io {
-            path: path.to_path_buf(),
-            message: e.to_string(),
-        },
-    })?;
+pub async fn probe_attachment(path: &Path) -> Result<ComposerAttachment, AttachError> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => AttachError::NotFound(path.to_path_buf()),
+            _ => AttachError::Io {
+                path: path.to_path_buf(),
+                message: e.to_string(),
+            },
+        })?;
     if !metadata.is_file() {
         return Err(AttachError::NotAFile(path.to_path_buf()));
     }
@@ -4797,8 +4799,8 @@ mod tests {
         assert!(!app.push_compose_attach_char('a'));
     }
 
-    #[test]
-    fn test_confirm_compose_attach_adds_attachment_with_filename_size_and_type() {
+    #[tokio::test]
+    async fn test_confirm_compose_attach_adds_attachment_with_filename_size_and_type() {
         let mut app = AppState::default();
         app.enter_composer(Uuid::new_v4());
         let (_dir, path) = temp_attach_file("notes.txt", b"hello world");
@@ -4807,7 +4809,7 @@ mod tests {
             app.push_compose_attach_char(ch);
         }
 
-        let name = app.confirm_compose_attach().expect("confirm ok");
+        let name = app.confirm_compose_attach().await.expect("confirm ok");
         assert_eq!(name, "notes.txt");
         assert_eq!(app.mode, InputMode::Compose);
         let composer = app.composer.as_ref().unwrap();
@@ -4821,8 +4823,8 @@ mod tests {
         assert!(composer.attach_input.is_empty());
     }
 
-    #[test]
-    fn test_confirm_compose_attach_unknown_extension_falls_back_to_octet_stream() {
+    #[tokio::test]
+    async fn test_confirm_compose_attach_unknown_extension_falls_back_to_octet_stream() {
         let mut app = AppState::default();
         app.enter_composer(Uuid::new_v4());
         let (_dir, path) = temp_attach_file("blob.weird", &[1, 2, 3]);
@@ -4831,15 +4833,15 @@ mod tests {
             app.push_compose_attach_char(ch);
         }
 
-        app.confirm_compose_attach().unwrap();
+        app.confirm_compose_attach().await.unwrap();
         assert_eq!(
             app.composer.as_ref().unwrap().attachments[0].content_type,
             "application/octet-stream"
         );
     }
 
-    #[test]
-    fn test_confirm_compose_attach_missing_file_yields_not_found_toast_text() {
+    #[tokio::test]
+    async fn test_confirm_compose_attach_missing_file_yields_not_found_toast_text() {
         let mut app = AppState::default();
         app.enter_composer(Uuid::new_v4());
         app.begin_compose_attach();
@@ -4847,13 +4849,13 @@ mod tests {
             app.push_compose_attach_char(ch);
         }
 
-        let err = app.confirm_compose_attach().unwrap_err();
+        let err = app.confirm_compose_attach().await.unwrap_err();
         assert!(matches!(err, AttachError::NotFound(_)));
         assert!(err.toast_text().starts_with("File not found:"));
     }
 
-    #[test]
-    fn test_confirm_compose_attach_directory_rejected_as_not_a_file() {
+    #[tokio::test]
+    async fn test_confirm_compose_attach_directory_rejected_as_not_a_file() {
         let mut app = AppState::default();
         app.enter_composer(Uuid::new_v4());
         let dir = tempfile::tempdir().unwrap();
@@ -4862,12 +4864,12 @@ mod tests {
             app.push_compose_attach_char(ch);
         }
 
-        let err = app.confirm_compose_attach().unwrap_err();
+        let err = app.confirm_compose_attach().await.unwrap_err();
         assert!(matches!(err, AttachError::NotAFile(_)));
     }
 
-    #[test]
-    fn test_confirm_compose_attach_over_25mib_rejected_with_toast_text() {
+    #[tokio::test]
+    async fn test_confirm_compose_attach_over_25mib_rejected_with_toast_text() {
         let mut app = AppState::default();
         app.enter_composer(Uuid::new_v4());
         let dir = tempfile::tempdir().unwrap();
@@ -4880,15 +4882,15 @@ mod tests {
             app.push_compose_attach_char(ch);
         }
 
-        let err = app.confirm_compose_attach().unwrap_err();
+        let err = app.confirm_compose_attach().await.unwrap_err();
         assert!(matches!(err, AttachError::TooLarge { .. }));
         assert!(err.toast_text().contains("Attachment too large"));
         // Composer attachments untouched after rejection.
         assert!(app.composer.as_ref().unwrap().attachments.is_empty());
     }
 
-    #[test]
-    fn test_confirm_compose_attach_aggregate_over_limit_is_rejected() {
+    #[tokio::test]
+    async fn test_confirm_compose_attach_aggregate_over_limit_is_rejected() {
         let mut app = AppState::default();
         app.enter_composer(Uuid::new_v4());
         // Pre-seed a fake attachment that already eats most of the cap.
@@ -4909,7 +4911,7 @@ mod tests {
             app.push_compose_attach_char(ch);
         }
 
-        let err = app.confirm_compose_attach().unwrap_err();
+        let err = app.confirm_compose_attach().await.unwrap_err();
         assert!(matches!(err, AttachError::AggregateTooLarge { .. }));
         assert!(err.toast_text().contains("Aggregate over limit"));
         assert_eq!(app.composer.as_ref().unwrap().attachments.len(), 1);
@@ -5003,8 +5005,8 @@ mod tests {
         assert!(composer.attach_input.is_empty());
     }
 
-    #[test]
-    fn test_composer_draft_payload_includes_attachments() {
+    #[tokio::test]
+    async fn test_composer_draft_payload_includes_attachments() {
         let mut app = AppState::default();
         app.enter_composer(Uuid::new_v4());
         let (_dir, path) = temp_attach_file("doc.txt", b"abc");
@@ -5012,7 +5014,7 @@ mod tests {
         for ch in path.display().to_string().chars() {
             app.push_compose_attach_char(ch);
         }
-        app.confirm_compose_attach().unwrap();
+        app.confirm_compose_attach().await.unwrap();
 
         let draft = app.composer_draft().unwrap();
         assert_eq!(draft.attachments.len(), 1);
