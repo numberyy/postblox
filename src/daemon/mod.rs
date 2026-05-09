@@ -9,4 +9,6 @@
 
 pub mod dispatcher;
 
-pub use dispatcher::{worker_manager_with_idle_config, DaemonDispatcher, DaemonServices};
+pub use dispatcher::{
+    worker_manager_with_idle_config, DaemonDispatcher, DaemonServices, DispatcherInitError,
+};

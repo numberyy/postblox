@@ -9,10 +9,11 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
+use thiserror::Error;
 
 use crate::auth::MailCredential;
 use crate::db;
-use crate::imap::{self, ImapAuth, ImapIdle, ImapSync};
+use crate::imap::{self, ImapAuth, ImapError, ImapIdle, ImapSync};
 use crate::ipc::{Dispatcher, Hub, RpcError, Topic};
 use crate::models::{Account, ApprovalState, AuthKind, FolderRole, GateAction};
 use crate::oauth::google::{
@@ -114,12 +115,26 @@ pub struct DaemonDispatcher {
     worker_manager: Arc<sync::WorkerManager>,
 }
 
+/// Errors produced when constructing a [`DaemonDispatcher`] from
+/// platform-default IMAP transports. Surfacing this lets callers
+/// distinguish "rustls platform verifier failed" (recoverable: bad
+/// system trust store) from a logic bug.
+#[derive(Debug, Error)]
+pub enum DispatcherInitError {
+    #[error("imap transport init failed: {0}")]
+    Imap(#[from] ImapError),
+}
+
 impl DaemonDispatcher {
     /// Production constructor: TLS-backed IMAP via rustls.
-    pub fn new(pool: SqlitePool, hub: Arc<Hub>, secrets: Arc<dyn SecretStore>) -> Self {
-        let imap = imap::default_auth().expect("rustls platform verifier init");
-        let imap_sync = imap::default_sync().expect("rustls platform verifier init");
-        let imap_idle = imap::default_idle().expect("rustls platform verifier init");
+    pub fn new(
+        pool: SqlitePool,
+        hub: Arc<Hub>,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Result<Self, DispatcherInitError> {
+        let imap = imap::default_auth()?;
+        let imap_sync = imap::default_sync()?;
+        let imap_idle = imap::default_idle()?;
         let smtp = Arc::new(smtp::LettreSmtpSubmitter::new());
         let services = DaemonServices::with_smtp(smtp);
         let worker_manager = worker_manager_with_idle_config(
@@ -131,7 +146,7 @@ impl DaemonDispatcher {
             &services,
             sync::WorkerConfig::default(),
         );
-        Self::with_imap_smtp_oauth_and_manager(
+        Ok(Self::with_imap_smtp_oauth_and_manager(
             pool,
             hub,
             imap,
@@ -139,7 +154,7 @@ impl DaemonDispatcher {
             secrets,
             services,
             worker_manager,
-        )
+        ))
     }
 
     /// Test/customisation constructor: bring your own IMAP impls.
@@ -1170,15 +1185,8 @@ async fn op_message_prepare_forward(pool: &SqlitePool, args: Value) -> Result<Va
         .await
         .map_err(|e| RpcError::internal(format!("attachments::list_for_message: {e}")))?;
     let attachment_tuples: Vec<(uuid::Uuid, String, String, i64)> = attachments
-        .iter()
-        .map(|a| {
-            (
-                a.id,
-                a.filename.clone(),
-                a.content_type.clone(),
-                a.size_bytes,
-            )
-        })
+        .into_iter()
+        .map(|a| (a.id, a.filename, a.content_type, a.size_bytes))
         .collect();
     let draft = crate::mail::reply::forward_draft(&message, &attachment_tuples);
     let attachments_json: Vec<Value> = draft
@@ -1265,24 +1273,24 @@ async fn op_attachment_fetch_for_forward(
                 "attachment unavailable offline (parent message missing)",
             )
         })?;
-    let folder = db::folders::get(pool, message.folder_id)
-        .await
-        .map_err(|e| RpcError::internal(format!("folders::get: {e}")))?
-        .ok_or_else(|| {
-            RpcError::new(
-                "unavailable_offline",
-                "attachment unavailable offline (folder missing)",
-            )
-        })?;
-    let account = db::accounts::get(pool, message.account_id)
-        .await
-        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
-        .ok_or_else(|| {
-            RpcError::new(
-                "unavailable_offline",
-                "attachment unavailable offline (account missing)",
-            )
-        })?;
+    // folder and account are independent given `message`; fetch concurrently.
+    let (folder, account) = tokio::try_join!(
+        db::folders::get(pool, message.folder_id),
+        db::accounts::get(pool, message.account_id),
+    )
+    .map_err(|e| RpcError::internal(format!("folders/accounts::get: {e}")))?;
+    let folder = folder.ok_or_else(|| {
+        RpcError::new(
+            "unavailable_offline",
+            "attachment unavailable offline (folder missing)",
+        )
+    })?;
+    let account = account.ok_or_else(|| {
+        RpcError::new(
+            "unavailable_offline",
+            "attachment unavailable offline (account missing)",
+        )
+    })?;
 
     let credential = match credential_for_account(secrets, oauth, &account).await {
         Ok(credential) => credential,
@@ -1321,7 +1329,7 @@ async fn op_attachment_fetch_for_forward(
         .ok_or_else(|| RpcError::new("unavailable_offline", "attachment unavailable offline"))?;
     let parsed = crate::mail::parser::parse(&fetched.raw)
         .map_err(|_| RpcError::new("unavailable_offline", "attachment unavailable offline"))?;
-    let bytes = pick_attachment_bytes(&parsed.attachments, &attachment)
+    let bytes = pick_attachment_bytes(parsed.attachments, &attachment)
         .ok_or_else(|| RpcError::new("unavailable_offline", "attachment unavailable offline"))?;
 
     if let Err(e) = persist_refetched_bytes(&attachment.storage_path, &bytes).await {
@@ -1339,24 +1347,27 @@ async fn op_attachment_fetch_for_forward(
 }
 
 fn pick_attachment_bytes(
-    parsed: &[crate::mail::parser::ParsedAttachment],
+    mut parsed: Vec<crate::mail::parser::ParsedAttachment>,
     attachment: &crate::models::Attachment,
 ) -> Option<Vec<u8>> {
-    if let Some(cid) = attachment.content_id.as_deref().filter(|s| !s.is_empty()) {
-        if let Some(p) = parsed.iter().find(|p| p.content_id.as_deref() == Some(cid)) {
-            return Some(p.data.clone());
+    let cid = attachment.content_id.as_deref().filter(|s| !s.is_empty());
+    if let Some(cid) = cid {
+        if let Some(idx) = parsed
+            .iter()
+            .position(|p| p.content_id.as_deref() == Some(cid))
+        {
+            return Some(parsed.swap_remove(idx).data);
         }
     }
-    parsed
+    if let Some(idx) = parsed.iter().position(|p| {
+        p.filename == attachment.filename && p.content_type == attachment.content_type
+    }) {
+        return Some(parsed.swap_remove(idx).data);
+    }
+    let idx = parsed
         .iter()
-        .find(|p| p.filename == attachment.filename && p.content_type == attachment.content_type)
-        .map(|p| p.data.clone())
-        .or_else(|| {
-            parsed
-                .iter()
-                .find(|p| p.filename == attachment.filename)
-                .map(|p| p.data.clone())
-        })
+        .position(|p| p.filename == attachment.filename)?;
+    Some(parsed.swap_remove(idx).data)
 }
 
 async fn persist_refetched_bytes(path: &str, bytes: &[u8]) -> std::io::Result<()> {
@@ -1414,7 +1425,7 @@ async fn op_message_send(
     let credential = credential_for_account(secrets, oauth, &account).await?;
 
     let message_id = format!("<{}@postblox.local>", uuid::Uuid::new_v4());
-    let subject = draft.subject.clone().unwrap_or_default();
+    let subject = draft.subject.as_deref().unwrap_or("");
     let attachments = load_draft_mime_attachments(pool, draft_id).await?;
     let attachment_count = attachments.len();
     let reply = crate::mail::builder::ReplyHeaders {
@@ -1425,7 +1436,7 @@ async fn op_message_send(
         &account.email,
         &to,
         &cc,
-        &subject,
+        subject,
         draft.text_body.as_deref(),
         draft.html_body.as_deref(),
         &message_id,
@@ -1587,7 +1598,7 @@ async fn op_account_test_login(
     // Upsert what the server reported so folder.list reflects reality.
     for f in &folders {
         let role = role_for(&f.name);
-        let _ = db::folders::upsert(
+        if let Err(error) = db::folders::upsert(
             pool,
             &db::folders::NewFolder {
                 account_id,
@@ -1597,7 +1608,15 @@ async fn op_account_test_login(
                 selectable: f.selectable,
             },
         )
-        .await;
+        .await
+        {
+            tracing::warn!(
+                account_id = %account_id,
+                folder_name = %f.name,
+                %error,
+                "failed to upsert folder during test login"
+            );
+        }
     }
 
     audit(
@@ -2024,7 +2043,7 @@ fn map_oauth_error(err: GoogleOAuthError) -> RpcError {
 // ---------- helpers ---------------------------------------------------------
 
 fn encode<T: serde::Serialize>(
-    res: Result<T, sqlx::Error>,
+    res: Result<T, db::DbError>,
     ctx: &'static str,
 ) -> Result<Value, RpcError> {
     let v = res.map_err(|e| RpcError::internal(format!("{ctx}: {e}")))?;
