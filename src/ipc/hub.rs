@@ -16,6 +16,7 @@ use tokio::sync::{broadcast, RwLock};
 /// accidentally publish a typoed string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Topic {
     /// New message stored by sync.
     MailNew,

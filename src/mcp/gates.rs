@@ -4,6 +4,7 @@ use uuid::Uuid;
 use crate::models::{GateAction, McpGate};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GateDecision {
     AutoAllow { gate_id: Option<Uuid> },
     Deny { gate_id: Option<Uuid> },

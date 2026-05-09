@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum WireError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -19,13 +20,31 @@ pub enum WireError {
     FrameTooLarge(usize),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("empty frame payload")]
+    EmptyPayload,
     #[error("connection closed")]
     Closed,
 }
 
 /// Read one frame and decode it as `T`. Returns `Err(WireError::Closed)`
 /// on a clean EOF before the length prefix.
+///
+/// Allocates a fresh read buffer per call. Hot per-connection reader
+/// loops should prefer [`read_frame_with_buf`] to reuse a single
+/// allocation across frames.
 pub async fn read_frame<R, T>(reader: &mut R) -> Result<T, WireError>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
+    let mut buf = Vec::new();
+    read_frame_with_buf(reader, &mut buf).await
+}
+
+/// Like [`read_frame`], but reuses `buf` across calls to avoid the
+/// per-frame allocation. The buffer is `resize`d in place; capacity is
+/// retained between calls.
+pub async fn read_frame_with_buf<R, T>(reader: &mut R, buf: &mut Vec<u8>) -> Result<T, WireError>
 where
     R: AsyncRead + Unpin,
     T: DeserializeOwned,
@@ -39,19 +58,15 @@ where
 
     let len = u32::from_be_bytes(len_buf) as usize;
     if len == 0 {
-        return Err(WireError::Json(
-            serde_json::from_slice::<T>(b"")
-                .err()
-                .expect("empty payload always fails to parse"),
-        ));
+        return Err(WireError::EmptyPayload);
     }
     if len > MAX_FRAME_BYTES {
         return Err(WireError::FrameTooLarge(len));
     }
 
-    let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf).await?;
-    Ok(serde_json::from_slice(&buf)?)
+    buf.resize(len, 0);
+    reader.read_exact(&mut buf[..len]).await?;
+    Ok(serde_json::from_slice(&buf[..len])?)
 }
 
 /// Encode `value` as JSON and write a single frame. Flushes the writer.

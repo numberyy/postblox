@@ -12,11 +12,13 @@
 //! * `unsubscribe { sub_id }` op → server aborts that forwarder task.
 //! * Connection close → writer drops, forwarders unwind.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use serde::Serialize;
 use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
@@ -25,8 +27,8 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
 use super::hub::{Hub, Topic};
-use super::protocol::{Event, Request, Response, RpcError};
-use super::wire::{read_frame, WireError};
+use super::protocol::{Request, Response, RpcError};
+use super::wire::{read_frame_with_buf, WireError};
 
 /// Daemon-side handler for opaque ops. Implementations live in the
 /// daemon binary; tests use a small mock.
@@ -66,6 +68,7 @@ impl ServerHandle {
 
     /// Abort the accept loop and remove the socket file.
     pub async fn shutdown(mut self) {
+        // Best-effort cleanup during shutdown; ignore errors so other tasks don't block.
         if let Some(handle) = self.join.take() {
             handle.abort();
             let _ = handle.await;
@@ -141,16 +144,26 @@ async fn accept_loop<D: Dispatcher>(listener: UnixListener, dispatcher: Arc<D>, 
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WriteFrameKind {
-    Response,
-    Event,
+/// Outbound frame queued for the per-connection writer task.
+///
+/// We pass either a fully-encoded response (small, allocated once) or
+/// an `EventOut` descriptor. The writer task encodes events into a
+/// reusable buffer so a busy subscriber does not allocate a fresh
+/// `Vec<u8>` per frame.
+enum OutFrame {
+    Response(Response),
+    Event(EventOut),
 }
 
-struct OutFrame {
-    #[allow(dead_code)] // future flow control
-    kind: WriteFrameKind,
-    bytes: Vec<u8>,
+/// Server-side event payload. Holds the topic as `&'static str`
+/// (borrowed from `Topic::as_str`) and the JSON payload as `Arc<Value>`
+/// so multiple subscribers share one allocation. Serializes to the same
+/// shape as [`super::protocol::Event`].
+#[derive(Serialize)]
+struct EventOut {
+    sub: u64,
+    topic: Cow<'static, str>,
+    data: Arc<Value>,
 }
 
 async fn handle_connection<D: Dispatcher>(
@@ -162,13 +175,24 @@ async fn handle_connection<D: Dispatcher>(
     let (out_tx, mut out_rx) = mpsc::channel::<OutFrame>(WRITER_MAILBOX);
 
     // Writer task: serializes outbound frames so the wire stays well-ordered.
+    // Reuses a single encode buffer across frames; capacity is retained.
     let writer_task = tokio::spawn(async move {
+        let mut encode_buf: Vec<u8> = Vec::with_capacity(1024);
         while let Some(frame) = out_rx.recv().await {
-            let len = (frame.bytes.len() as u32).to_be_bytes();
+            encode_buf.clear();
+            let encode_result = match &frame {
+                OutFrame::Response(resp) => serde_json::to_writer(&mut encode_buf, resp),
+                OutFrame::Event(event) => serde_json::to_writer(&mut encode_buf, event),
+            };
+            if let Err(e) = encode_result {
+                tracing::error!(error = %e, "failed to encode outbound frame");
+                continue;
+            }
+            let len = (encode_buf.len() as u32).to_be_bytes();
             if writer.write_all(&len).await.is_err() {
                 break;
             }
-            if writer.write_all(&frame.bytes).await.is_err() {
+            if writer.write_all(&encode_buf).await.is_err() {
                 break;
             }
             if writer.flush().await.is_err() {
@@ -181,9 +205,11 @@ async fn handle_connection<D: Dispatcher>(
     let subs: Arc<Mutex<HashMap<u64, JoinHandle<()>>>> = Arc::new(Mutex::new(HashMap::new()));
     let next_sub_id = Arc::new(AtomicU64::new(1));
 
-    // Reader loop.
+    // Reader loop. Reuses a single read buffer across inbound frames so
+    // a chatty client doesn't allocate per request.
+    let mut read_buf: Vec<u8> = Vec::with_capacity(1024);
     let reader_result: Result<(), WireError> = loop {
-        let req: Request = match read_frame(&mut reader).await {
+        let req: Request = match read_frame_with_buf(&mut reader, &mut read_buf).await {
             Ok(r) => r,
             Err(WireError::Closed) => break Ok(()),
             Err(e) => break Err(e),
@@ -262,33 +288,19 @@ async fn handle_subscribe(
 
     let handle = tokio::spawn(async move {
         loop {
-            let payload = match rx.recv().await {
-                Ok(p) => (*p).clone(),
+            let payload: Arc<Value> = match rx.recv().await {
+                Ok(p) => p,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    json!({"lagged": n})
+                    Arc::new(json!({"lagged": n}))
                 }
             };
-            let event = Event {
+            let event = EventOut {
                 sub: sub_id,
-                topic: topic_name.into(),
+                topic: Cow::Borrowed(topic_name),
                 data: payload,
             };
-            let bytes = match serde_json::to_vec(&event) {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to encode event");
-                    continue;
-                }
-            };
-            if out_tx_fwd
-                .send(OutFrame {
-                    kind: WriteFrameKind::Event,
-                    bytes,
-                })
-                .await
-                .is_err()
-            {
+            if out_tx_fwd.send(OutFrame::Event(event)).await.is_err() {
                 break;
             }
         }
@@ -323,19 +335,8 @@ async fn handle_unsubscribe(req: &Request, subs: &Mutex<HashMap<u64, JoinHandle<
 }
 
 async fn send_response(out_tx: &mpsc::Sender<OutFrame>, resp: Response) {
-    let bytes = match serde_json::to_vec(&resp) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to encode response");
-            return;
-        }
-    };
-    let _ = out_tx
-        .send(OutFrame {
-            kind: WriteFrameKind::Response,
-            bytes,
-        })
-        .await;
+    // best-effort; the writer task may have shut down if the connection closed.
+    let _ = out_tx.send(OutFrame::Response(resp)).await;
 }
 
 #[cfg(test)]

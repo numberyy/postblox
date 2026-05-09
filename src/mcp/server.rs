@@ -178,6 +178,7 @@ impl McpBridge {
                     }));
                 }
                 Err(error) => {
+                    // best-effort fan-out; subscribers may have unsubscribed since the lookup.
                     let _ = out_tx
                         .send(protocol::notification(
                             NOTIFICATION_ERROR_METHOD,

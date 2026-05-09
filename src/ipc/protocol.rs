@@ -34,6 +34,11 @@ pub struct Response {
 }
 
 /// Daemon → client, pushed for an active subscription.
+///
+/// The server encodes events from `EventOut` (`super::server::EventOut`)
+/// which holds the topic as `&'static str`; the wire shape is identical.
+/// Client-side `Event` keeps `String` so existing consumers can call
+/// `event.topic.as_str()` without lifetime bounds.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Event {
     pub sub: u64,
@@ -44,6 +49,7 @@ pub struct Event {
 
 /// Tagged error used inside [`Response`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
 pub struct RpcError {
     pub code: String,
     pub message: String,
@@ -75,6 +81,7 @@ impl RpcError {
 /// know about new frame kinds we add later.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
+#[non_exhaustive]
 pub enum Frame {
     Request(Request),
     Response(Response),

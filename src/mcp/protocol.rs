@@ -5,6 +5,7 @@ pub const JSONRPC_VERSION: &str = "2.0";
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Incoming {
     Request {
         id: Value,
@@ -19,6 +20,7 @@ pub enum Incoming {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct JsonRpcError {
     pub code: i64,
     pub message: String,
