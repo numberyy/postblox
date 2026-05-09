@@ -8,7 +8,7 @@ use thiserror::Error;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, Instant};
+use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::ipc::client::{Client, ClientError};
@@ -117,14 +117,12 @@ impl DaemonBridge for IpcDaemon {
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
     pub approval_timeout: Duration,
-    pub approval_poll_interval: Duration,
 }
 
 impl Default for BridgeConfig {
     fn default() -> Self {
         Self {
             approval_timeout: Duration::from_secs(60),
-            approval_poll_interval: Duration::from_millis(200),
         }
     }
 }
@@ -314,23 +312,50 @@ impl McpBridge {
     }
 
     async fn wait_for_approval(&self, id: Uuid) -> Result<ApprovalState, BridgeError> {
-        let deadline = Instant::now() + self.config.approval_timeout;
+        // Subscribe before checking current state so a decision published
+        // between the check and the wait cannot be missed.
+        let mut events = self.daemon.subscribe(Topic::McpApprovalDecided).await?;
+
+        // Catch decisions made before the approval was created or between
+        // create and subscribe (e.g. an out-of-band decide).
+        let approval = self.get_approval(id).await?;
+        if approval.state != ApprovalState::Pending {
+            return Ok(approval.state);
+        }
+
+        let timeout = sleep(self.config.approval_timeout);
+        tokio::pin!(timeout);
+
         loop {
-            let now = Instant::now();
-            if now >= deadline {
-                return self.expire_approval(id).await;
-            }
-
-            let sleep_for = self
-                .config
-                .approval_poll_interval
-                .min(deadline.saturating_duration_since(now));
-            sleep(sleep_for).await;
-
-            let approval = self.get_approval(id).await?;
-            match approval.state {
-                ApprovalState::Pending => {}
-                state => return Ok(state),
+            tokio::select! {
+                biased;
+                _ = &mut timeout => {
+                    return self.expire_approval(id).await;
+                }
+                event = events.recv() => {
+                    match event {
+                        Some(event) => {
+                            if let Some(state) = match_decided_event(id, &event) {
+                                return Ok(state);
+                            }
+                            // Either a decision for a different approval, or a
+                            // "lagged" notice from the IPC layer; on lag we
+                            // re-fetch so we don't miss our own decision.
+                            if event_is_lagged(&event) {
+                                let approval = self.get_approval(id).await?;
+                                if approval.state != ApprovalState::Pending {
+                                    return Ok(approval.state);
+                                }
+                            }
+                        }
+                        None => {
+                            // Subscription dropped; fall back to one DB read so
+                            // we don't busy-loop. Pending here means the daemon
+                            // is gone — surface the current state.
+                            return Ok(self.get_approval(id).await?.state);
+                        }
+                    }
+                }
             }
         }
     }
@@ -557,6 +582,28 @@ fn notification_topics() -> [Topic; 5] {
     ]
 }
 
+/// Returns the decided state if `event` is an `mcp.approval_decided` payload
+/// for the given approval id and carries a parseable `state` field.
+fn match_decided_event(id: Uuid, event: &Event) -> Option<ApprovalState> {
+    let payload = event.data.as_object()?;
+    let event_id = payload.get("approval_id").and_then(Value::as_str)?;
+    if event_id.parse::<Uuid>().ok()? != id {
+        return None;
+    }
+    let state = payload.get("state").and_then(Value::as_str)?;
+    state.parse::<ApprovalState>().ok()
+}
+
+/// The IPC layer surfaces a dropped-broadcast notice as `{"lagged": n}` —
+/// when we see it on the approval topic we re-fetch our own approval to
+/// avoid missing the decision.
+fn event_is_lagged(event: &Event) -> bool {
+    event
+        .data
+        .as_object()
+        .is_some_and(|m| m.contains_key("lagged"))
+}
+
 fn tool_result(value: Value) -> Value {
     json!({
         "content": [
@@ -711,8 +758,7 @@ mod tests {
         McpBridge::new(
             mock,
             BridgeConfig {
-                approval_timeout: Duration::from_millis(20),
-                approval_poll_interval: Duration::from_millis(2),
+                approval_timeout: Duration::from_millis(50),
             },
         )
     }
@@ -923,6 +969,180 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(ops.contains(&"mcp.approval.decide".to_string()));
         assert!(!ops.contains(&"draft.delete".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_required_approval_broadcast_wakes_waiter_before_timeout() {
+        // Approval starts pending; we simulate a decision arriving via the
+        // broadcast subscription, not via DB polling. The timeout is set far
+        // higher than the test runtime, so any non-broadcast wakeup would
+        // either time out or never arrive.
+        let mock = MockDaemon::new();
+        mock.set_approval_get_state(ApprovalState::Pending);
+        let bridge = McpBridge::new(
+            mock.clone(),
+            BridgeConfig {
+                approval_timeout: Duration::from_secs(30),
+            },
+        );
+        let approval_id = mock.approval_id;
+
+        let bridge_for_task = bridge.clone();
+        let waiter = tokio::spawn(async move {
+            bridge_for_task
+                .handle_line(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"postblox_draft_delete","arguments":{"id":"00000000-0000-0000-0000-000000000001"}}}"#,
+                )
+                .await
+                .unwrap()
+        });
+
+        // Wait until wait_for_approval has subscribed.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if mock
+                .event_senders
+                .lock()
+                .unwrap()
+                .contains_key(&Topic::McpApprovalDecided)
+            {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("subscriber never registered");
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+
+        let started = tokio::time::Instant::now();
+        mock.emit(
+            Topic::McpApprovalDecided,
+            json!({
+                "approval_id": approval_id,
+                "tool": "postblox_draft_delete",
+                "state": "allowed",
+                "decided_by": "user:test",
+            }),
+        )
+        .await;
+
+        let response = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter did not return — broadcast wakeup failed")
+            .unwrap();
+        assert!(response.get("error").is_none(), "{response:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "broadcast wakeup took {:?}",
+            started.elapsed()
+        );
+
+        let ops = mock
+            .calls()
+            .into_iter()
+            .map(|(op, _)| op)
+            .collect::<Vec<_>>();
+        // The forward must run after the broadcast resolved the wait.
+        assert!(ops.contains(&"draft.delete".to_string()));
+        // No timeout-driven decide should have been issued.
+        assert!(!ops.contains(&"mcp.approval.decide".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_required_approval_broadcast_for_other_id_is_ignored() {
+        // A decision for a different approval id must NOT wake our waiter.
+        let mock = MockDaemon::new();
+        mock.set_approval_get_state(ApprovalState::Pending);
+        let bridge = McpBridge::new(
+            mock.clone(),
+            BridgeConfig {
+                approval_timeout: Duration::from_millis(80),
+            },
+        );
+
+        let bridge_for_task = bridge.clone();
+        let waiter = tokio::spawn(async move {
+            bridge_for_task
+                .handle_line(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"postblox_draft_delete","arguments":{"id":"00000000-0000-0000-0000-000000000001"}}}"#,
+                )
+                .await
+                .unwrap()
+        });
+
+        // Wait until subscribed.
+        for _ in 0..200 {
+            if mock
+                .event_senders
+                .lock()
+                .unwrap()
+                .contains_key(&Topic::McpApprovalDecided)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+
+        // Emit a decision for a different approval id.
+        mock.emit(
+            Topic::McpApprovalDecided,
+            json!({
+                "approval_id": Uuid::new_v4(),
+                "tool": "postblox_draft_delete",
+                "state": "allowed",
+                "decided_by": "user:test",
+            }),
+        )
+        .await;
+
+        let response = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        // Wrong-id event was ignored; the wait expired via timeout instead.
+        assert_eq!(response["error"]["data"]["code"], "approval_expired");
+    }
+
+    #[test]
+    fn test_match_decided_event_filters_by_approval_id_and_parses_state() {
+        let want = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let event = |id: Uuid, state: &str| Event {
+            sub: 1,
+            topic: Topic::McpApprovalDecided.as_str().into(),
+            data: json!({"approval_id": id, "state": state}),
+        };
+        assert_eq!(
+            match_decided_event(want, &event(want, "allowed")),
+            Some(ApprovalState::Allowed)
+        );
+        assert_eq!(
+            match_decided_event(want, &event(want, "denied")),
+            Some(ApprovalState::Denied)
+        );
+        assert_eq!(match_decided_event(want, &event(other, "allowed")), None);
+        let bad_state = Event {
+            sub: 1,
+            topic: Topic::McpApprovalDecided.as_str().into(),
+            data: json!({"approval_id": want, "state": "garbage"}),
+        };
+        assert_eq!(match_decided_event(want, &bad_state), None);
+    }
+
+    #[test]
+    fn test_event_is_lagged_only_matches_lagged_payload() {
+        let lagged = Event {
+            sub: 1,
+            topic: Topic::McpApprovalDecided.as_str().into(),
+            data: json!({"lagged": 7}),
+        };
+        let normal = Event {
+            sub: 1,
+            topic: Topic::McpApprovalDecided.as_str().into(),
+            data: json!({"approval_id": Uuid::new_v4(), "state": "allowed"}),
+        };
+        assert!(event_is_lagged(&lagged));
+        assert!(!event_is_lagged(&normal));
     }
 
     #[tokio::test]
