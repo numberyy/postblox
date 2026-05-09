@@ -2116,3 +2116,350 @@ async fn audit_actor(
         tracing::warn!(action, error = %e, "audit record failed");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Inline coverage for the lowest-level dispatcher units — argument
+    //! parsing helpers and a handful of DB-only op handlers. End-to-end
+    //! coverage over the IPC seam lives in `tests/ipc_integration.rs`;
+    //! these tests exist so refactors of the helpers and read-only ops
+    //! can be validated without spinning up a full server.
+    use super::*;
+    use crate::db::test_pool;
+    use serde_json::json;
+
+    // ---- pure helper tests -------------------------------------------------
+
+    #[test]
+    fn test_parse_uuid_missing_key_returns_bad_args() {
+        let err = parse_uuid(&json!({}), "id").unwrap_err();
+        assert_eq!(err.code, "bad_args");
+        assert!(err.message.contains("missing 'id'"), "msg: {}", err.message);
+    }
+
+    #[test]
+    fn test_parse_uuid_invalid_uuid_returns_bad_args() {
+        let err = parse_uuid(&json!({"id": "not-a-uuid"}), "id").unwrap_err();
+        assert_eq!(err.code, "bad_args");
+        assert!(err.message.starts_with("bad 'id'"), "msg: {}", err.message);
+    }
+
+    #[test]
+    fn test_parse_uuid_valid_returns_uuid() {
+        let id = uuid::Uuid::new_v4();
+        let parsed = parse_uuid(&json!({"id": id.to_string()}), "id").unwrap();
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn test_parse_str_missing_returns_bad_args() {
+        let err = parse_str(&json!({}), "tool").unwrap_err();
+        assert_eq!(err.code, "bad_args");
+        assert!(err.message.contains("missing 'tool'"));
+    }
+
+    #[test]
+    fn test_parse_str_empty_string_returns_bad_args() {
+        let err = parse_str(&json!({"tool": ""}), "tool").unwrap_err();
+        assert_eq!(err.code, "bad_args");
+    }
+
+    #[test]
+    fn test_parse_str_valid_returns_borrowed_str() {
+        let v = json!({"tool": "search"});
+        assert_eq!(parse_str(&v, "tool").unwrap(), "search");
+    }
+
+    #[test]
+    fn test_optional_str_missing_returns_none() {
+        assert!(optional_str(&json!({}), "note").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_optional_str_null_returns_none() {
+        assert!(optional_str(&json!({"note": null}), "note")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_optional_str_non_string_returns_bad_args() {
+        let err = optional_str(&json!({"note": 7}), "note").unwrap_err();
+        assert_eq!(err.code, "bad_args");
+        assert!(err.message.contains("'note' must be a string"));
+    }
+
+    #[test]
+    fn test_optional_str_valid_returns_some() {
+        let v = json!({"note": "hi"});
+        assert_eq!(optional_str(&v, "note").unwrap(), Some("hi"));
+    }
+
+    #[test]
+    fn test_actor_from_args_missing_field_defaults_to_user() {
+        assert_eq!(actor_from_args(&json!({})), "user");
+    }
+
+    #[test]
+    fn test_actor_from_args_explicit_user_passes_through() {
+        assert_eq!(actor_from_args(&json!({"_actor": "user"})), "user");
+    }
+
+    #[test]
+    fn test_actor_from_args_mcp_prefix_passes_through() {
+        assert_eq!(
+            actor_from_args(&json!({"_actor": "mcp:gmail-bot"})),
+            "mcp:gmail-bot"
+        );
+    }
+
+    #[test]
+    fn test_actor_from_args_disallowed_actor_falls_back_to_user() {
+        // Anything not "user" or "mcp:<name>" must not be honoured —
+        // the audit-log actor field would otherwise be a free-form
+        // injection sink.
+        assert_eq!(actor_from_args(&json!({"_actor": "root"})), "user");
+        assert_eq!(actor_from_args(&json!({"_actor": "mcp:"})), "user");
+    }
+
+    #[test]
+    fn test_actor_is_allowed_rejects_overlong_mcp_name() {
+        let long = format!("mcp:{}", "a".repeat(129));
+        assert!(!actor_is_allowed(&long));
+        let just_at_limit = format!("mcp:{}", "a".repeat(128));
+        assert!(actor_is_allowed(&just_at_limit));
+    }
+
+    #[test]
+    fn test_role_for_known_imap_names_maps_to_role() {
+        assert_eq!(role_for("INBOX"), FolderRole::Inbox);
+        assert_eq!(role_for("Sent"), FolderRole::Sent);
+        assert_eq!(role_for("[Gmail]/Drafts"), FolderRole::Drafts);
+        assert_eq!(role_for("[Gmail]/Trash"), FolderRole::Trash);
+        assert_eq!(role_for("[Gmail]/All Mail"), FolderRole::All);
+        assert_eq!(role_for("Spam"), FolderRole::Spam);
+        assert_eq!(role_for("Starred"), FolderRole::Starred);
+    }
+
+    #[test]
+    fn test_role_for_unknown_name_maps_to_custom() {
+        assert_eq!(role_for("Receipts/2024"), FolderRole::Custom);
+    }
+
+    #[test]
+    fn test_parse_addr_array_non_array_returns_bad_args() {
+        let err = parse_addr_array(&json!("a@b.com"), "to_addrs").unwrap_err();
+        assert_eq!(err.code, "bad_args");
+        assert!(err.message.contains("must be an array"));
+    }
+
+    #[test]
+    fn test_parse_addr_array_blank_entry_returns_bad_args() {
+        let err = parse_addr_array(&json!(["  "]), "to_addrs").unwrap_err();
+        assert_eq!(err.code, "bad_args");
+        assert!(err.message.contains("must not contain empty addresses"));
+    }
+
+    #[test]
+    fn test_parse_addr_array_trims_and_returns_strings() {
+        let parsed = parse_addr_array(&json!([" a@x.com ", "b@y.com"]), "to_addrs").unwrap();
+        assert_eq!(parsed, vec!["a@x.com".to_string(), "b@y.com".to_string()]);
+    }
+
+    #[test]
+    fn test_all_recipients_empty_returns_bad_args() {
+        let err = all_recipients(&[], &[], &[]).unwrap_err();
+        assert_eq!(err.code, "bad_args");
+        assert!(err.message.contains("at least one recipient"));
+    }
+
+    #[test]
+    fn test_all_recipients_concatenates_to_cc_bcc_in_order() {
+        let to = vec!["t@x".to_string()];
+        let cc = vec!["c@x".to_string()];
+        let bcc = vec!["b@x".to_string()];
+        assert_eq!(
+            all_recipients(&to, &cc, &bcc).unwrap(),
+            vec!["t@x".to_string(), "c@x".to_string(), "b@x".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_pick_attachment_bytes_prefers_content_id_match() {
+        use crate::mail::parser::{Disposition, ParsedAttachment};
+        let parsed = vec![
+            ParsedAttachment {
+                filename: "wrong.txt".into(),
+                content_type: "text/plain".into(),
+                data: b"by-name".to_vec(),
+                disposition: Disposition::Attachment,
+                content_id: Some("cid-1".into()),
+            },
+            ParsedAttachment {
+                filename: "logo.png".into(),
+                content_type: "image/png".into(),
+                data: b"by-cid".to_vec(),
+                disposition: Disposition::Inline,
+                content_id: Some("cid-target".into()),
+            },
+        ];
+        let attachment = crate::models::Attachment {
+            id: uuid::Uuid::new_v4(),
+            message_id: uuid::Uuid::new_v4(),
+            filename: "logo.png".into(),
+            content_type: "image/png".into(),
+            content_id: Some("cid-target".into()),
+            size_bytes: 6,
+            disposition: crate::models::AttachmentDisposition::Inline,
+            storage_path: String::new(),
+            created_at: chrono::Utc::now(),
+        };
+        let bytes = pick_attachment_bytes(parsed, &attachment).unwrap();
+        assert_eq!(bytes, b"by-cid");
+    }
+
+    #[test]
+    fn test_pick_attachment_bytes_falls_back_to_filename_when_cid_absent() {
+        use crate::mail::parser::{Disposition, ParsedAttachment};
+        let parsed = vec![ParsedAttachment {
+            filename: "report.pdf".into(),
+            content_type: "application/pdf".into(),
+            data: b"pdf-bytes".to_vec(),
+            disposition: Disposition::Attachment,
+            content_id: None,
+        }];
+        let attachment = crate::models::Attachment {
+            id: uuid::Uuid::new_v4(),
+            message_id: uuid::Uuid::new_v4(),
+            filename: "report.pdf".into(),
+            content_type: "application/pdf".into(),
+            content_id: None,
+            size_bytes: 9,
+            disposition: crate::models::AttachmentDisposition::Attachment,
+            storage_path: String::new(),
+            created_at: chrono::Utc::now(),
+        };
+        assert_eq!(
+            pick_attachment_bytes(parsed, &attachment).unwrap(),
+            b"pdf-bytes"
+        );
+    }
+
+    #[test]
+    fn test_map_smtp_error_auth_maps_to_auth_failed_code() {
+        let err = map_smtp_error(SmtpError::Auth("nope".into()));
+        assert_eq!(err.code, "auth_failed");
+        assert_eq!(err.message, "nope");
+    }
+
+    #[test]
+    fn test_map_smtp_error_invalid_request_maps_to_bad_args() {
+        let err = map_smtp_error(SmtpError::InvalidRequest("missing to".into()));
+        assert_eq!(err.code, "bad_args");
+    }
+
+    #[test]
+    fn test_map_smtp_error_transient_maps_to_internal() {
+        let err = map_smtp_error(SmtpError::Transient("retry later".into()));
+        assert_eq!(err.code, "internal");
+    }
+
+    #[test]
+    fn test_map_attachment_read_error_not_found_maps_to_bad_args() {
+        let err = map_attachment_read_error(
+            "/nope.txt",
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+        );
+        assert_eq!(err.code, "bad_args");
+        assert!(err.message.contains("file not found"));
+    }
+
+    #[test]
+    fn test_map_attachment_export_error_already_exists_maps_to_bad_args() {
+        let err =
+            map_attachment_export_error(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+        assert_eq!(err.code, "bad_args");
+    }
+
+    #[test]
+    fn test_map_attachment_export_error_other_maps_to_internal() {
+        let err = map_attachment_export_error(std::io::Error::other("disk full"));
+        assert_eq!(err.code, "internal");
+    }
+
+    // ---- DB-only op handler tests -----------------------------------------
+
+    #[tokio::test]
+    async fn test_op_account_list_empty_pool_returns_empty_array() {
+        let pool = test_pool().await;
+        let value = op_account_list(&pool).await.unwrap();
+        assert_eq!(value, json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_op_audit_list_empty_pool_returns_empty_array() {
+        let pool = test_pool().await;
+        let value = op_audit_list(&pool, json!({})).await.unwrap();
+        assert_eq!(value, json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_op_audit_list_after_record_returns_entry() {
+        let pool = test_pool().await;
+        // The audit() helper writes through the same `db::audit::record`
+        // path the live ops use, so the read is exercised end-to-end.
+        audit(&pool, "test.action", Some("target-1"), &json!({"k": 1})).await;
+        let value = op_audit_list(&pool, json!({"limit": 10})).await.unwrap();
+        let arr = value.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["action"], "test.action");
+        assert_eq!(arr[0]["actor"], "user");
+        assert_eq!(arr[0]["target"], "target-1");
+    }
+
+    #[tokio::test]
+    async fn test_op_message_get_unknown_id_returns_null() {
+        let pool = test_pool().await;
+        let id = uuid::Uuid::new_v4();
+        let value = op_message_get(&pool, json!({"id": id.to_string()}))
+            .await
+            .unwrap();
+        assert!(value.is_null(), "expected null, got {value}");
+    }
+
+    #[tokio::test]
+    async fn test_op_message_get_missing_id_returns_bad_args() {
+        let pool = test_pool().await;
+        let err = op_message_get(&pool, json!({})).await.unwrap_err();
+        assert_eq!(err.code, "bad_args");
+    }
+
+    #[tokio::test]
+    async fn test_op_search_empty_query_returns_bad_args() {
+        let pool = test_pool().await;
+        let err = op_search(&pool, json!({"q": ""})).await.unwrap_err();
+        assert_eq!(err.code, "bad_args");
+    }
+
+    #[tokio::test]
+    async fn test_op_search_missing_query_returns_bad_args() {
+        let pool = test_pool().await;
+        let err = op_search(&pool, json!({})).await.unwrap_err();
+        assert_eq!(err.code, "bad_args");
+        assert!(err.message.contains("missing 'q'"));
+    }
+
+    #[tokio::test]
+    async fn test_op_mcp_gate_list_empty_pool_returns_empty_array() {
+        let pool = test_pool().await;
+        let value = op_mcp_gate_list(&pool, json!({})).await.unwrap();
+        assert_eq!(value, json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_op_mcp_approval_list_empty_pool_returns_empty_array() {
+        let pool = test_pool().await;
+        let value = op_mcp_approval_list(&pool, json!({})).await.unwrap();
+        assert_eq!(value, json!([]));
+    }
+}
