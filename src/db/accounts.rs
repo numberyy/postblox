@@ -3,6 +3,7 @@ use serde::Deserialize;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::db::DbError;
 use crate::models::{Account, AuthKind, SyncStatus};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -24,7 +25,7 @@ const SELECT: &str = "\
     smtp_host, smtp_port, smtp_use_tls, smtp_starttls, secret_ref, last_synced_at, \
     sync_status, sync_error, created_at, updated_at";
 
-pub async fn create(pool: &SqlitePool, new: &NewAccount) -> Result<Account, sqlx::Error> {
+pub async fn create(pool: &SqlitePool, new: &NewAccount) -> Result<Account, DbError> {
     let id = Uuid::new_v4();
     let q = format!(
         "INSERT INTO accounts \
@@ -32,7 +33,7 @@ pub async fn create(pool: &SqlitePool, new: &NewAccount) -> Result<Account, sqlx
           smtp_host, smtp_port, smtp_use_tls, smtp_starttls) \
          VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING {SELECT}"
     );
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(id)
         .bind(&new.email)
         .bind(&new.display_name)
@@ -45,25 +46,25 @@ pub async fn create(pool: &SqlitePool, new: &NewAccount) -> Result<Account, sqlx
         .bind(new.smtp_use_tls)
         .bind(new.smtp_starttls)
         .fetch_one(pool)
-        .await
+        .await?)
 }
 
-pub async fn list(pool: &SqlitePool) -> Result<Vec<Account>, sqlx::Error> {
+pub async fn list(pool: &SqlitePool) -> Result<Vec<Account>, DbError> {
     let q = format!("SELECT {SELECT} FROM accounts ORDER BY created_at");
-    sqlx::query_as(&q).fetch_all(pool).await
+    Ok(sqlx::query_as(&q).fetch_all(pool).await?)
 }
 
-pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Account>, sqlx::Error> {
+pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Account>, DbError> {
     let q = format!("SELECT {SELECT} FROM accounts WHERE id = ?");
-    sqlx::query_as(&q).bind(id).fetch_optional(pool).await
+    Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
 
-pub async fn get_by_email(pool: &SqlitePool, email: &str) -> Result<Option<Account>, sqlx::Error> {
+pub async fn get_by_email(pool: &SqlitePool, email: &str) -> Result<Option<Account>, DbError> {
     let q = format!("SELECT {SELECT} FROM accounts WHERE email = ?");
-    sqlx::query_as(&q).bind(email).fetch_optional(pool).await
+    Ok(sqlx::query_as(&q).bind(email).fetch_optional(pool).await?)
 }
 
-pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     let res = sqlx::query("DELETE FROM accounts WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -75,7 +76,7 @@ pub async fn set_secret_ref(
     pool: &SqlitePool,
     id: Uuid,
     secret_ref: Option<&str>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), DbError> {
     sqlx::query(
         "UPDATE accounts SET secret_ref = ?, \
          updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
@@ -93,7 +94,7 @@ pub async fn update_sync(
     status: SyncStatus,
     error: Option<&str>,
     last_synced_at: Option<DateTime<Utc>>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), DbError> {
     sqlx::query(
         "UPDATE accounts SET sync_status = ?, sync_error = ?, \
          last_synced_at = COALESCE(?, last_synced_at), \

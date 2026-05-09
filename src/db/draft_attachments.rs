@@ -5,6 +5,7 @@
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::db::DbError;
 use crate::models::DraftAttachment;
 
 /// Maximum bytes for any single draft attachment (and the aggregate cap
@@ -25,7 +26,7 @@ pub struct NewDraftAttachment {
 pub async fn create(
     pool: &SqlitePool,
     new: &NewDraftAttachment,
-) -> Result<DraftAttachment, sqlx::Error> {
+) -> Result<DraftAttachment, DbError> {
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO draft_attachments \
@@ -40,27 +41,27 @@ pub async fn create(
     .bind(&new.content)
     .execute(pool)
     .await?;
-    sqlx::query_as::<_, DraftAttachment>(&format!(
+    Ok(sqlx::query_as::<_, DraftAttachment>(&format!(
         "SELECT {COLS} FROM draft_attachments WHERE id = ?"
     ))
     .bind(id)
     .fetch_one(pool)
-    .await
+    .await?)
 }
 
 pub async fn list_for_draft(
     pool: &SqlitePool,
     draft_id: Uuid,
-) -> Result<Vec<DraftAttachment>, sqlx::Error> {
-    sqlx::query_as::<_, DraftAttachment>(&format!(
+) -> Result<Vec<DraftAttachment>, DbError> {
+    Ok(sqlx::query_as::<_, DraftAttachment>(&format!(
         "SELECT {COLS} FROM draft_attachments WHERE draft_id = ? ORDER BY created_at, id"
     ))
     .bind(draft_id)
     .fetch_all(pool)
-    .await
+    .await?)
 }
 
-pub async fn load_content(pool: &SqlitePool, id: Uuid) -> Result<Option<Vec<u8>>, sqlx::Error> {
+pub async fn load_content(pool: &SqlitePool, id: Uuid) -> Result<Option<Vec<u8>>, DbError> {
     let row: Option<(Vec<u8>,)> =
         sqlx::query_as("SELECT content FROM draft_attachments WHERE id = ?")
             .bind(id)
@@ -69,10 +70,7 @@ pub async fn load_content(pool: &SqlitePool, id: Uuid) -> Result<Option<Vec<u8>>
     Ok(row.map(|r| r.0))
 }
 
-pub async fn aggregate_size_for_draft(
-    pool: &SqlitePool,
-    draft_id: Uuid,
-) -> Result<i64, sqlx::Error> {
+pub async fn aggregate_size_for_draft(pool: &SqlitePool, draft_id: Uuid) -> Result<i64, DbError> {
     let row: (Option<i64>,) =
         sqlx::query_as("SELECT SUM(size_bytes) FROM draft_attachments WHERE draft_id = ?")
             .bind(draft_id)
@@ -81,7 +79,7 @@ pub async fn aggregate_size_for_draft(
     Ok(row.0.unwrap_or(0))
 }
 
-pub async fn delete_all_for_draft(pool: &SqlitePool, draft_id: Uuid) -> Result<u64, sqlx::Error> {
+pub async fn delete_all_for_draft(pool: &SqlitePool, draft_id: Uuid) -> Result<u64, DbError> {
     let r = sqlx::query("DELETE FROM draft_attachments WHERE draft_id = ?")
         .bind(draft_id)
         .execute(pool)

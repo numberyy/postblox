@@ -2,6 +2,7 @@ use serde::Deserialize;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::db::DbError;
 use crate::models::{Folder, FolderRole};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -17,13 +18,13 @@ const SELECT: &str = "\
     id, account_id, name, delimiter, role, uid_validity, uid_next, last_seen_uid, \
     selectable, created_at";
 
-pub async fn create(pool: &SqlitePool, new: &NewFolder) -> Result<Folder, sqlx::Error> {
+pub async fn create(pool: &SqlitePool, new: &NewFolder) -> Result<Folder, DbError> {
     let id = Uuid::new_v4();
     let q = format!(
         "INSERT INTO folders (id, account_id, name, delimiter, role, selectable) \
          VALUES (?,?,?,?,?,?) RETURNING {SELECT}"
     );
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(id)
         .bind(new.account_id)
         .bind(&new.name)
@@ -31,12 +32,12 @@ pub async fn create(pool: &SqlitePool, new: &NewFolder) -> Result<Folder, sqlx::
         .bind(new.role)
         .bind(new.selectable)
         .fetch_one(pool)
-        .await
+        .await?)
 }
 
 /// Insert if missing, otherwise update name/delimiter/role/selectable.
 /// Used by IMAP LIST sync.
-pub async fn upsert(pool: &SqlitePool, new: &NewFolder) -> Result<Folder, sqlx::Error> {
+pub async fn upsert(pool: &SqlitePool, new: &NewFolder) -> Result<Folder, DbError> {
     if let Some(existing) = get_by_name(pool, new.account_id, &new.name).await? {
         sqlx::query("UPDATE folders SET delimiter = ?, role = ?, selectable = ? WHERE id = ?")
             .bind(&new.delimiter)
@@ -47,35 +48,32 @@ pub async fn upsert(pool: &SqlitePool, new: &NewFolder) -> Result<Folder, sqlx::
             .await?;
         return Ok(get(pool, existing.id)
             .await?
-            .expect("folder we just updated"));
+            .expect("BUG: folder upserted moments ago must exist"));
     }
     create(pool, new).await
 }
 
-pub async fn list_by_account(
-    pool: &SqlitePool,
-    account_id: Uuid,
-) -> Result<Vec<Folder>, sqlx::Error> {
+pub async fn list_by_account(pool: &SqlitePool, account_id: Uuid) -> Result<Vec<Folder>, DbError> {
     let q = format!("SELECT {SELECT} FROM folders WHERE account_id = ? ORDER BY name");
-    sqlx::query_as(&q).bind(account_id).fetch_all(pool).await
+    Ok(sqlx::query_as(&q).bind(account_id).fetch_all(pool).await?)
 }
 
-pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Folder>, sqlx::Error> {
+pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Folder>, DbError> {
     let q = format!("SELECT {SELECT} FROM folders WHERE id = ?");
-    sqlx::query_as(&q).bind(id).fetch_optional(pool).await
+    Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
 
 pub async fn get_by_name(
     pool: &SqlitePool,
     account_id: Uuid,
     name: &str,
-) -> Result<Option<Folder>, sqlx::Error> {
+) -> Result<Option<Folder>, DbError> {
     let q = format!("SELECT {SELECT} FROM folders WHERE account_id = ? AND name = ?");
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(account_id)
         .bind(name)
         .fetch_optional(pool)
-        .await
+        .await?)
 }
 
 pub async fn update_uid_state(
@@ -84,7 +82,7 @@ pub async fn update_uid_state(
     uid_validity: Option<i64>,
     uid_next: Option<i64>,
     last_seen_uid: Option<i64>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), DbError> {
     sqlx::query(
         "UPDATE folders SET uid_validity = COALESCE(?, uid_validity), \
          uid_next = COALESCE(?, uid_next), \
@@ -99,7 +97,7 @@ pub async fn update_uid_state(
     Ok(())
 }
 
-pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM folders WHERE id = ?")
         .bind(id)
         .execute(pool)

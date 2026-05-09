@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::db::DbError;
 use crate::models::{ApprovalState, GateAction, McpApproval, McpGate};
 
 // -------- gates --------
@@ -16,36 +17,33 @@ pub async fn create_gate(
     arg_pattern: Option<&str>,
     action: GateAction,
     note: Option<&str>,
-) -> Result<McpGate, sqlx::Error> {
+) -> Result<McpGate, DbError> {
     let id = Uuid::new_v4();
     let q = format!(
         "INSERT INTO mcp_gates (id, tool, arg_pattern, action, note) \
          VALUES (?,?,?,?,?) RETURNING {GATE_SELECT}"
     );
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(id)
         .bind(tool)
         .bind(arg_pattern)
         .bind(action)
         .bind(note)
         .fetch_one(pool)
-        .await
+        .await?)
 }
 
-pub async fn list_gates(pool: &SqlitePool) -> Result<Vec<McpGate>, sqlx::Error> {
+pub async fn list_gates(pool: &SqlitePool) -> Result<Vec<McpGate>, DbError> {
     let q = format!("SELECT {GATE_SELECT} FROM mcp_gates ORDER BY tool, created_at");
-    sqlx::query_as(&q).fetch_all(pool).await
+    Ok(sqlx::query_as(&q).fetch_all(pool).await?)
 }
 
-pub async fn list_gates_for_tool(
-    pool: &SqlitePool,
-    tool: &str,
-) -> Result<Vec<McpGate>, sqlx::Error> {
+pub async fn list_gates_for_tool(pool: &SqlitePool, tool: &str) -> Result<Vec<McpGate>, DbError> {
     let q = format!("SELECT {GATE_SELECT} FROM mcp_gates WHERE tool = ? ORDER BY created_at");
-    sqlx::query_as(&q).bind(tool).fetch_all(pool).await
+    Ok(sqlx::query_as(&q).bind(tool).fetch_all(pool).await?)
 }
 
-pub async fn delete_gate(pool: &SqlitePool, id: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn delete_gate(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM mcp_gates WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -62,24 +60,24 @@ pub async fn create_approval(
     tool: &str,
     args: &serde_json::Value,
     summary: &str,
-) -> Result<McpApproval, sqlx::Error> {
+) -> Result<McpApproval, DbError> {
     let id = Uuid::new_v4();
     let q = format!(
         "INSERT INTO mcp_approvals (id, tool, args, summary) \
          VALUES (?,?,?,?) RETURNING {APPROVAL_SELECT}"
     );
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(id)
         .bind(tool)
         .bind(args)
         .bind(summary)
         .fetch_one(pool)
-        .await
+        .await?)
 }
 
-pub async fn get_approval(pool: &SqlitePool, id: Uuid) -> Result<Option<McpApproval>, sqlx::Error> {
+pub async fn get_approval(pool: &SqlitePool, id: Uuid) -> Result<Option<McpApproval>, DbError> {
     let q = format!("SELECT {APPROVAL_SELECT} FROM mcp_approvals WHERE id = ?");
-    sqlx::query_as(&q).bind(id).fetch_optional(pool).await
+    Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
 
 pub async fn list_approvals(
@@ -87,7 +85,7 @@ pub async fn list_approvals(
     state: Option<ApprovalState>,
     limit: i64,
     offset: i64,
-) -> Result<Vec<McpApproval>, sqlx::Error> {
+) -> Result<Vec<McpApproval>, DbError> {
     let limit = limit.clamp(1, 500);
     let offset = offset.max(0);
     // Tie-break on rowid so pagination is deterministic when timestamps
@@ -127,7 +125,7 @@ pub async fn decide(
     id: Uuid,
     new_state: ApprovalState,
     decided_by: &str,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, DbError> {
     debug_assert!(matches!(
         new_state,
         ApprovalState::Allowed | ApprovalState::Denied | ApprovalState::Expired

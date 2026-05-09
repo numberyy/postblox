@@ -68,11 +68,11 @@ pub(crate) async fn test_pool() -> SqlitePool {
         .max_connections(1)
         .connect_with(opts)
         .await
-        .expect("connect in-memory sqlite");
+        .expect("BUG: test_pool: connect in-memory sqlite");
     sqlx::migrate!("./migrations")
         .run(&pool)
         .await
-        .expect("run migrations");
+        .expect("BUG: test_pool: run migrations");
     pool
 }
 

@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::db::DbError;
 use crate::models::Thread;
 
 const SELECT: &str = "\
@@ -12,37 +13,37 @@ pub async fn create(
     account_id: Uuid,
     external_id: Option<&str>,
     subject: Option<&str>,
-) -> Result<Thread, sqlx::Error> {
+) -> Result<Thread, DbError> {
     let id = Uuid::new_v4();
     let q = format!(
         "INSERT INTO threads (id, account_id, external_id, subject) \
          VALUES (?,?,?,?) RETURNING {SELECT}"
     );
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(id)
         .bind(account_id)
         .bind(external_id)
         .bind(subject)
         .fetch_one(pool)
-        .await
+        .await?)
 }
 
-pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Thread>, sqlx::Error> {
+pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Thread>, DbError> {
     let q = format!("SELECT {SELECT} FROM threads WHERE id = ?");
-    sqlx::query_as(&q).bind(id).fetch_optional(pool).await
+    Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
 
 pub async fn get_by_external_id(
     pool: &SqlitePool,
     account_id: Uuid,
     external_id: &str,
-) -> Result<Option<Thread>, sqlx::Error> {
+) -> Result<Option<Thread>, DbError> {
     let q = format!("SELECT {SELECT} FROM threads WHERE account_id = ? AND external_id = ?");
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(account_id)
         .bind(external_id)
         .fetch_optional(pool)
-        .await
+        .await?)
 }
 
 /// Recent threads for an account, newest first. Used by sidebar/list views
@@ -52,23 +53,23 @@ pub async fn list_recent(
     account_id: Uuid,
     limit: i64,
     offset: i64,
-) -> Result<Vec<Thread>, sqlx::Error> {
+) -> Result<Vec<Thread>, DbError> {
     let q = format!(
         "SELECT {SELECT} FROM threads WHERE account_id = ? \
          ORDER BY last_message_at DESC NULLS LAST, created_at DESC \
          LIMIT ? OFFSET ?"
     );
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(account_id)
         .bind(limit.clamp(1, 500))
         .bind(offset.max(0))
         .fetch_all(pool)
-        .await
+        .await?)
 }
 
 /// Recompute the thread's `message_count` and `last_message_at` from its
 /// messages. Cheap because messages are indexed by thread_id.
-pub async fn refresh_aggregates(pool: &SqlitePool, id: Uuid) -> Result<(), sqlx::Error> {
+pub async fn refresh_aggregates(pool: &SqlitePool, id: Uuid) -> Result<(), DbError> {
     sqlx::query(
         "UPDATE threads SET \
          message_count = (SELECT count(*) FROM messages WHERE thread_id = ?), \
@@ -87,7 +88,7 @@ pub async fn touch_last_message_at(
     pool: &SqlitePool,
     id: Uuid,
     when: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), DbError> {
     sqlx::query(
         "UPDATE threads SET last_message_at = ? \
          WHERE id = ? AND (last_message_at IS NULL OR last_message_at < ?)",
@@ -100,7 +101,7 @@ pub async fn touch_last_message_at(
     Ok(())
 }
 
-pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM threads WHERE id = ?")
         .bind(id)
         .execute(pool)

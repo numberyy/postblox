@@ -8,7 +8,10 @@ pub enum SyncError {
     Imap(#[from] crate::imap::ImapError),
 
     #[error("db: {0}")]
-    Db(#[from] sqlx::Error),
+    Db(#[from] crate::db::DbError),
+
+    #[error("attachment: {0}")]
+    Attachment(#[from] crate::attachments::AttachmentError),
 
     #[error("parse: {0}")]
     Parse(#[from] crate::mail::error::MailError),

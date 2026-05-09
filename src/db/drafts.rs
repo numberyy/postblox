@@ -2,6 +2,7 @@ use serde::Deserialize;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::db::DbError;
 use crate::models::Draft;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -25,7 +26,7 @@ const SELECT: &str = "\
     text_body, html_body, in_reply_to, references_header, remote_folder_id, \
     remote_uid, created_at, updated_at";
 
-pub async fn create(pool: &SqlitePool, new: &NewDraft) -> Result<Draft, sqlx::Error> {
+pub async fn create(pool: &SqlitePool, new: &NewDraft) -> Result<Draft, DbError> {
     let id = Uuid::new_v4();
     let q = format!(
         "INSERT INTO drafts \
@@ -33,7 +34,7 @@ pub async fn create(pool: &SqlitePool, new: &NewDraft) -> Result<Draft, sqlx::Er
           subject, text_body, html_body, in_reply_to, references_header) \
          VALUES (?,?,?,?,?,?,?,?,?,?,?) RETURNING {SELECT}"
     );
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(id)
         .bind(new.account_id)
         .bind(new.in_reply_to_msg)
@@ -46,7 +47,7 @@ pub async fn create(pool: &SqlitePool, new: &NewDraft) -> Result<Draft, sqlx::Er
         .bind(&new.in_reply_to)
         .bind(&new.references_header)
         .fetch_one(pool)
-        .await
+        .await?)
 }
 
 #[derive(Debug, Clone)]
@@ -63,14 +64,14 @@ pub async fn update(
     pool: &SqlitePool,
     id: Uuid,
     patch: &DraftPatch<'_>,
-) -> Result<Option<Draft>, sqlx::Error> {
+) -> Result<Option<Draft>, DbError> {
     let q = format!(
         "UPDATE drafts SET to_addrs=?, cc_addrs=?, bcc_addrs=?, subject=?, \
          text_body=?, html_body=?, \
          updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') \
          WHERE id=? RETURNING {SELECT}"
     );
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(patch.to_addrs)
         .bind(patch.cc_addrs)
         .bind(patch.bcc_addrs)
@@ -79,7 +80,7 @@ pub async fn update(
         .bind(patch.html_body)
         .bind(id)
         .fetch_optional(pool)
-        .await
+        .await?)
 }
 
 pub async fn set_remote(
@@ -87,7 +88,7 @@ pub async fn set_remote(
     id: Uuid,
     folder_id: Uuid,
     uid: i64,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), DbError> {
     sqlx::query("UPDATE drafts SET remote_folder_id = ?, remote_uid = ? WHERE id = ?")
         .bind(folder_id)
         .bind(uid)
@@ -97,20 +98,17 @@ pub async fn set_remote(
     Ok(())
 }
 
-pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Draft>, sqlx::Error> {
+pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Draft>, DbError> {
     let q = format!("SELECT {SELECT} FROM drafts WHERE id = ?");
-    sqlx::query_as(&q).bind(id).fetch_optional(pool).await
+    Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
 
-pub async fn list_by_account(
-    pool: &SqlitePool,
-    account_id: Uuid,
-) -> Result<Vec<Draft>, sqlx::Error> {
+pub async fn list_by_account(pool: &SqlitePool, account_id: Uuid) -> Result<Vec<Draft>, DbError> {
     let q = format!("SELECT {SELECT} FROM drafts WHERE account_id = ? ORDER BY updated_at DESC");
-    sqlx::query_as(&q).bind(account_id).fetch_all(pool).await
+    Ok(sqlx::query_as(&q).bind(account_id).fetch_all(pool).await?)
 }
 
-pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM drafts WHERE id = ?")
         .bind(id)
         .execute(pool)

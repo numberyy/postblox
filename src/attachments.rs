@@ -2,15 +2,28 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use crate::db;
+use crate::db::{self, DbError};
 use crate::mail::parser::{Disposition, ParsedAttachment};
 use crate::models::{Attachment, AttachmentDisposition};
 
 pub const PREVIEW_LIMIT_BYTES: usize = 16 * 1024;
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+
+#[derive(Debug, Error)]
+pub enum AttachmentError {
+    #[error("attachment '{filename}' exceeds {limit} byte limit")]
+    TooLarge { filename: String, limit: usize },
+    #[error("invalid attachment path: {}", path.display())]
+    BadPath { path: PathBuf },
+    #[error("db: {0}")]
+    Db(#[from] DbError),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentPreview {
@@ -32,7 +45,7 @@ pub async fn persist_parsed_for_message(
     pool: &SqlitePool,
     message_id: Uuid,
     attachments: &[ParsedAttachment],
-) -> Result<Vec<Attachment>, sqlx::Error> {
+) -> Result<Vec<Attachment>, AttachmentError> {
     if attachments.is_empty() {
         return Ok(Vec::new());
     }
@@ -41,10 +54,10 @@ pub async fn persist_parsed_for_message(
     let mut stored = Vec::with_capacity(attachments.len());
     for (index, attachment) in attachments.iter().enumerate() {
         if attachment.data.len() > MAX_ATTACHMENT_BYTES {
-            return Err(sqlx::Error::Protocol(format!(
-                "attachment '{}' exceeds {MAX_ATTACHMENT_BYTES} byte limit",
-                attachment.filename
-            )));
+            return Err(AttachmentError::TooLarge {
+                filename: attachment.filename.clone(),
+                limit: MAX_ATTACHMENT_BYTES,
+            });
         }
 
         let path = stored_attachment_path(&root, message_id, index, &attachment.filename);
@@ -153,15 +166,18 @@ pub async fn export_attachment(
     })
 }
 
-async fn attachment_root(pool: &SqlitePool) -> Result<PathBuf, sqlx::Error> {
+async fn attachment_root(pool: &SqlitePool) -> Result<PathBuf, AttachmentError> {
     if let Some(path) = std::env::var_os("POSTBLOX_ATTACHMENTS").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(path));
     }
 
-    let rows = sqlx::query("PRAGMA database_list").fetch_all(pool).await?;
+    let rows = sqlx::query("PRAGMA database_list")
+        .fetch_all(pool)
+        .await
+        .map_err(DbError::from)?;
     for row in rows {
-        let name: String = row.try_get("name")?;
-        let file: String = row.try_get("file")?;
+        let name: String = row.try_get("name").map_err(DbError::from)?;
+        let file: String = row.try_get("file").map_err(DbError::from)?;
         if name == "main" && !file.is_empty() {
             if let Some(parent) = Path::new(&file).parent() {
                 return Ok(parent.join("attachments"));
@@ -172,9 +188,7 @@ async fn attachment_root(pool: &SqlitePool) -> Result<PathBuf, sqlx::Error> {
     if let Some(data_dir) = dirs::data_local_dir() {
         Ok(data_dir.join("postblox").join("attachments"))
     } else {
-        std::env::current_dir()
-            .map(|dir| dir.join("attachments"))
-            .map_err(|err| io_sqlx_error("current_dir", err))
+        Ok(std::env::current_dir().map(|dir| dir.join("attachments"))?)
     }
 }
 
@@ -207,29 +221,19 @@ fn sanitize_filename(filename: &str) -> String {
     }
 }
 
-async fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), sqlx::Error> {
-    let parent = path.parent().ok_or_else(|| {
-        sqlx::Error::Protocol(format!("attachment path has no parent: {}", path.display()))
+async fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), AttachmentError> {
+    let parent = path.parent().ok_or_else(|| AttachmentError::BadPath {
+        path: path.to_path_buf(),
     })?;
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|err| io_sqlx_error(format!("create {}", parent.display()), err))?;
+    tokio::fs::create_dir_all(parent).await?;
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
-        .await
-        .map_err(|err| io_sqlx_error(format!("create {}", path.display()), err))?;
-    file.write_all(bytes)
-        .await
-        .map_err(|err| io_sqlx_error(format!("write {}", path.display()), err))?;
-    file.flush()
-        .await
-        .map_err(|err| io_sqlx_error(format!("flush {}", path.display()), err))
-}
-
-fn io_sqlx_error(context: impl std::fmt::Display, err: std::io::Error) -> sqlx::Error {
-    sqlx::Error::Io(std::io::Error::new(err.kind(), format!("{context}: {err}")))
+        .await?;
+    file.write_all(bytes).await?;
+    file.flush().await?;
+    Ok(())
 }
 
 fn is_text_like(content_type: &str) -> bool {

@@ -1,6 +1,7 @@
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::db::DbError;
 use crate::models::{Attachment, AttachmentDisposition};
 
 const COLS: &str = "id, message_id, filename, content_type, content_id, size_bytes, \
@@ -17,7 +18,7 @@ pub struct NewAttachment {
     pub storage_path: String,
 }
 
-pub async fn create(pool: &SqlitePool, new: &NewAttachment) -> Result<Attachment, sqlx::Error> {
+pub async fn create(pool: &SqlitePool, new: &NewAttachment) -> Result<Attachment, DbError> {
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO attachments (id, message_id, filename, content_type, content_id, \
@@ -33,29 +34,33 @@ pub async fn create(pool: &SqlitePool, new: &NewAttachment) -> Result<Attachment
     .bind(&new.storage_path)
     .execute(pool)
     .await?;
-    sqlx::query_as::<_, Attachment>(&format!("SELECT {COLS} FROM attachments WHERE id = ?"))
-        .bind(id)
-        .fetch_one(pool)
-        .await
+    Ok(
+        sqlx::query_as::<_, Attachment>(&format!("SELECT {COLS} FROM attachments WHERE id = ?"))
+            .bind(id)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 pub async fn list_for_message(
     pool: &SqlitePool,
     message_id: Uuid,
-) -> Result<Vec<Attachment>, sqlx::Error> {
-    sqlx::query_as::<_, Attachment>(&format!(
+) -> Result<Vec<Attachment>, DbError> {
+    Ok(sqlx::query_as::<_, Attachment>(&format!(
         "SELECT {COLS} FROM attachments WHERE message_id = ? ORDER BY created_at"
     ))
     .bind(message_id)
     .fetch_all(pool)
-    .await
+    .await?)
 }
 
-pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Attachment>, sqlx::Error> {
-    sqlx::query_as::<_, Attachment>(&format!("SELECT {COLS} FROM attachments WHERE id = ?"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await
+pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Attachment>, DbError> {
+    Ok(
+        sqlx::query_as::<_, Attachment>(&format!("SELECT {COLS} FROM attachments WHERE id = ?"))
+            .bind(id)
+            .fetch_optional(pool)
+            .await?,
+    )
 }
 
 #[cfg(test)]

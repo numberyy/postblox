@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::db::DbError;
 use crate::models::Message;
 
 #[derive(Debug, Clone)]
@@ -34,7 +35,7 @@ const SELECT: &str = "\
     subject, snippet, text_body, html_body, raw_size, flags, internal_date, \
     sent_at, created_at";
 
-pub async fn create(pool: &SqlitePool, new: &NewMessage) -> Result<Message, sqlx::Error> {
+pub async fn create(pool: &SqlitePool, new: &NewMessage) -> Result<Message, DbError> {
     let id = Uuid::new_v4();
     let q = format!(
         "INSERT INTO messages \
@@ -43,7 +44,7 @@ pub async fn create(pool: &SqlitePool, new: &NewMessage) -> Result<Message, sqlx
           subject, snippet, text_body, html_body, raw_size, flags, internal_date, sent_at) \
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING {SELECT}"
     );
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(id)
         .bind(new.account_id)
         .bind(new.folder_id)
@@ -66,25 +67,25 @@ pub async fn create(pool: &SqlitePool, new: &NewMessage) -> Result<Message, sqlx
         .bind(new.internal_date)
         .bind(new.sent_at)
         .fetch_one(pool)
-        .await
+        .await?)
 }
 
-pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Message>, sqlx::Error> {
+pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Message>, DbError> {
     let q = format!("SELECT {SELECT} FROM messages WHERE id = ?");
-    sqlx::query_as(&q).bind(id).fetch_optional(pool).await
+    Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
 
 pub async fn get_by_folder_uid(
     pool: &SqlitePool,
     folder_id: Uuid,
     uid: i64,
-) -> Result<Option<Message>, sqlx::Error> {
+) -> Result<Option<Message>, DbError> {
     let q = format!("SELECT {SELECT} FROM messages WHERE folder_id = ? AND uid = ?");
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(folder_id)
         .bind(uid)
         .fetch_optional(pool)
-        .await
+        .await?)
 }
 
 pub async fn list_by_folder(
@@ -92,25 +93,22 @@ pub async fn list_by_folder(
     folder_id: Uuid,
     limit: i64,
     offset: i64,
-) -> Result<Vec<Message>, sqlx::Error> {
+) -> Result<Vec<Message>, DbError> {
     let q = format!(
         "SELECT {SELECT} FROM messages WHERE folder_id = ? \
          ORDER BY internal_date DESC LIMIT ? OFFSET ?"
     );
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(folder_id)
         .bind(limit.clamp(1, 500))
         .bind(offset.max(0))
         .fetch_all(pool)
-        .await
+        .await?)
 }
 
-pub async fn list_by_thread(
-    pool: &SqlitePool,
-    thread_id: Uuid,
-) -> Result<Vec<Message>, sqlx::Error> {
+pub async fn list_by_thread(pool: &SqlitePool, thread_id: Uuid) -> Result<Vec<Message>, DbError> {
     let q = format!("SELECT {SELECT} FROM messages WHERE thread_id = ? ORDER BY internal_date");
-    sqlx::query_as(&q).bind(thread_id).fetch_all(pool).await
+    Ok(sqlx::query_as(&q).bind(thread_id).fetch_all(pool).await?)
 }
 
 /// Find a message by its RFC822 Message-ID header within an account. Used
@@ -119,16 +117,16 @@ pub async fn find_by_msgid_header(
     pool: &SqlitePool,
     account_id: Uuid,
     message_id_header: &str,
-) -> Result<Option<Message>, sqlx::Error> {
+) -> Result<Option<Message>, DbError> {
     let q = format!(
         "SELECT {SELECT} FROM messages \
          WHERE account_id = ? AND message_id_header = ? LIMIT 1"
     );
-    sqlx::query_as(&q)
+    Ok(sqlx::query_as(&q)
         .bind(account_id)
         .bind(message_id_header)
         .fetch_optional(pool)
-        .await
+        .await?)
 }
 
 /// Return the subset of `uids` that already exist in `folder_id`. Used by
@@ -137,7 +135,7 @@ pub async fn existing_uids(
     pool: &SqlitePool,
     folder_id: Uuid,
     uids: &[i64],
-) -> Result<std::collections::HashSet<i64>, sqlx::Error> {
+) -> Result<std::collections::HashSet<i64>, DbError> {
     if uids.is_empty() {
         return Ok(Default::default());
     }
@@ -155,7 +153,7 @@ pub async fn set_thread(
     pool: &SqlitePool,
     id: Uuid,
     thread_id: Option<Uuid>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), DbError> {
     sqlx::query("UPDATE messages SET thread_id = ? WHERE id = ?")
         .bind(thread_id)
         .bind(id)
@@ -168,7 +166,7 @@ pub async fn set_flags(
     pool: &SqlitePool,
     id: Uuid,
     flags: &serde_json::Value,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), DbError> {
     sqlx::query("UPDATE messages SET flags = ? WHERE id = ?")
         .bind(flags)
         .bind(id)
@@ -181,7 +179,7 @@ pub async fn set_flags(
 /// matched. Used by archive / move ops; on the wire IMAP this is what a
 /// MOVE would do server-side, but here we reflect the change locally
 /// and let the next IMAP sync reconcile.
-pub async fn set_folder(pool: &SqlitePool, id: Uuid, folder_id: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn set_folder(pool: &SqlitePool, id: Uuid, folder_id: Uuid) -> Result<bool, DbError> {
     let r = sqlx::query("UPDATE messages SET folder_id = ? WHERE id = ?")
         .bind(folder_id)
         .bind(id)
@@ -190,7 +188,7 @@ pub async fn set_folder(pool: &SqlitePool, id: Uuid, folder_id: Uuid) -> Result<
     Ok(r.rows_affected() > 0)
 }
 
-pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, sqlx::Error> {
+pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM messages WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -202,7 +200,7 @@ pub async fn delete_by_folder_uid(
     pool: &SqlitePool,
     folder_id: Uuid,
     uid: i64,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM messages WHERE folder_id = ? AND uid = ?")
         .bind(folder_id)
         .bind(uid)
@@ -213,7 +211,7 @@ pub async fn delete_by_folder_uid(
 
 /// Wipe every message in a folder. Used when the server's
 /// `UIDVALIDITY` changed under us and we have to refetch from scratch.
-pub async fn delete_all_in_folder(pool: &SqlitePool, folder_id: Uuid) -> Result<u64, sqlx::Error> {
+pub async fn delete_all_in_folder(pool: &SqlitePool, folder_id: Uuid) -> Result<u64, DbError> {
     let r = sqlx::query("DELETE FROM messages WHERE folder_id = ?")
         .bind(folder_id)
         .execute(pool)

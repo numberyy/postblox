@@ -7,6 +7,7 @@
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::db::DbError;
 use crate::models::Message;
 
 /// Quote a user-supplied search term so FTS5 treats it as a phrase and
@@ -24,7 +25,7 @@ pub async fn search(
     fts_query: &str,
     limit: i64,
     offset: i64,
-) -> Result<Vec<Message>, sqlx::Error> {
+) -> Result<Vec<Message>, DbError> {
     search_scoped(pool, fts_query, None, limit, offset).await
 }
 
@@ -35,7 +36,7 @@ pub async fn search_scoped(
     account_id: Option<Uuid>,
     limit: i64,
     offset: i64,
-) -> Result<Vec<Message>, sqlx::Error> {
+) -> Result<Vec<Message>, DbError> {
     let limit = limit.clamp(1, 500);
     let offset = offset.max(0);
     const COLS: &str = "\
@@ -50,13 +51,13 @@ pub async fn search_scoped(
                  WHERE messages_fts MATCH ? AND m.account_id = ? \
                  ORDER BY rank LIMIT ? OFFSET ?"
             );
-            sqlx::query_as(&q)
+            Ok(sqlx::query_as(&q)
                 .bind(fts_query)
                 .bind(account_id)
                 .bind(limit)
                 .bind(offset)
                 .fetch_all(pool)
-                .await
+                .await?)
         }
         None => {
             let q = format!(
@@ -64,12 +65,12 @@ pub async fn search_scoped(
                  WHERE messages_fts MATCH ? \
                  ORDER BY rank LIMIT ? OFFSET ?"
             );
-            sqlx::query_as(&q)
+            Ok(sqlx::query_as(&q)
                 .bind(fts_query)
                 .bind(limit)
                 .bind(offset)
                 .fetch_all(pool)
-                .await
+                .await?)
         }
     }
 }

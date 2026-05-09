@@ -2,6 +2,7 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::db::DbError;
 use crate::models::AuditEntry;
 
 const COLS: &str = "id, actor, action, target, details, created_at";
@@ -14,7 +15,7 @@ pub struct NewAuditEntry {
     pub details: Value,
 }
 
-pub async fn record(pool: &SqlitePool, new: &NewAuditEntry) -> Result<AuditEntry, sqlx::Error> {
+pub async fn record(pool: &SqlitePool, new: &NewAuditEntry) -> Result<AuditEntry, DbError> {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO audit_log (id, actor, action, target, details) VALUES (?,?,?,?,?)")
         .bind(id)
@@ -24,42 +25,44 @@ pub async fn record(pool: &SqlitePool, new: &NewAuditEntry) -> Result<AuditEntry
         .bind(&new.details)
         .execute(pool)
         .await?;
-    sqlx::query_as::<_, AuditEntry>(&format!("SELECT {COLS} FROM audit_log WHERE id = ?"))
-        .bind(id)
-        .fetch_one(pool)
-        .await
+    Ok(
+        sqlx::query_as::<_, AuditEntry>(&format!("SELECT {COLS} FROM audit_log WHERE id = ?"))
+            .bind(id)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 pub async fn list_recent(
     pool: &SqlitePool,
     limit: i64,
     offset: i64,
-) -> Result<Vec<AuditEntry>, sqlx::Error> {
+) -> Result<Vec<AuditEntry>, DbError> {
     // rowid is the strictly-monotonic insertion order; created_at can
     // collide on the same millisecond. Tie-break on rowid so pagination
     // is deterministic.
-    sqlx::query_as::<_, AuditEntry>(&format!(
+    Ok(sqlx::query_as::<_, AuditEntry>(&format!(
         "SELECT {COLS} FROM audit_log ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?"
     ))
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)
-    .await
+    .await?)
 }
 
 pub async fn list_by_actor(
     pool: &SqlitePool,
     actor: &str,
     limit: i64,
-) -> Result<Vec<AuditEntry>, sqlx::Error> {
-    sqlx::query_as::<_, AuditEntry>(&format!(
+) -> Result<Vec<AuditEntry>, DbError> {
+    Ok(sqlx::query_as::<_, AuditEntry>(&format!(
         "SELECT {COLS} FROM audit_log WHERE actor = ? \
          ORDER BY created_at DESC, rowid DESC LIMIT ?"
     ))
     .bind(actor)
     .bind(limit)
     .fetch_all(pool)
-    .await
+    .await?)
 }
 
 #[cfg(test)]
