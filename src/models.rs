@@ -11,6 +11,95 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // -----------------------------------------------------------------------------
+// Strongly-typed entity IDs
+//
+// Each of these is a `#[repr(transparent)]` newtype around `uuid::Uuid` so the
+// type system can prevent accidentally passing e.g. a `FolderId` where an
+// `AccountId` is expected. Serde is `transparent` so the wire format and JSON
+// representation stay identical to a bare UUID string.
+// -----------------------------------------------------------------------------
+
+macro_rules! entity_id {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        #[repr(transparent)]
+        pub struct $name(pub Uuid);
+
+        #[allow(clippy::new_without_default)]
+        impl $name {
+            #[inline]
+            pub fn new() -> Self {
+                Self(Uuid::new_v4())
+            }
+
+            #[inline]
+            pub fn into_inner(self) -> Uuid {
+                self.0
+            }
+
+            #[inline]
+            pub fn as_uuid(&self) -> &Uuid {
+                &self.0
+            }
+        }
+
+        impl From<Uuid> for $name {
+            #[inline]
+            fn from(value: Uuid) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<$name> for Uuid {
+            #[inline]
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::Display::fmt(&self.0, f)
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = uuid::Error;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Uuid::from_str(s).map(Self)
+            }
+        }
+    };
+}
+
+entity_id!(
+    /// Identifier for an Account row.
+    AccountId
+);
+entity_id!(
+    /// Identifier for a Folder row.
+    FolderId
+);
+entity_id!(
+    /// Identifier for a Thread row.
+    ThreadId
+);
+entity_id!(
+    /// Identifier for a Message row.
+    MessageId
+);
+entity_id!(
+    /// Identifier for a Draft row.
+    DraftId
+);
+entity_id!(
+    /// Identifier for an Attachment row.
+    AttachmentId
+);
+
+// -----------------------------------------------------------------------------
 // Enums + helpers for SQLite TEXT columns
 // -----------------------------------------------------------------------------
 
@@ -353,5 +442,36 @@ mod tests {
         assert!("garbage".parse::<AuthKind>().is_err());
         assert!("inboxxx".parse::<FolderRole>().is_err());
         assert!("".parse::<SyncStatus>().is_err());
+    }
+
+    #[test]
+    fn test_account_id_round_trips_via_serde_as_uuid_string() {
+        let id = AccountId::new();
+        let value = serde_json::to_value(id).unwrap();
+        assert!(
+            matches!(value, serde_json::Value::String(_)),
+            "expected JSON string, got {value:?}"
+        );
+        let decoded: AccountId = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn test_account_id_from_str_rejects_non_uuid() {
+        assert!(AccountId::from_str("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn test_account_id_and_folder_id_have_distinct_types() {
+        use std::any::TypeId;
+        assert_ne!(TypeId::of::<AccountId>(), TypeId::of::<FolderId>());
+    }
+
+    #[test]
+    fn test_message_id_display_round_trips_through_from_str() {
+        let id = MessageId::new();
+        let s = id.to_string();
+        let parsed = MessageId::from_str(&s).unwrap();
+        assert_eq!(parsed, id);
     }
 }
