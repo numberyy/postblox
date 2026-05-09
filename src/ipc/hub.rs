@@ -7,6 +7,8 @@
 //! "lagged" event so the client can resync if it cares.
 
 use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -44,15 +46,39 @@ impl Topic {
         }
     }
 
+    // Kept for the lone caller in `src/ipc/server.rs::handle_subscribe`.
+    // Future cleanup: migrate that call site to `s.parse::<Topic>()` and
+    // delete this shim.
     pub fn parse(s: &str) -> Option<Self> {
+        s.parse::<Self>().ok()
+    }
+}
+
+/// Error returned by `<Topic as FromStr>::from_str` when the input is not
+/// a known topic wire string. Carries the offending input so callers can
+/// surface it in error messages without re-threading the original string.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid topic: {0}")]
+pub struct ParseTopicError(pub String);
+
+impl fmt::Display for Topic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Topic {
+    type Err = ParseTopicError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "mail.new" => Some(Self::MailNew),
-            "mail.updated" => Some(Self::MailUpdated),
-            "account.synced" => Some(Self::AccountSynced),
-            "sync.state" => Some(Self::SyncState),
-            "mcp.approval_requested" => Some(Self::McpApprovalRequested),
-            "mcp.approval_decided" => Some(Self::McpApprovalDecided),
-            _ => None,
+            "mail.new" => Ok(Self::MailNew),
+            "mail.updated" => Ok(Self::MailUpdated),
+            "account.synced" => Ok(Self::AccountSynced),
+            "sync.state" => Ok(Self::SyncState),
+            "mcp.approval_requested" => Ok(Self::McpApprovalRequested),
+            "mcp.approval_decided" => Ok(Self::McpApprovalDecided),
+            _ => Err(ParseTopicError(s.to_owned())),
         }
     }
 }
@@ -141,6 +167,28 @@ mod tests {
             assert_eq!(Topic::parse(t.as_str()), Some(t));
         }
         assert!(Topic::parse("garbage").is_none());
+    }
+
+    #[test]
+    fn test_topic_parse_error_carries_input_text() {
+        let err = "garbage".parse::<Topic>().unwrap_err();
+        assert_eq!(err.0, "garbage");
+    }
+
+    #[test]
+    fn test_topic_display_round_trips_through_from_str() {
+        for t in [
+            Topic::MailNew,
+            Topic::MailUpdated,
+            Topic::AccountSynced,
+            Topic::SyncState,
+            Topic::McpApprovalRequested,
+            Topic::McpApprovalDecided,
+        ] {
+            let rendered = t.to_string();
+            assert_eq!(rendered, t.as_str());
+            assert_eq!(rendered.parse::<Topic>().unwrap(), t);
+        }
     }
 
     #[tokio::test]
