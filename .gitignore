@@ -11,3 +11,7 @@ TASKS.md
 .mcp.json
 docs/book/
 data/
+plans/
+.factory/
+bench/baseline.md
+bench/postbloxd-size-analysis.md
