@@ -8,7 +8,9 @@
 //! same dispatcher the binary uses.
 
 pub mod dispatcher;
+pub mod op;
 
 pub use dispatcher::{
     worker_manager_with_idle_config, DaemonDispatcher, DaemonServices, DispatcherInitError,
 };
+pub use op::{Op, ParseOpError};

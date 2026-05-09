@@ -27,15 +27,19 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
+use crate::daemon::Op;
+
 use super::hub::{Hub, Topic};
 use super::protocol::{Request, Response, RpcError};
 use super::wire::{read_frame_with_buf, WireError};
 
-/// Daemon-side handler for opaque ops. Implementations live in the
-/// daemon binary; tests use a small mock.
+/// Daemon-side handler for typed ops. Implementations live in the
+/// daemon binary; tests use a small mock. The per-connection reader in
+/// this module parses the inbound op string into [`Op`] before invoking
+/// dispatch, so handlers never see an unknown op.
 #[async_trait::async_trait]
 pub trait Dispatcher: Send + Sync + 'static {
-    async fn dispatch(&self, op: &str, args: Value) -> Result<Value, RpcError>;
+    async fn dispatch(&self, op: Op, args: Value) -> Result<Value, RpcError>;
 }
 
 #[derive(Debug, Error)]
@@ -279,9 +283,12 @@ async fn handle_connection<D: Dispatcher>(
                 "subscribe" => handle_subscribe(&req, &hub, &subs, &next_sub_id, &out_tx).await,
                 "unsubscribe" => handle_unsubscribe(&req, &subs).await,
                 "ping" => Response::ok(req.id, json!({"pong": true})),
-                other => match dispatcher.dispatch(other, req.args.clone()).await {
-                    Ok(data) => Response::ok(req.id, data),
-                    Err(err) => Response::err(req.id, err),
+                other => match other.parse::<Op>() {
+                    Ok(op) => match dispatcher.dispatch(op, req.args.clone()).await {
+                        Ok(data) => Response::ok(req.id, data),
+                        Err(err) => Response::err(req.id, err),
+                    },
+                    Err(_) => Response::err(req.id, RpcError::unknown_op(other)),
                 },
             };
             send_response(&out_tx, response).await;
@@ -398,18 +405,22 @@ mod tests {
     use crate::ipc::client::Client;
     use std::sync::atomic::AtomicU32;
 
+    /// Test fixture: re-uses two real ops so the wire boundary's
+    /// `Op::from_str` accepts them. `AccountList` echoes args; `Search`
+    /// fails. Real-op names that aren't otherwise exercised in this
+    /// file's tests.
     struct EchoDispatcher {
         calls: AtomicU32,
     }
 
     #[async_trait::async_trait]
     impl Dispatcher for EchoDispatcher {
-        async fn dispatch(&self, op: &str, args: Value) -> Result<Value, RpcError> {
+        async fn dispatch(&self, op: Op, args: Value) -> Result<Value, RpcError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             match op {
-                "echo" => Ok(args),
-                "fail" => Err(RpcError::internal("told to fail")),
-                other => Err(RpcError::unknown_op(other)),
+                Op::AccountList => Ok(args),
+                Op::Search => Err(RpcError::internal("told to fail")),
+                other => Err(RpcError::internal(format!("unexpected op: {other}"))),
             }
         }
     }
@@ -454,7 +465,10 @@ mod tests {
     async fn test_dispatcher_echo_round_trip() {
         let ctx = start_server().await;
         let mut client = Client::connect(&ctx.path).await.unwrap();
-        let resp = client.request("echo", json!({"a": 1})).await.unwrap();
+        let resp = client
+            .request("account.list", json!({"a": 1}))
+            .await
+            .unwrap();
         assert!(resp.ok);
         assert_eq!(resp.data, json!({"a": 1}));
         assert_eq!(ctx.dispatcher.calls.load(Ordering::Relaxed), 1);
@@ -464,7 +478,7 @@ mod tests {
     async fn test_dispatcher_error_returns_typed_response() {
         let ctx = start_server().await;
         let mut client = Client::connect(&ctx.path).await.unwrap();
-        let resp = client.request("fail", json!({})).await.unwrap();
+        let resp = client.request("search", json!({})).await.unwrap();
         assert!(!resp.ok);
         assert_eq!(resp.error.unwrap().code, "internal");
     }
@@ -475,7 +489,30 @@ mod tests {
         let mut client = Client::connect(&ctx.path).await.unwrap();
         let resp = client.request("frobulate", json!({})).await.unwrap();
         assert!(!resp.ok);
-        assert_eq!(resp.error.unwrap().code, "unknown_op");
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "unknown_op");
+        assert!(
+            err.message.contains("frobulate"),
+            "error message must include offending op, got: {}",
+            err.message
+        );
+    }
+
+    /// CRIT-4 wire-boundary parse: an unknown op never reaches the
+    /// dispatcher. Confirms the typed-Op refactor preserves the
+    /// pre-existing `unknown_op` error code/message shape byte-for-byte.
+    #[tokio::test]
+    async fn test_dispatch_unknown_op_returns_rpc_error_at_wire_boundary() {
+        let ctx = start_server().await;
+        let mut client = Client::connect(&ctx.path).await.unwrap();
+        let resp = client.request("garbage", json!({})).await.unwrap();
+        assert!(!resp.ok);
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, "unknown_op");
+        assert_eq!(err.message, "unknown op 'garbage'");
+        // Dispatcher must not have been called for an unknown op —
+        // parsing fails at the wire boundary.
+        assert_eq!(ctx.dispatcher.calls.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -538,7 +575,7 @@ mod tests {
         let mut ids = Vec::new();
         for i in 0..20 {
             let id = client
-                .send_request("echo", json!({ "i": i }))
+                .send_request("account.list", json!({ "i": i }))
                 .await
                 .unwrap();
             ids.push(id);

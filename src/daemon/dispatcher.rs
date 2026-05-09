@@ -12,6 +12,7 @@ use sqlx::SqlitePool;
 use thiserror::Error;
 
 use crate::auth::MailCredential;
+use crate::daemon::Op;
 use crate::db;
 use crate::imap::{self, ImapAuth, ImapError, ImapIdle, ImapSync};
 use crate::ipc::{Dispatcher, Hub, RpcError, Topic};
@@ -330,46 +331,46 @@ impl DaemonDispatcher {
 
 #[async_trait::async_trait]
 impl Dispatcher for DaemonDispatcher {
-    async fn dispatch(&self, op: &str, args: Value) -> Result<Value, RpcError> {
+    async fn dispatch(&self, op: Op, args: Value) -> Result<Value, RpcError> {
         match op {
             // -- read ops --
-            "account.list" => op_account_list(&self.pool).await,
-            "folder.list" => op_folder_list(&self.pool, args).await,
-            "thread.list" => op_thread_list(&self.pool, args).await,
-            "message.list_by_folder" => op_messages_by_folder(&self.pool, args).await,
-            "message.list_by_thread" => op_messages_by_thread(&self.pool, args).await,
-            "message.get" => op_message_get(&self.pool, args).await,
-            "attachment.list" => op_attachment_list(&self.pool, args).await,
-            "attachment.preview" => op_attachment_preview(&self.pool, args).await,
-            "search" => op_search(&self.pool, args).await,
-            "audit.list_recent" => op_audit_list(&self.pool, args).await,
+            Op::AccountList => op_account_list(&self.pool).await,
+            Op::FolderList => op_folder_list(&self.pool, args).await,
+            Op::ThreadList => op_thread_list(&self.pool, args).await,
+            Op::MessageListByFolder => op_messages_by_folder(&self.pool, args).await,
+            Op::MessageListByThread => op_messages_by_thread(&self.pool, args).await,
+            Op::MessageGet => op_message_get(&self.pool, args).await,
+            Op::AttachmentList => op_attachment_list(&self.pool, args).await,
+            Op::AttachmentPreview => op_attachment_preview(&self.pool, args).await,
+            Op::Search => op_search(&self.pool, args).await,
+            Op::AuditListRecent => op_audit_list(&self.pool, args).await,
 
             // -- MCP gate/approval ops --
-            "mcp.gate.list" => op_mcp_gate_list(&self.pool, args).await,
-            "mcp.gate.create" => op_mcp_gate_create(&self.pool, args).await,
-            "mcp.gate.delete" => op_mcp_gate_delete(&self.pool, args).await,
-            "mcp.approval.create" => op_mcp_approval_create(&self.pool, &self.hub, args).await,
-            "mcp.approval.list" => op_mcp_approval_list(&self.pool, args).await,
-            "mcp.approval.get" => op_mcp_approval_get(&self.pool, args).await,
-            "mcp.approval.decide" => op_mcp_approval_decide(&self.pool, &self.hub, args).await,
+            Op::McpGateList => op_mcp_gate_list(&self.pool, args).await,
+            Op::McpGateCreate => op_mcp_gate_create(&self.pool, args).await,
+            Op::McpGateDelete => op_mcp_gate_delete(&self.pool, args).await,
+            Op::McpApprovalCreate => op_mcp_approval_create(&self.pool, &self.hub, args).await,
+            Op::McpApprovalList => op_mcp_approval_list(&self.pool, args).await,
+            Op::McpApprovalGet => op_mcp_approval_get(&self.pool, args).await,
+            Op::McpApprovalDecide => op_mcp_approval_decide(&self.pool, &self.hub, args).await,
 
             // -- write ops --
-            "account.create" => op_account_create(&self.pool, args).await,
-            "account.delete" => op_account_delete(&self.pool, args).await,
-            "folder.upsert" => op_folder_upsert(&self.pool, args).await,
-            "message.set_flags" => op_message_set_flags(&self.pool, &self.hub, args).await,
-            "message.archive" => op_message_archive(&self.pool, &self.hub, args).await,
-            "message.delete" => op_message_delete(&self.pool, &self.hub, args).await,
-            "message.move" => op_message_move(&self.pool, &self.hub, args).await,
-            "draft.create" => op_draft_create(&self.pool, args).await,
-            "draft.update" => op_draft_update(&self.pool, args).await,
-            "draft.delete" => op_draft_delete(&self.pool, args).await,
-            "draft.list" => op_draft_list(&self.pool, args).await,
-            "draft.get" => op_draft_get(&self.pool, args).await,
-            "attachment.export" => op_attachment_export(&self.pool, args).await,
-            "message.prepare_reply" => op_message_prepare_reply(&self.pool, args).await,
-            "message.prepare_forward" => op_message_prepare_forward(&self.pool, args).await,
-            "attachment.fetch_for_forward" => {
+            Op::AccountCreate => op_account_create(&self.pool, args).await,
+            Op::AccountDelete => op_account_delete(&self.pool, args).await,
+            Op::FolderUpsert => op_folder_upsert(&self.pool, args).await,
+            Op::MessageSetFlags => op_message_set_flags(&self.pool, &self.hub, args).await,
+            Op::MessageArchive => op_message_archive(&self.pool, &self.hub, args).await,
+            Op::MessageDelete => op_message_delete(&self.pool, &self.hub, args).await,
+            Op::MessageMove => op_message_move(&self.pool, &self.hub, args).await,
+            Op::DraftCreate => op_draft_create(&self.pool, args).await,
+            Op::DraftUpdate => op_draft_update(&self.pool, args).await,
+            Op::DraftDelete => op_draft_delete(&self.pool, args).await,
+            Op::DraftList => op_draft_list(&self.pool, args).await,
+            Op::DraftGet => op_draft_get(&self.pool, args).await,
+            Op::AttachmentExport => op_attachment_export(&self.pool, args).await,
+            Op::MessagePrepareReply => op_message_prepare_reply(&self.pool, args).await,
+            Op::MessagePrepareForward => op_message_prepare_forward(&self.pool, args).await,
+            Op::AttachmentFetchForForward => {
                 op_attachment_fetch_for_forward(
                     &self.pool,
                     self.imap_sync.as_ref(),
@@ -379,7 +380,7 @@ impl Dispatcher for DaemonDispatcher {
                 )
                 .await
             }
-            "message.send" => {
+            Op::MessageSend => {
                 op_message_send(
                     &self.pool,
                     self.secrets.as_ref(),
@@ -391,7 +392,7 @@ impl Dispatcher for DaemonDispatcher {
             }
 
             // -- network ops --
-            "account.test_login" => {
+            Op::AccountTestLogin => {
                 op_account_test_login(
                     &self.pool,
                     self.imap.as_ref(),
@@ -401,7 +402,7 @@ impl Dispatcher for DaemonDispatcher {
                 )
                 .await
             }
-            "account.sync_folder" => {
+            Op::AccountSyncFolder => {
                 op_account_sync_folder(
                     &self.pool,
                     &self.hub,
@@ -412,7 +413,7 @@ impl Dispatcher for DaemonDispatcher {
                 )
                 .await
             }
-            "account.start_sync" => {
+            Op::AccountStartSync => {
                 op_account_start_sync(
                     &self.pool,
                     self.secrets.as_ref(),
@@ -422,21 +423,21 @@ impl Dispatcher for DaemonDispatcher {
                 )
                 .await
             }
-            "account.stop_sync" => {
+            Op::AccountStopSync => {
                 op_account_stop_sync(&self.pool, self.worker_manager.as_ref(), args).await
             }
 
             // -- secret ops --
-            "account.set_secret" => {
+            Op::AccountSetSecret => {
                 op_account_set_secret(&self.pool, self.secrets.as_ref(), args).await
             }
-            "account.delete_secret" => {
+            Op::AccountDeleteSecret => {
                 op_account_delete_secret(&self.pool, self.secrets.as_ref(), args).await
             }
 
             // -- OAuth ops --
-            "oauth.google.auth_url" => op_oauth_google_auth_url(&self.pool, args).await,
-            "oauth.google.complete" => {
+            Op::OauthGoogleAuthUrl => op_oauth_google_auth_url(&self.pool, args).await,
+            Op::OauthGoogleComplete => {
                 op_oauth_google_complete(
                     &self.pool,
                     self.secrets.as_ref(),
@@ -445,8 +446,6 @@ impl Dispatcher for DaemonDispatcher {
                 )
                 .await
             }
-
-            other => Err(RpcError::unknown_op(other)),
         }
     }
 }
