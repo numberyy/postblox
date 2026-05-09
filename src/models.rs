@@ -103,6 +103,25 @@ entity_id!(
 // Enums + helpers for SQLite TEXT columns
 // -----------------------------------------------------------------------------
 
+/// Error returned when parsing a `text_enum!`-generated enum from a string
+/// fails. `kind` is the enum's type name (e.g. `"AuthKind"`) and `value` is
+/// the unrecognised input.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid {kind}: {value}")]
+pub struct ParseEnumError {
+    pub kind: &'static str,
+    pub value: String,
+}
+
+// Allow lossy conversion into `String` so existing call sites that propagate
+// the parse error into `impl Into<String>` (e.g. `RpcError::bad_args`) keep
+// compiling without forcing every caller through `.to_string()`.
+impl From<ParseEnumError> for String {
+    fn from(err: ParseEnumError) -> Self {
+        err.to_string()
+    }
+}
+
 macro_rules! text_enum {
     (
         $(#[$meta:meta])*
@@ -132,11 +151,14 @@ macro_rules! text_enum {
         }
 
         impl FromStr for $name {
-            type Err = String;
+            type Err = ParseEnumError;
             fn from_str(s: &str) -> Result<Self, Self::Err> {
                 match s {
                     $($repr => Ok(Self::$variant),)+
-                    other => Err(format!(concat!("invalid ", stringify!($name), ": {}"), other)),
+                    other => Err(ParseEnumError {
+                        kind: stringify!($name),
+                        value: other.to_string(),
+                    }),
                 }
             }
         }
@@ -442,6 +464,17 @@ mod tests {
         assert!("garbage".parse::<AuthKind>().is_err());
         assert!("inboxxx".parse::<FolderRole>().is_err());
         assert!("".parse::<SyncStatus>().is_err());
+    }
+
+    #[test]
+    fn test_parse_enum_error_carries_kind_and_value() {
+        let err = AuthKind::from_str("garbage").unwrap_err();
+        assert_eq!(err.kind, "AuthKind");
+        assert_eq!(err.value, "garbage");
+
+        let err = FolderRole::from_str("inboxxx").unwrap_err();
+        assert_eq!(err.kind, "FolderRole");
+        assert_eq!(err.value, "inboxxx");
     }
 
     #[test]
