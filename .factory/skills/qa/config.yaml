@@ -1,0 +1,141 @@
+project: postblox
+imagemagick: true
+
+# postblox is a local-first single-user app. There are no remote
+# environments. "default_target" is always a fresh local daemon spawned
+# from the PR branch's compiled binaries.
+environments:
+  local:
+    url: unix://./qa-results/<RUN_ID>/postbloxd.sock
+    restrictions:
+      - never connect to a real IMAP/SMTP server
+      - never write to the user's real ~/.local/share/postblox
+      - all secrets are dummy values; never store real credentials in test data
+
+default_target: local
+
+auth:
+  # postblox itself uses OS keyring + AES-GCM file + Google OAuth2 for its
+  # own account secrets. QA never authenticates to a remote mail provider.
+  # The QA agent invokes `account.set_secret` with a dummy password and
+  # uses the file-backed SecretStore (configured via postblox.toml) so no
+  # OS keyring is touched in CI.
+  method: dummy-file-backed-secret
+  provider: postblox-internal
+
+personas:
+  - name: user
+    description: 'Single account holder driving the TUI directly via keystrokes.'
+    email: qa-user@local.test
+    credentials_source: inline-dummy
+    secret_name: ''   # not applicable; password is the literal string "qa-dummy-pass"
+    test_focus:
+      - tui-startup
+      - navigation
+      - message-list
+      - message-detail
+      - compose
+      - reply
+      - reply-all
+      - forward
+      - search
+      - draft-save-reopen-delete
+      - theme-switch
+      - command-bar
+      - attachment-preview
+    cannot_do:
+      - leak real network traffic to imap.gmail.com or smtp.gmail.com
+      - write to ~/.local/share/postblox (must use POSTBLOX_DB / POSTBLOX_SOCKET overrides)
+
+  - name: agent
+    description: 'AI agent driving the MCP bridge over stdio (postblox-mcp).'
+    email: qa-agent@local.test
+    credentials_source: inline-dummy
+    secret_name: ''
+    test_focus:
+      - mcp-initialize
+      - tools/list (12 tools)
+      - read-only tools (account.list, folder.list, thread.list, message.*, search)
+      - dangerous tools (draft.create, draft.update, draft.delete, message.send)
+      - notifications stream
+      - gate engine: auto_allow + require + deny
+    cannot_do:
+      - call message.send when gate is set to "deny"
+      - bypass an approval gate set to "require" without explicit approval
+
+apps:
+  daemon:
+    path_patterns:
+      - 'src/bin/postbloxd.rs'
+      - 'src/daemon/**'
+      - 'src/db/**'
+      - 'src/ipc/**'
+      - 'src/sync/**'
+      - 'src/imap/**'
+      - 'src/smtp/**'
+      - 'src/secrets/**'
+      - 'src/oauth/**'
+      - 'src/mail/**'
+      - 'src/embeddings/**'
+      - 'src/attachments.rs'
+      - 'src/auth.rs'
+      - 'src/config.rs'
+      - 'src/models.rs'
+      - 'migrations/**'
+    skill: qa-daemon
+    test_tool: curl     # JSON frames over a Unix socket via a small helper script
+    build_command: 'cargo build --bin postbloxd --locked'
+
+  tui:
+    path_patterns:
+      - 'src/main.rs'
+      - 'src/tui/**'
+    skill: qa-tui
+    test_tool: tuistory
+    build_command: 'cargo build --bin postblox --bin postbloxd --locked'
+
+  mcp:
+    path_patterns:
+      - 'src/bin/postblox-mcp.rs'
+      - 'src/mcp/**'
+    skill: qa-mcp
+    test_tool: curl     # JSON-RPC over stdio via a small helper script
+    build_command: 'cargo build --bin postblox-mcp --bin postbloxd --locked'
+
+feature_flags:
+  provider: none
+  dashboard_url: ''
+  how_to_override: ''
+
+integrations:
+  imap:
+    provider: none-in-CI
+    notes: |
+      Real IMAP/SMTP access is intentionally OFF for QA. The qa-daemon
+      sub-skill spawns the daemon with a config that points at the
+      file-backed SecretStore and uses dummy credentials. Sync is
+      verified via the daemon's own ops (`account.sync_folder` is
+      expected to fail with an auth/network error against a non-existent
+      host -- the QA flow asserts that the failure surfaces through IPC,
+      not that mail is actually fetched).
+  smtp:
+    provider: none-in-CI
+    notes: 'Same as IMAP. message.send is expected to surface an SMTP error.'
+
+cleanup:
+  auto_cleanup: true
+  strategy: delete-tempdir
+  instructions: |
+    Each QA run gets a fresh tempdir under `./qa-results/<RUN_ID>/`:
+      - POSTBLOX_DB     = ./qa-results/<RUN_ID>/postblox.db
+      - POSTBLOX_SOCKET = ./qa-results/<RUN_ID>/postbloxd.sock
+      - POSTBLOX_CONFIG = ./qa-results/<RUN_ID>/postblox.toml
+      - data dir        = ./qa-results/<RUN_ID>/data
+    After the run:
+      1. Send SIGTERM to postbloxd (pid file at ./qa-results/<RUN_ID>/postbloxd.pid)
+      2. Wait up to 5s for graceful shutdown, then SIGKILL
+      3. Remove the socket file
+      4. Keep the report.md, snapshots, and screenshots; remove the DB + data dir
+         to keep artifact size small (<5MB)
+
+failure_learning: suggest_in_report
