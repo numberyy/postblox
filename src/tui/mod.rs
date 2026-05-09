@@ -1843,6 +1843,10 @@ async fn handle_search_pane_key<C: Mailbox + ?Sized>(
             }
             true
         }
+        KeyCode::Char('r') => {
+            refresh_search(app, client).await;
+            true
+        }
         _ => false,
     }
 }
@@ -3816,6 +3820,34 @@ mod tests {
         assert!(app.status.contains("<sent-1@postblox.local>"));
     }
 
+    #[tokio::test]
+    async fn test_handle_key_composer_ctrl_k_with_no_attachments_sets_empty_state_status() {
+        let account_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        let mut client = MockMailbox::default();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert_eq!(app.mode, InputMode::Compose);
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.status, "No attachment to remove");
+        assert!(client.calls.is_empty());
+    }
+
     fn app_with_message_list_focused(account_id: Uuid, folder_id: Uuid) -> (AppState, MessageItem) {
         let mut app = app_with_account_folder(account_id, folder_id);
         let message = message_item(Uuid::new_v4(), vec!["\\Seen"]);
@@ -4467,6 +4499,57 @@ mod tests {
 
         assert!(client.calls.is_empty());
         assert!(!app.search_pane_visible());
+    }
+
+    #[tokio::test]
+    async fn test_search_pane_r_reruns_active_query_with_same_scope() {
+        let work_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(work_id)]);
+        let mut client = MockMailbox::default();
+
+        // Open the search pane via `/` + query + Enter; first call lands.
+        handle_key(
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        for ch in "alpha".chars() {
+            handle_key(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await;
+        }
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert_eq!(app.active, ActivePane::Search);
+        assert_eq!(client.calls.len(), 1);
+        assert!(matches!(
+            client.calls[0],
+            Call::Search(ref query, Some(id)) if query == "alpha" && id == work_id
+        ));
+
+        // `r` while the Search pane is focused re-runs the same query
+        // with the same account scope.
+        let consumed = handle_key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert!(!consumed);
+        assert_eq!(client.calls.len(), 2);
+        assert!(matches!(
+            client.calls[1],
+            Call::Search(ref query, Some(id)) if query == "alpha" && id == work_id
+        ));
     }
 
     fn search_hit(subject: &str, account_id: Uuid, folder_id: Uuid) -> app::SearchHit {

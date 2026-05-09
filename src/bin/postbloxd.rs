@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use tokio::signal;
+#[cfg(unix)]
+use tokio::signal::unix::{signal as unix_signal, SignalKind};
 
 use postblox::config;
 use postblox::daemon::{worker_manager_with_idle_config, DaemonDispatcher, DaemonServices};
@@ -72,11 +74,30 @@ async fn main() -> anyhow::Result<()> {
     let server = listen(&socket_path, dispatcher, hub).await?;
     tracing::info!(socket = %server.path().display(), "listening");
 
-    signal::ctrl_c().await.context("install ctrl-c handler")?;
+    wait_for_shutdown_signal().await?;
     tracing::info!("shutdown signal received");
     manager.stop_all().await;
     server.shutdown().await;
     Ok(())
+}
+
+/// Wait for either SIGINT (Ctrl-C) or SIGTERM (e.g. `systemctl stop`,
+/// container shutdown). Both signals trigger the same graceful exit so
+/// the socket file is always cleaned up. Windows has no SIGTERM, so we
+/// fall back to ctrl_c there.
+async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut term = unix_signal(SignalKind::terminate()).context("install SIGTERM handler")?;
+        tokio::select! {
+            res = signal::ctrl_c() => res.context("install SIGINT handler"),
+            _ = term.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        signal::ctrl_c().await.context("install ctrl-c handler")
+    }
 }
 
 fn build_secret_store(

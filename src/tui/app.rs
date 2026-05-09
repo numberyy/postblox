@@ -4161,6 +4161,95 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_preview_key_yank_with_no_selection_sets_status_and_skips_clipboard() {
+        use crate::tui::handle_preview_focus_key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut app = preview_focused_app("alpha\nbeta\ngamma");
+        assert_eq!(app.preview_selection, None);
+
+        let mut clipboard = CapturingClipboard::ok();
+        assert!(handle_preview_focus_key(
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
+            &mut app,
+            &mut clipboard,
+        ));
+        assert_eq!(app.status, "No preview selection");
+        assert_eq!(clipboard.last, None);
+    }
+
+    #[test]
+    fn test_scroll_preview_half_page_advances_by_half_viewport_from_top() {
+        // 12 preview lines (2 header + 10 body); viewport 6, half = 3.
+        let body = (1..=10)
+            .map(|n| format!("body {n:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = preview_focused_app(&body);
+        assert_eq!(app.preview_scroll, 0);
+        assert!(app.scroll_preview(3, 6));
+        assert_eq!(app.preview_scroll, 3);
+    }
+
+    #[test]
+    fn test_scroll_preview_half_page_up_from_zero_clamps_at_zero() {
+        let body = (1..=10)
+            .map(|n| format!("body {n:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = preview_focused_app(&body);
+        assert!(!app.scroll_preview(-3, 6));
+        assert_eq!(app.preview_scroll, 0);
+    }
+
+    #[test]
+    fn test_scroll_preview_half_page_down_clamps_at_preview_max() {
+        let body = (1..=10)
+            .map(|n| format!("body {n:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = preview_focused_app(&body);
+        // Move close to the bottom: max for 12 lines @ viewport 6 is 6.
+        app.preview_scroll = 5;
+        assert!(app.scroll_preview(3, 6));
+        assert_eq!(app.preview_scroll, app.preview_max_scroll(6));
+        // Already at max — no-op.
+        assert!(!app.scroll_preview(3, 6));
+        assert_eq!(app.preview_scroll, app.preview_max_scroll(6));
+    }
+
+    #[test]
+    fn test_handle_preview_key_ctrl_d_and_ctrl_u_route_to_half_page_scroll() {
+        use crate::tui::handle_preview_focus_key;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        // 12 preview lines (2 header + 10 body); viewport in handler is 6,
+        // so half-page = 3.
+        let body = (1..=10)
+            .map(|n| format!("body {n:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut app = preview_focused_app(&body);
+        assert_eq!(app.preview_scroll, 0);
+
+        // Ctrl-D scrolls down by half page.
+        assert!(handle_preview_focus_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &mut app,
+            &mut CapturingClipboard::ok(),
+        ));
+        assert_eq!(app.preview_scroll, 3);
+
+        // Ctrl-U scrolls up by half page.
+        assert!(handle_preview_focus_key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            &mut app,
+            &mut CapturingClipboard::ok(),
+        ));
+        assert_eq!(app.preview_scroll, 0);
+    }
+
+    #[test]
     fn test_handle_preview_key_g_and_capital_g_jump_to_top_and_bottom() {
         use crate::tui::handle_preview_focus_key;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
