@@ -494,7 +494,7 @@ async fn handle_key<C: Mailbox + ?Sized>(
     client: &mut C,
 ) -> bool {
     if app.pending_open_attachment.is_some() {
-        return handle_open_confirmation_key(key, app);
+        return handle_open_confirmation_key(key, app).await;
     }
 
     match app.mode {
@@ -951,11 +951,11 @@ fn handle_detail_key(key: KeyEvent, app: &mut AppState) -> bool {
     }
 }
 
-fn handle_open_confirmation_key(key: KeyEvent, app: &mut AppState) -> bool {
+async fn handle_open_confirmation_key(key: KeyEvent, app: &mut AppState) -> bool {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             if let Some(attachment) = app.take_pending_open_attachment() {
-                open_attachment_with_xdg(app, &attachment);
+                open_attachment_with_xdg(app, &attachment).await;
             }
             false
         }
@@ -1923,10 +1923,11 @@ async fn export_selected_attachment<C: Mailbox + ?Sized>(app: &mut AppState, cli
     }
 }
 
-fn open_attachment_with_xdg(app: &mut AppState, attachment: &app::AttachmentItem) {
-    match std::process::Command::new("xdg-open")
+async fn open_attachment_with_xdg(app: &mut AppState, attachment: &app::AttachmentItem) {
+    match tokio::process::Command::new("xdg-open")
         .arg(&attachment.storage_path)
         .status()
+        .await
     {
         Ok(status) if status.success() => {
             app.set_status(format!("Opened {} with xdg-open", attachment.filename));
