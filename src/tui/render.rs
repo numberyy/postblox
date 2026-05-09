@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
@@ -76,15 +78,15 @@ pub fn render(frame: &mut Frame<'_>, app: &AppState) {
 fn render_search(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
     let active = app.active == ActivePane::Search;
     let query = app.search_query().unwrap_or("");
-    let scope_label = app
+    let scope_label: &str = app
         .search_scope_account()
         .and_then(|id| {
             app.accounts
                 .iter()
                 .find(|account| account.id == id)
-                .map(|account| account.label.clone())
+                .map(|account| account.label.as_str())
         })
-        .unwrap_or_else(|| "all accounts".into());
+        .unwrap_or("all accounts");
     let title = if app.search_is_pending() {
         format!("Search '{query}' — {scope_label} • loading…")
     } else {
@@ -104,13 +106,16 @@ fn render_search(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
             .iter()
             .map(|hit| {
                 let mut line = vec![
-                    Span::styled(hit.subject.clone(), theme.text.add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        hit.subject.as_str(),
+                        theme.text.add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(format!(" — {}", hit.from)),
                     Span::styled(format!(" {}", hit.date), theme.muted),
                 ];
                 if !hit.snippet.is_empty() {
                     line.push(Span::raw("  "));
-                    line.push(Span::styled(hit.snippet.clone(), theme.muted));
+                    line.push(Span::styled(hit.snippet.as_str(), theme.muted));
                 }
                 ListItem::new(Line::from(line))
             })
@@ -177,13 +182,13 @@ fn render_accounts(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Th
         app.accounts
             .iter()
             .map(|account| {
-                let label = if account.label == account.email {
-                    account.email.clone()
+                let label_span = if account.label == account.email {
+                    Span::raw(account.email.as_str())
                 } else {
-                    format!("{} <{}>", account.label, account.email)
+                    Span::raw(format!("{} <{}>", account.label, account.email))
                 };
                 ListItem::new(Line::from(vec![
-                    Span::raw(label),
+                    label_span,
                     Span::styled(format!(" [{}]", account.status), theme.muted),
                 ]))
             })
@@ -215,7 +220,7 @@ fn render_folders(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
             .iter()
             .map(|folder| {
                 ListItem::new(Line::from(vec![
-                    Span::raw(folder.name.clone()),
+                    Span::raw(folder.name.as_str()),
                     Span::styled(format!(" [{}]", folder.role), theme.muted),
                 ]))
             })
@@ -255,7 +260,7 @@ fn render_threads(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
                     Span::styled(if thread.unread { "● " } else { "  " }, theme.unread),
                     Span::styled(if thread.flagged { "★ " } else { "  " }, theme.flagged),
                     Span::styled(
-                        thread.subject.clone(),
+                        thread.subject.as_str(),
                         subject_style.add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(format!(" ({})", thread.message_count)),
@@ -304,7 +309,7 @@ fn render_messages(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Th
                     Span::styled(if unread { "● " } else { "  " }, theme.unread),
                     Span::styled(if flagged { "★ " } else { "  " }, theme.flagged),
                     Span::styled(
-                        message.subject.clone(),
+                        message.subject.as_str(),
                         subject_style.add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(format!(" — {}", message.from)),
@@ -340,7 +345,7 @@ fn render_drafts(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
             .map(|draft| {
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        draft.subject.clone(),
+                        draft.subject.as_str(),
                         theme.text.add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(format!(" → {}", draft.to)),
@@ -413,7 +418,7 @@ fn render_detail_viewport(frame: &mut Frame<'_>, area: Rect, app: &AppState, the
                 let visible = if line.is_empty() { " " } else { line };
                 Line::styled(visible.to_string(), theme.selection)
             } else {
-                Line::raw(line.clone())
+                Line::raw(line.as_str())
             }
         })
         .collect::<Vec<_>>();
@@ -469,7 +474,7 @@ fn render_attachment_list(frame: &mut Frame<'_>, area: Rect, app: &AppState, the
         .iter()
         .map(|attachment| {
             ListItem::new(Line::from(vec![
-                Span::raw(attachment.filename.clone()),
+                Span::raw(attachment.filename.as_str()),
                 Span::styled(
                     format!(
                         " [{} • {} bytes]",
@@ -646,9 +651,7 @@ fn render_compose_attachments(
     if app.mode == InputMode::ComposeAttachPath {
         let prompt = format!("Attach: {}", composer.attach_input);
         let block = pane_block_owned(format!(" {summary} "), false, theme);
-        let paragraph = Paragraph::new(prompt.clone())
-            .block(block)
-            .style(theme.command);
+        let paragraph = Paragraph::new(prompt).block(block).style(theme.command);
         frame.render_widget(paragraph, area);
         // Position the cursor at the end of the typed path. "Attach: "
         // is 8 chars; account for the bordered inset.
@@ -670,7 +673,7 @@ fn render_compose_attachments(
         .iter()
         .map(|att| {
             let line = Line::from(vec![
-                Span::raw(att.filename.clone()),
+                Span::raw(att.filename.as_str()),
                 Span::raw("  "),
                 Span::styled(human_size(att.size_bytes), theme.muted),
             ]);
@@ -793,11 +796,13 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
         ),
         InputMode::ConfirmDelete => (" Delete? y/n ".to_string(), theme.command),
         InputMode::Normal => {
-            let status = if let Some(error) = &app.error {
-                format!("Error: {error}")
-            } else {
-                app.status.clone()
-            };
+            let error_status: Option<String> = app
+                .error
+                .as_ref()
+                .map(|error| format!("Error: {error}"));
+            let status: &str = error_status
+                .as_deref()
+                .unwrap_or(app.status.as_str());
             let body = if app.is_preview_focus_active() {
                 format!(
                     " {status} | Preview: j/k scroll • PgUp/PgDn page • g/G top/bottom • v select • y copy • Esc cancel "
@@ -828,7 +833,11 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
 /// status line. Returns an empty string if no accounts have a known state.
 fn sync_state_prefix(app: &AppState) -> String {
     let selected_id = app.selected_account_id();
-    let mut parts: Vec<String> = Vec::new();
+    // Pre-size for the common case: an `icon + ' ' + label` per account
+    // plus `" · "` separators. Slight over-estimate is fine; under-
+    // estimating just means one realloc.
+    let mut out = String::with_capacity(app.accounts.len() * 24);
+    let mut first = true;
     for account in &app.accounts {
         let Some(status) = app.account_states.get(&account.id) else {
             continue;
@@ -839,19 +848,26 @@ fn sync_state_prefix(app: &AppState) -> String {
             SyncStateUi::Syncing => ICON_SYNCING,
             SyncStateUi::Error => ICON_ERROR,
         };
-        let mut piece = format!("{icon} {}", account.label);
+        if !first {
+            out.push_str(" · ");
+        }
+        first = false;
+        // write! into a String never fails — `String`'s Write impl is infallible.
+        let _ = write!(out, "{icon} {}", account.label);
         if Some(account.id) == selected_id && status.state == SyncStateUi::Error {
             if let Some(err) = status.last_error.as_deref() {
-                let trimmed: String = err.chars().take(MAX_SELECTED_ERROR_CHARS).collect();
-                if !trimmed.is_empty() {
-                    piece.push_str(": ");
-                    piece.push_str(&trimmed);
+                let mut wrote_separator = false;
+                for ch in err.chars().take(MAX_SELECTED_ERROR_CHARS) {
+                    if !wrote_separator {
+                        out.push_str(": ");
+                        wrote_separator = true;
+                    }
+                    out.push(ch);
                 }
             }
         }
-        parts.push(piece);
     }
-    parts.join(" · ")
+    out
 }
 
 fn compose_status_text(icons: &str, body: &str, width: usize) -> String {
@@ -861,7 +877,10 @@ fn compose_status_text(icons: &str, body: &str, width: usize) -> String {
     if width == 0 {
         return icons.to_string();
     }
-    let prefix = format!(" {icons} ");
+    let mut prefix = String::with_capacity(icons.len() + 2);
+    prefix.push(' ');
+    prefix.push_str(icons);
+    prefix.push(' ');
     let prefix_chars = prefix.chars().count();
     let body_chars = body.chars().count();
     if prefix_chars + body_chars <= width {
