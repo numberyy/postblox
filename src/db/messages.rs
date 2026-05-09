@@ -29,22 +29,64 @@ pub struct NewMessage {
     pub sent_at: Option<DateTime<Utc>>,
 }
 
-const SELECT: &str = "\
-    id, account_id, folder_id, thread_id, uid, message_id_header, in_reply_to, \
-    references_header, from_addr, to_addrs, cc_addrs, bcc_addrs, reply_to, \
-    subject, snippet, text_body, html_body, raw_size, flags, internal_date, \
-    sent_at, created_at";
+// Column list shared by every `SELECT` against `messages`. Defined as a
+// `macro_rules!` so each query string can `concat!` it at compile time
+// instead of `format!`-ing the same prefix on every call.
+macro_rules! message_cols {
+    () => {
+        "id, account_id, folder_id, thread_id, uid, message_id_header, in_reply_to, \
+         references_header, from_addr, to_addrs, cc_addrs, bcc_addrs, reply_to, \
+         subject, snippet, text_body, html_body, raw_size, flags, internal_date, \
+         sent_at, created_at"
+    };
+}
+
+#[cfg(test)]
+const MESSAGE_COLS: &str = message_cols!();
+
+const INSERT_RETURNING_QUERY: &str = concat!(
+    "INSERT INTO messages \
+     (id, account_id, folder_id, thread_id, uid, message_id_header, in_reply_to, \
+      references_header, from_addr, to_addrs, cc_addrs, bcc_addrs, reply_to, \
+      subject, snippet, text_body, html_body, raw_size, flags, internal_date, sent_at) \
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING ",
+    message_cols!()
+);
+
+const GET_BY_ID_QUERY: &str = concat!("SELECT ", message_cols!(), " FROM messages WHERE id = ?");
+
+const GET_BY_FOLDER_UID_QUERY: &str = concat!(
+    "SELECT ",
+    message_cols!(),
+    " FROM messages WHERE folder_id = ? AND uid = ?"
+);
+
+const LIST_BY_FOLDER_QUERY: &str = concat!(
+    "SELECT ",
+    message_cols!(),
+    " FROM messages WHERE folder_id = ? \
+     ORDER BY internal_date DESC LIMIT ? OFFSET ?"
+);
+
+const LIST_BY_THREAD_QUERY: &str = concat!(
+    "SELECT ",
+    message_cols!(),
+    " FROM messages WHERE thread_id = ? ORDER BY internal_date"
+);
+
+const FIND_BY_MSGID_HEADER_QUERY: &str = concat!(
+    "SELECT ",
+    message_cols!(),
+    " FROM messages \
+     WHERE account_id = ? AND message_id_header = ? LIMIT 1"
+);
+
+const EXISTING_UIDS_PREFIX: &str = "SELECT uid FROM messages WHERE folder_id = ? AND uid IN (";
+const EXISTING_UIDS_SUFFIX: &str = ")";
 
 pub async fn create(pool: &SqlitePool, new: &NewMessage) -> Result<Message, DbError> {
     let id = Uuid::new_v4();
-    let q = format!(
-        "INSERT INTO messages \
-         (id, account_id, folder_id, thread_id, uid, message_id_header, in_reply_to, \
-          references_header, from_addr, to_addrs, cc_addrs, bcc_addrs, reply_to, \
-          subject, snippet, text_body, html_body, raw_size, flags, internal_date, sent_at) \
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING {SELECT}"
-    );
-    Ok(sqlx::query_as(&q)
+    Ok(sqlx::query_as(INSERT_RETURNING_QUERY)
         .bind(id)
         .bind(new.account_id)
         .bind(new.folder_id)
@@ -71,8 +113,10 @@ pub async fn create(pool: &SqlitePool, new: &NewMessage) -> Result<Message, DbEr
 }
 
 pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Message>, DbError> {
-    let q = format!("SELECT {SELECT} FROM messages WHERE id = ?");
-    Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
+    Ok(sqlx::query_as(GET_BY_ID_QUERY)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?)
 }
 
 pub async fn get_by_folder_uid(
@@ -80,8 +124,7 @@ pub async fn get_by_folder_uid(
     folder_id: Uuid,
     uid: i64,
 ) -> Result<Option<Message>, DbError> {
-    let q = format!("SELECT {SELECT} FROM messages WHERE folder_id = ? AND uid = ?");
-    Ok(sqlx::query_as(&q)
+    Ok(sqlx::query_as(GET_BY_FOLDER_UID_QUERY)
         .bind(folder_id)
         .bind(uid)
         .fetch_optional(pool)
@@ -94,11 +137,7 @@ pub async fn list_by_folder(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Message>, DbError> {
-    let q = format!(
-        "SELECT {SELECT} FROM messages WHERE folder_id = ? \
-         ORDER BY internal_date DESC LIMIT ? OFFSET ?"
-    );
-    Ok(sqlx::query_as(&q)
+    Ok(sqlx::query_as(LIST_BY_FOLDER_QUERY)
         .bind(folder_id)
         .bind(limit.clamp(1, 500))
         .bind(offset.max(0))
@@ -107,8 +146,10 @@ pub async fn list_by_folder(
 }
 
 pub async fn list_by_thread(pool: &SqlitePool, thread_id: Uuid) -> Result<Vec<Message>, DbError> {
-    let q = format!("SELECT {SELECT} FROM messages WHERE thread_id = ? ORDER BY internal_date");
-    Ok(sqlx::query_as(&q).bind(thread_id).fetch_all(pool).await?)
+    Ok(sqlx::query_as(LIST_BY_THREAD_QUERY)
+        .bind(thread_id)
+        .fetch_all(pool)
+        .await?)
 }
 
 /// Find a message by its RFC822 Message-ID header within an account. Used
@@ -118,11 +159,7 @@ pub async fn find_by_msgid_header(
     account_id: Uuid,
     message_id_header: &str,
 ) -> Result<Option<Message>, DbError> {
-    let q = format!(
-        "SELECT {SELECT} FROM messages \
-         WHERE account_id = ? AND message_id_header = ? LIMIT 1"
-    );
-    Ok(sqlx::query_as(&q)
+    Ok(sqlx::query_as(FIND_BY_MSGID_HEADER_QUERY)
         .bind(account_id)
         .bind(message_id_header)
         .fetch_optional(pool)
@@ -139,8 +176,20 @@ pub async fn existing_uids(
     if uids.is_empty() {
         return Ok(Default::default());
     }
-    let placeholders = vec!["?"; uids.len()].join(",");
-    let q = format!("SELECT uid FROM messages WHERE folder_id = ? AND uid IN ({placeholders})");
+    // Each placeholder contributes "?" plus a separating "," — 2 bytes per
+    // uid except the last one. Pre-allocate so the loop never re-grows.
+    let placeholder_len = uids.len() * 2 - 1;
+    let mut q = String::with_capacity(
+        EXISTING_UIDS_PREFIX.len() + placeholder_len + EXISTING_UIDS_SUFFIX.len(),
+    );
+    q.push_str(EXISTING_UIDS_PREFIX);
+    for i in 0..uids.len() {
+        if i > 0 {
+            q.push(',');
+        }
+        q.push('?');
+    }
+    q.push_str(EXISTING_UIDS_SUFFIX);
     let mut query = sqlx::query_as::<_, (i64,)>(&q).bind(folder_id);
     for u in uids {
         query = query.bind(u);
@@ -434,6 +483,65 @@ mod tests {
         set_thread(&c.pool, m.id, None).await.unwrap();
         let got = get(&c.pool, m.id).await.unwrap().unwrap();
         assert!(got.thread_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_const_select_queries_run_against_empty_pool() {
+        // Smoke-test every hoisted const query against an empty schema.
+        // Catches column-list typos at runtime: SQLite errors out on an
+        // unknown column even with zero rows.
+        let c = ctx().await;
+        assert!(get(&c.pool, Uuid::new_v4()).await.unwrap().is_none());
+        assert!(get_by_folder_uid(&c.pool, c.folder_id, 12345)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(list_by_folder(&c.pool, c.folder_id, 50, 0)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(list_by_thread(&c.pool, c.thread_id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(find_by_msgid_header(&c.pool, c.account_id, "<missing>")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_message_cols_const_lists_every_column() {
+        // Column-list snapshot. Updating the column set is fine — bump
+        // this snapshot in the same change.
+        let cols: Vec<&str> = MESSAGE_COLS.split(',').map(|s| s.trim()).collect();
+        assert_eq!(
+            cols,
+            vec![
+                "id",
+                "account_id",
+                "folder_id",
+                "thread_id",
+                "uid",
+                "message_id_header",
+                "in_reply_to",
+                "references_header",
+                "from_addr",
+                "to_addrs",
+                "cc_addrs",
+                "bcc_addrs",
+                "reply_to",
+                "subject",
+                "snippet",
+                "text_body",
+                "html_body",
+                "raw_size",
+                "flags",
+                "internal_date",
+                "sent_at",
+                "created_at",
+            ]
+        );
     }
 
     #[tokio::test]

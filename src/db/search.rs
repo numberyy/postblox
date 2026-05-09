@@ -29,6 +29,37 @@ pub async fn search(
     search_scoped(pool, fts_query, None, limit, offset).await
 }
 
+// Column list aliased by `m.` so the FTS join projects the underlying
+// `messages` row. Hoisted out of `search_scoped` so the two query
+// strings can `concat!` it at compile time.
+macro_rules! search_cols {
+    () => {
+        "m.id, m.account_id, m.folder_id, m.thread_id, m.uid, m.message_id_header, \
+         m.in_reply_to, m.references_header, m.from_addr, m.to_addrs, m.cc_addrs, \
+         m.bcc_addrs, m.reply_to, m.subject, m.snippet, m.text_body, m.html_body, \
+         m.raw_size, m.flags, m.internal_date, m.sent_at, m.created_at"
+    };
+}
+
+#[cfg(test)]
+const SEARCH_COLS: &str = search_cols!();
+
+const SEARCH_BY_ACCOUNT_QUERY: &str = concat!(
+    "SELECT ",
+    search_cols!(),
+    " FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
+     WHERE messages_fts MATCH ? AND m.account_id = ? \
+     ORDER BY rank LIMIT ? OFFSET ?"
+);
+
+const SEARCH_ALL_QUERY: &str = concat!(
+    "SELECT ",
+    search_cols!(),
+    " FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
+     WHERE messages_fts MATCH ? \
+     ORDER BY rank LIMIT ? OFFSET ?"
+);
+
 /// Like [`search`], but optionally restricts hits to a specific account.
 pub async fn search_scoped(
     pool: &SqlitePool,
@@ -39,39 +70,20 @@ pub async fn search_scoped(
 ) -> Result<Vec<Message>, DbError> {
     let limit = limit.clamp(1, 500);
     let offset = offset.max(0);
-    const COLS: &str = "\
-        m.id, m.account_id, m.folder_id, m.thread_id, m.uid, m.message_id_header, \
-        m.in_reply_to, m.references_header, m.from_addr, m.to_addrs, m.cc_addrs, \
-        m.bcc_addrs, m.reply_to, m.subject, m.snippet, m.text_body, m.html_body, \
-        m.raw_size, m.flags, m.internal_date, m.sent_at, m.created_at";
     match account_id {
-        Some(account_id) => {
-            let q = format!(
-                "SELECT {COLS} FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
-                 WHERE messages_fts MATCH ? AND m.account_id = ? \
-                 ORDER BY rank LIMIT ? OFFSET ?"
-            );
-            Ok(sqlx::query_as(&q)
-                .bind(fts_query)
-                .bind(account_id)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(pool)
-                .await?)
-        }
-        None => {
-            let q = format!(
-                "SELECT {COLS} FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
-                 WHERE messages_fts MATCH ? \
-                 ORDER BY rank LIMIT ? OFFSET ?"
-            );
-            Ok(sqlx::query_as(&q)
-                .bind(fts_query)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(pool)
-                .await?)
-        }
+        Some(account_id) => Ok(sqlx::query_as(SEARCH_BY_ACCOUNT_QUERY)
+            .bind(fts_query)
+            .bind(account_id)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?),
+        None => Ok(sqlx::query_as(SEARCH_ALL_QUERY)
+            .bind(fts_query)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?),
     }
 }
 
@@ -304,6 +316,56 @@ mod tests {
             .unwrap();
         assert_eq!(only_a.len(), 1);
         assert_eq!(only_a[0].account_id, a);
+    }
+
+    #[tokio::test]
+    async fn test_const_search_queries_run_against_empty_index() {
+        // Smoke-test both hoisted const queries against an empty FTS
+        // index. Catches column-list typos at runtime.
+        let (pool, a, _f) = seed().await;
+        assert!(search(&pool, &quote_term("anything"), 50, 0)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            search_scoped(&pool, &quote_term("anything"), Some(a), 50, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_search_cols_const_lists_every_column_aliased() {
+        // Snapshot of the aliased column list. Update intentionally.
+        let cols: Vec<&str> = SEARCH_COLS.split(',').map(|s| s.trim()).collect();
+        assert_eq!(
+            cols,
+            vec![
+                "m.id",
+                "m.account_id",
+                "m.folder_id",
+                "m.thread_id",
+                "m.uid",
+                "m.message_id_header",
+                "m.in_reply_to",
+                "m.references_header",
+                "m.from_addr",
+                "m.to_addrs",
+                "m.cc_addrs",
+                "m.bcc_addrs",
+                "m.reply_to",
+                "m.subject",
+                "m.snippet",
+                "m.text_body",
+                "m.html_body",
+                "m.raw_size",
+                "m.flags",
+                "m.internal_date",
+                "m.sent_at",
+                "m.created_at",
+            ]
+        );
     }
 
     #[tokio::test]
