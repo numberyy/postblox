@@ -9,6 +9,11 @@
 //! for ping/db-read, or `messages,elapsed_ms,msgs_per_sec` for parse. Stderr
 //! gets human-readable progress; bench/run.sh consumes stdout.
 
+#![deny(clippy::correctness)]
+#![warn(clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
+#![warn(clippy::undocumented_unsafe_blocks)]
+#![deny(unsafe_op_in_unsafe_fn)]
+
 use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Instant;

@@ -1,3 +1,8 @@
+#![deny(clippy::correctness)]
+#![warn(clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
+#![warn(clippy::undocumented_unsafe_blocks)]
+#![deny(unsafe_op_in_unsafe_fn)]
+
 use std::path::PathBuf;
 
 use anyhow::Context;
