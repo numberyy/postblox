@@ -1,3 +1,17 @@
+//! RFC 5322 / MIME parsing — raw bytes in, [`ParsedEmail`] out.
+//!
+//! Single entry point: [`parse`]. It pulls headers, normalises
+//! recipient lists, picks `text/plain` and `text/html` body parts, and
+//! collects attachments into [`ParsedAttachment`] with a
+//! [`Disposition`] tag.
+//!
+//! This is the bench-gate hot path: [`parse`] runs on every inbound
+//! IMAP message and CLAUDE.md targets ≥ 5,000 msgs/sec for parsing
+//! throughput. Underlying dep is `mail-parser` (Tier 2 in CLAUDE.md —
+//! wrapped here so the rest of the crate doesn't import it directly).
+//!
+//! Failures land in [`crate::mail::error::MailError::Parse`].
+
 use mail_parser::{Address, HeaderValue, MessageParser, MimeHeaders, PartType};
 use serde::{Deserialize, Serialize};
 

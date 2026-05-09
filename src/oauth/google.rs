@@ -1,3 +1,24 @@
+//! Gmail OAuth2 + XOAUTH2 SASL helpers.
+//!
+//! The full Gmail authentication flow lives here: building the
+//! authorization URL ([`authorization_url`]), exchanging or refreshing
+//! tokens through the [`GoogleOAuth`] trait (and the production
+//! [`GoogleOAuthHttpClient`] impl), persisting the result through
+//! [`crate::secrets::SecretStore`] via [`load_stored_oauth`] /
+//! [`store_stored_oauth`], and finally formatting a Gmail-shaped
+//! XOAUTH2 SASL string for IMAP/SMTP via [`xoauth2_sasl_string`].
+//!
+//! Confidential fields ([`GoogleOAuthConfig::client_secret`],
+//! [`GoogleOAuthToken::access_token`], [`GoogleOAuthToken::refresh_token`])
+//! have hand-written `Debug` impls that print `<redacted>` so
+//! `tracing` and panic backtraces never leak secrets. Token bytes are
+//! also held in `zeroize::Zeroizing` buffers when they cross the
+//! reqwest boundary.
+//!
+//! Configuration is locked to the Gmail scope (`GMAIL_SCOPE`); other
+//! Google APIs are deliberately rejected at validate time so an
+//! over-scoped token can't slip through.
+
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::Duration as StdDuration;

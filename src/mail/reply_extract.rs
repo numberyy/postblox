@@ -1,3 +1,17 @@
+//! Strip quoted history and signature blocks from a plain-text reply.
+//!
+//! Single entry point: [`extract_reply`]. The reply body is split on
+//! `\n` and walked top-down; the first cutoff line wins:
+//!
+//! - `--` or `\u{2014}` (em dash) — signature separator.
+//! - `On … wrote:` (single line) and the multi-line Gmail-mobile wrap.
+//! - Outlook-style `From:` / `Sent:` / `To:` / `Subject:` header block.
+//!
+//! Lines before the cutoff that look like quotes (`>` prefix, etc.) are
+//! filtered out, then the result is trimmed. Pure function, framework-
+//! free, used by both the TUI and the MCP bridge to summarise a reply
+//! without the original conversation.
+
 pub fn extract_reply(text: &str) -> String {
     let text = text.replace("\r\n", "\n");
     let lines: Vec<&str> = text.split('\n').collect();

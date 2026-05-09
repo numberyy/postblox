@@ -1,3 +1,21 @@
+//! Decide whether a freshly parsed message joins an existing thread or
+//! starts a new one.
+//!
+//! Single entry point: [`assign_thread`]. The decision uses three
+//! sources, in order of priority:
+//!
+//! 1. `In-Reply-To` header — exact match against any [`ThreadRef`]'s
+//!    known message-ids returns [`ThreadMatch::Existing`].
+//! 2. `References` header — scanned tail-first (most recent first),
+//!    same matching rule.
+//! 3. [`normalize_subject`] — strip leading `Re:` / `Fwd:` / `Fw:`
+//!    prefixes, lowercase, then exact-match against threads whose last
+//!    message landed inside the 7-day cutoff.
+//!
+//! No match → [`ThreadMatch::New`] and the caller mints a thread row.
+//! All inputs are pure values from [`crate::mail::parser::ParsedEmail`];
+//! no DB reads happen here.
+
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 

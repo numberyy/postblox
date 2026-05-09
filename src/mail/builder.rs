@@ -1,3 +1,20 @@
+//! MIME assembly for outgoing messages.
+//!
+//! Concrete entry points (the function set has accreted as features
+//! landed; the most general form is [`build_mime_full`], which the
+//! thinner wrappers delegate to):
+//!
+//! - [`build_mime`] — text + optional HTML, no attachments.
+//! - [`build_mime_with_attachments`] — adds `multipart/mixed` parts.
+//! - [`build_mime_full`] — adds RFC 5322 §3.6.4 [`ReplyHeaders`]
+//!   (`In-Reply-To` / `References`) for threaded replies.
+//!
+//! `#[allow(clippy::too_many_arguments)]` is intentional on the build
+//! functions: the parameter list mirrors the SMTP envelope plus body
+//! parts, and grouping into an options struct would just shuffle the
+//! same fields without removing any. All header inputs are CRLF-
+//! stripped before they reach the wire to prevent header injection.
+
 use std::fmt::Write;
 
 use chrono::Utc;

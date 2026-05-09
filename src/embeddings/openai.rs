@@ -1,3 +1,17 @@
+//! OpenAI-compatible HTTP embedding provider.
+//!
+//! [`OpenAiProvider`] talks to any service that exposes the OpenAI
+//! `POST /v1/embeddings` shape — that's the actual OpenAI API, plus
+//! Ollama, plus a handful of self-hosted gateways. The API surface is
+//! deliberately tiny: construct with [`OpenAiProvider::new`], then
+//! call [`super::EmbeddingProvider::embed`].
+//!
+//! The HTTP client has a 30-second timeout baked in. Responses are
+//! validated against the configured dimension on every call so a
+//! provider that silently switches models trips
+//! [`super::EmbeddingError::DimensionMismatch`] instead of corrupting
+//! the index.
+
 use std::future::Future;
 use std::pin::Pin;
 
