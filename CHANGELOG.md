@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SQLite schema (9 tables + FTS5 virtual table + 3 triggers), one
   module per entity, in-memory test pool.
 - Pure-Rust MIME parser, reply extractor, threading, builder.
-- Embeddings client (`EmbeddingProvider` + OpenAI-compatible HTTP).
+
+### Removed
+- **Removed:** `embeddings` module (dead code; semantic search will be agent / gateway driven via a future read-only SQL tool).
 
 [Unreleased]: https://github.com/numbery/postblox/commits/main

@@ -32,11 +32,6 @@
 # smtp_port = 465
 # auth      = "password"   # or "oauth2_google"
 
-# [embeddings]
-# url        = "http://localhost:11434"
-# model      = "nomic-embed-text"
-# dimension  = 768
-
 # [mcp.gates]
 # default = "require"          # auto_allow | require | deny
 #

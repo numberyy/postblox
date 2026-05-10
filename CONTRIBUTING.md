@@ -54,7 +54,7 @@ version:
 ## Tests
 
 - New module → tests for that module. No exceptions.
-- `mail/` and `embeddings/` MUST NOT import a framework crate.
+- `mail/` MUST NOT import a framework crate.
 - Integration tests against an in-memory pool: `db::test_pool()`.
 - Edge cases (empty/zero, one, many, boundary, malformed, unicode,
   concurrent) are mandatory, not optional.
