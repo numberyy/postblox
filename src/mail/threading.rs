@@ -16,6 +16,8 @@
 //! All inputs are pure values from [`crate::mail::parser::ParsedEmail`];
 //! no DB reads happen here.
 
+use std::borrow::Cow;
+
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
@@ -74,8 +76,12 @@ pub fn assign_thread(message: &ParsedEmail, existing_threads: &[ThreadRef]) -> T
     ThreadMatch::New
 }
 
-pub fn normalize_subject(subject: &str) -> String {
-    let mut s = subject.trim();
+/// Trim, strip `Re:` / `Fwd:` / `Fw:` prefixes, and lowercase. Returns
+/// `Cow::Borrowed` when the input is already in normal form, otherwise
+/// allocates once into `Cow::Owned`.
+pub fn normalize_subject(subject: &str) -> Cow<'_, str> {
+    let trimmed = subject.trim();
+    let mut s = trimmed;
     loop {
         let b = s.as_bytes();
         let skip = if b.len() >= 3 && b[..3].eq_ignore_ascii_case(b"re:") {
@@ -89,7 +95,11 @@ pub fn normalize_subject(subject: &str) -> String {
         };
         s = s[skip..].trim_start();
     }
-    s.to_lowercase()
+    // No prefix stripped, no whitespace trimmed, no uppercase — borrow the input.
+    if std::ptr::eq(s, subject) && !s.chars().any(|c| c.is_uppercase()) {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(s.to_lowercase())
 }
 
 #[cfg(test)]

@@ -132,7 +132,7 @@ pub async fn reconcile_folder(
         if fetched.raw.is_empty() {
             continue;
         }
-        let parsed: ParsedEmail = match parse(&fetched.raw) {
+        let mut parsed: ParsedEmail = match parse(&fetched.raw) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(uid, error = %e, "skip unparseable message");
@@ -166,10 +166,13 @@ pub async fn reconcile_folder(
             }
         };
 
-        let new = build_message_row(account_id, folder.id, thread_id, fetched, &parsed);
+        // Take attachments out before moving `parsed` into `build_message_row` so
+        // we can persist them afterwards without re-borrowing a moved value.
+        let attachments = std::mem::take(&mut parsed.attachments);
+        let new = build_message_row(account_id, folder.id, thread_id, fetched, parsed);
         let row: Message = db::messages::create(pool, &new).await?;
         if let Err(error) =
-            crate::attachments::persist_parsed_for_message(pool, row.id, &parsed.attachments).await
+            crate::attachments::persist_parsed_for_message(pool, row.id, &attachments).await
         {
             // best-effort rollback of the half-inserted message; original error takes priority.
             let _ = db::messages::delete(pool, row.id).await;
@@ -243,33 +246,37 @@ fn build_message_row(
     folder_id: Uuid,
     thread_id: Uuid,
     fetched: &crate::imap::FetchedMessage,
-    parsed: &ParsedEmail,
+    parsed: ParsedEmail,
 ) -> db::messages::NewMessage {
     let snippet = parsed.text_body.as_deref().map(|t| {
-        let trimmed: String = t.chars().take(200).collect();
-        trimmed.replace(['\n', '\r'], " ")
+        let mut out = String::with_capacity(200);
+        for ch in t.chars().take(200) {
+            out.push(if matches!(ch, '\n' | '\r') { ' ' } else { ch });
+        }
+        out
     });
+    let references_header = if parsed.references.is_empty() {
+        None
+    } else {
+        Some(parsed.references.join(" "))
+    };
     db::messages::NewMessage {
         account_id,
         folder_id,
         thread_id: Some(thread_id),
         uid: fetched.uid as i64,
-        message_id_header: parsed.message_id.clone(),
-        in_reply_to: parsed.in_reply_to.clone(),
-        references_header: if parsed.references.is_empty() {
-            None
-        } else {
-            Some(parsed.references.join(" "))
-        },
-        from_addr: parsed.from.clone(),
-        to_addrs: Value::Array(parsed.to.iter().cloned().map(Value::String).collect()),
-        cc_addrs: Value::Array(parsed.cc.iter().cloned().map(Value::String).collect()),
+        message_id_header: parsed.message_id,
+        in_reply_to: parsed.in_reply_to,
+        references_header,
+        from_addr: parsed.from,
+        to_addrs: Value::Array(parsed.to.into_iter().map(Value::String).collect()),
+        cc_addrs: Value::Array(parsed.cc.into_iter().map(Value::String).collect()),
         bcc_addrs: Value::Array(vec![]),
         reply_to: None,
-        subject: parsed.subject.clone(),
+        subject: parsed.subject,
         snippet,
-        text_body: parsed.text_body.clone(),
-        html_body: parsed.html_body.clone(),
+        text_body: parsed.text_body,
+        html_body: parsed.html_body,
         raw_size: fetched.raw.len() as i64,
         flags: Value::Array(fetched.flags.iter().cloned().map(Value::String).collect()),
         internal_date: fetched.internal_date.unwrap_or_else(Utc::now),
