@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 
 use crate::models::AccountId;
 
-use super::{Secret, SecretError, SecretStore};
+use super::{sealed, Secret, SecretError, SecretStore};
 
 pub const DEFAULT_SERVICE: &str = "postblox";
 
@@ -76,6 +76,8 @@ impl KeyringSecretStore {
         ::keyring::Entry::new(service, &Self::account_key(account_id)).map_err(map_keyring_error)
     }
 }
+
+impl sealed::Sealed for KeyringSecretStore {}
 
 #[async_trait]
 impl SecretStore for KeyringSecretStore {

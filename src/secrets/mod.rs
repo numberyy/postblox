@@ -14,6 +14,13 @@ use zeroize::Zeroizing;
 
 use crate::models::AccountId;
 
+mod sealed {
+    /// Private supertrait that prevents downstream crates from
+    /// implementing [`super::SecretStore`]. New backends (Bitwarden,
+    /// etc.) must live in this crate so they can opt in to `Sealed`.
+    pub trait Sealed {}
+}
+
 /// A password held in memory. Wraps `Zeroizing<String>` so the buffer
 /// is wiped on drop.
 pub type Secret = Zeroizing<String>;
@@ -38,8 +45,12 @@ pub enum SecretError {
 
 /// Storage for per-account secrets. Implementations must serialise
 /// concurrent writes — callers may call `put` from multiple tasks.
+///
+/// This trait is sealed: only backends inside the postblox crate may
+/// implement it. Adding a new backend (e.g. Bitwarden, see R7+) means
+/// adding a module here and an `impl sealed::Sealed for …` line.
 #[async_trait]
-pub trait SecretStore: Send + Sync {
+pub trait SecretStore: sealed::Sealed + Send + Sync {
     /// Persist `secret` for `account_id`, overwriting any prior value.
     ///
     /// # Errors
@@ -110,6 +121,8 @@ pub fn account_secret_ref(account_id: AccountId) -> String {
 /// silently appear to succeed.
 #[derive(Debug, Default)]
 pub struct UnconfiguredSecretStore;
+
+impl sealed::Sealed for UnconfiguredSecretStore {}
 
 #[async_trait]
 impl SecretStore for UnconfiguredSecretStore {

@@ -27,7 +27,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::models::AccountId;
 
-use super::{Secret, SecretError, SecretStore};
+use super::{sealed, Secret, SecretError, SecretStore};
 
 const VERSION: u8 = 0x01;
 const SALT_LEN: usize = 16;
@@ -147,6 +147,8 @@ impl FileSecretStore {
         Ok(())
     }
 }
+
+impl sealed::Sealed for FileSecretStore {}
 
 #[async_trait]
 impl SecretStore for FileSecretStore {
