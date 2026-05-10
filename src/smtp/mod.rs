@@ -56,6 +56,22 @@ pub enum SmtpError {
 
 #[async_trait::async_trait]
 pub trait SmtpSubmitter: Send + Sync {
+    /// Submit a single message via SMTP using the credentials and
+    /// transport security in `request`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`SmtpError::InvalidConfig`] if the server config is contradictory
+    ///   (for example both `use_tls` and `starttls` set) or TLS parameters
+    ///   cannot be built.
+    /// - [`SmtpError::InvalidRequest`] if `from`/`recipients` cannot be parsed
+    ///   into a valid envelope.
+    /// - [`SmtpError::Auth`] if the server rejects the credentials
+    ///   (`535 Authentication failed` or equivalent SASL refusal).
+    /// - [`SmtpError::Transient`] for retryable transport errors
+    ///   (timeouts, 4xx responses, network blips).
+    /// - [`SmtpError::Internal`] for any other lettre / SMTP failure.
     async fn submit(&self, request: SmtpSubmitRequest) -> Result<(), SmtpError>;
 }
 

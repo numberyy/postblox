@@ -27,6 +27,18 @@ use crate::auth::MailCredential;
 /// stream type so it can sit behind a `dyn` trait object.
 #[async_trait::async_trait]
 pub trait ImapAuth: Send + Sync {
+    /// Connect, authenticate, and fetch the mailbox list to verify the
+    /// credentials work end-to-end.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`ImapError::Io`] if the TCP connect or stream read fails.
+    /// - [`ImapError::Tls`] if the TLS handshake fails.
+    /// - [`ImapError::InvalidName`] if `host` is not a valid TLS server name.
+    /// - [`ImapError::Auth`] if the server rejects the credentials.
+    /// - [`ImapError::Protocol`] for any other IMAP-level failure
+    ///   (greeting, `LIST`, etc.).
     async fn test_login(
         &self,
         host: &str,
@@ -40,6 +52,18 @@ pub trait ImapAuth: Send + Sync {
 /// connection — pooling/reuse lands with the IDLE worker (R3b-3b).
 #[async_trait::async_trait]
 pub trait ImapSync: Send + Sync {
+    /// Connect, authenticate, select `folder`, and fetch UIDs from
+    /// `from_uid` upward.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`ImapError::Io`] if the TCP connect or stream read fails.
+    /// - [`ImapError::Tls`] if the TLS handshake fails.
+    /// - [`ImapError::InvalidName`] if `host` is not a valid TLS server name.
+    /// - [`ImapError::Auth`] if the server rejects the credentials.
+    /// - [`ImapError::Protocol`] if `SELECT` or `UID FETCH` fails or the
+    ///   server closes the connection unexpectedly.
     async fn sync_folder(
         &self,
         host: &str,
@@ -54,6 +78,20 @@ pub trait ImapSync: Send + Sync {
 /// Erased entry point for one bounded IMAP IDLE wait.
 #[async_trait::async_trait]
 pub trait ImapIdle: Send + Sync {
+    /// Connect, `SELECT` the requested folder, and wait once for an
+    /// IDLE notification, a timeout, or the cancellation token.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`ImapError::Io`] if the TCP connect or stream read fails.
+    /// - [`ImapError::Tls`] if the TLS handshake fails.
+    /// - [`ImapError::InvalidName`] if `request.host` is not a valid TLS server name.
+    /// - [`ImapError::Auth`] if the server rejects the credentials.
+    /// - [`ImapError::Unsupported`] if the server does not advertise the
+    ///   IDLE capability.
+    /// - [`ImapError::Protocol`] for any other IMAP-level failure during
+    ///   `CAPABILITY`/`SELECT`/`IDLE`.
     async fn idle_once(&self, request: IdleRequest<'_>) -> Result<IdleOutcome, ImapError>;
 }
 
@@ -118,14 +156,32 @@ impl<C: Connector> ImapIdle for ConnectorAuth<C> {
 
 /// Default production binding: rustls + native cert store. Returns the
 /// same `Arc` typed two ways so callers don't have to construct twice.
+///
+/// # Errors
+///
+/// Returns [`ImapError::Tls`] if the platform cert store / rustls config
+/// cannot be initialised (typically a missing or unreadable system root
+/// store).
 pub fn default_auth() -> Result<Arc<dyn ImapAuth>, ImapError> {
     Ok(Arc::new(ConnectorAuth::new(RustlsConnector::new()?)))
 }
 
+/// Default production [`ImapSync`] backed by [`RustlsConnector`].
+///
+/// # Errors
+///
+/// Returns [`ImapError::Tls`] if the platform cert store / rustls config
+/// cannot be initialised.
 pub fn default_sync() -> Result<Arc<dyn ImapSync>, ImapError> {
     Ok(Arc::new(ConnectorAuth::new(RustlsConnector::new()?)))
 }
 
+/// Default production [`ImapIdle`] backed by [`RustlsConnector`].
+///
+/// # Errors
+///
+/// Returns [`ImapError::Tls`] if the platform cert store / rustls config
+/// cannot be initialised.
 pub fn default_idle() -> Result<Arc<dyn ImapIdle>, ImapError> {
     Ok(Arc::new(ConnectorAuth::new(RustlsConnector::new()?)))
 }

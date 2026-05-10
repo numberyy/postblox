@@ -57,6 +57,19 @@ impl Default for WorkerConfig {
 
 #[async_trait::async_trait]
 pub trait WorkerCredentialResolver: Send + Sync {
+    /// Return a fresh [`MailCredential`] for `account_id`, refreshing
+    /// any underlying OAuth token if necessary.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`SyncError::MissingCredentials`] if the account has no stored
+    ///   credentials at all.
+    /// - [`SyncError::Credential`] if a refresh round-trip fails for a
+    ///   reason that is not itself an auth rejection (network, decode,
+    ///   secret-store IO).
+    /// - [`SyncError::Imap`] wrapping [`crate::imap::ImapError::Auth`] if
+    ///   the upstream rejects the refreshed credential.
     async fn resolve(&self, account_id: AccountId) -> Result<MailCredential, SyncError>;
 }
 

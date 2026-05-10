@@ -57,6 +57,22 @@ pub(crate) fn guess_content_type_for_path(path: &Path) -> String {
         .to_string()
 }
 
+/// Persist parsed attachments for `message_id` to the on-disk store and
+/// insert the matching rows via [`crate::db::attachments`].
+///
+/// # Errors
+///
+/// Returns:
+/// - [`AttachmentError::TooLarge`] if any attachment exceeds the 25 MiB
+///   per-attachment limit defined by `CLAUDE.md`.
+/// - [`AttachmentError::BadPath`] if the computed storage path has no
+///   parent directory to create.
+/// - [`AttachmentError::Io`] if creating the directory or writing the
+///   bytes fails (including the `create_new` collision when a file with
+///   the same name already exists).
+/// - [`AttachmentError::Db`] wrapping [`crate::db::DbError`] if the row
+///   insert or the `PRAGMA database_list` lookup used to derive the
+///   storage root fails.
 pub async fn persist_parsed_for_message(
     pool: &SqlitePool,
     message_id: MessageId,
@@ -99,6 +115,15 @@ pub async fn persist_parsed_for_message(
     Ok(stored)
 }
 
+/// Render a bounded inline preview for `attachment`, capped at
+/// [`PREVIEW_LIMIT_BYTES`].
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] if `attachment.storage_path` cannot be
+/// opened or read. Non-text or non-UTF-8 content is reported through
+/// the returned [`AttachmentPreview`] (with `inline_text = None`), not
+/// as an error.
 pub async fn preview_attachment(
     attachment: Attachment,
 ) -> Result<AttachmentPreview, std::io::Error> {
@@ -147,6 +172,17 @@ pub async fn preview_attachment(
     }
 }
 
+/// Copy the stored bytes of `attachment` to `destination_path`,
+/// refusing to overwrite an existing file.
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] if:
+/// - `destination_path` already exists ([`std::io::ErrorKind::AlreadyExists`]).
+/// - The destination's parent directory does not exist
+///   ([`std::io::ErrorKind::NotFound`]).
+/// - Opening `attachment.storage_path`, creating the destination, or
+///   copying/flushing the bytes fails for any other IO reason.
 pub async fn export_attachment(
     attachment: &Attachment,
     destination_path: &Path,

@@ -125,6 +125,17 @@ pub enum ConfigError {
 
 /// Load config from `path`. A missing file is treated as an empty
 /// config so first-run users don't have to create one.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`ConfigError::Io`] if the file exists but cannot be read.
+/// - [`ConfigError::Toml`] if the file is not valid TOML or contains
+///   unknown fields (the schema uses `deny_unknown_fields`).
+/// - [`ConfigError::Invalid`] if the parsed config is internally
+///   inconsistent — for example `[secrets] backend = "file"` without a
+///   passphrase, a `path` set without `backend = "file"`, or an
+///   unknown TUI theme name.
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
     match std::fs::read_to_string(path) {
         Ok(s) => parse(&s),

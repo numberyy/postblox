@@ -36,6 +36,15 @@ pub trait Connector: Send + Sync {
         + std::fmt::Debug
         + 'static;
 
+    /// Open a stream to `host:port` ready for IMAP traffic.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`ImapError::Io`] if the TCP connect fails.
+    /// - [`ImapError::InvalidName`] if `host` is not a valid TLS server name
+    ///   (TLS connectors only).
+    /// - [`ImapError::Tls`] if the TLS handshake fails.
     async fn connect(&self, host: &str, port: u16) -> Result<Self::Stream, ImapError>;
 }
 
@@ -45,6 +54,13 @@ pub struct RustlsConnector {
 }
 
 impl RustlsConnector {
+    /// Build a new rustls connector backed by the platform cert store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ImapError::Tls`] if rustls cannot construct a client
+    /// config from the platform verifier (typically a missing or
+    /// unreadable system root store).
     pub fn new() -> Result<Self, ImapError> {
         // Install the ring crypto provider once per process. Multiple
         // installs return Err which we treat as benign (already set).
@@ -88,6 +104,16 @@ impl Connector for PlainConnector {
 
 /// Open an IMAP connection, read the greeting, log in, return the
 /// authenticated session.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`ImapError::Io`] if the TCP connect or stream read fails.
+/// - [`ImapError::Tls`] if the TLS handshake fails.
+/// - [`ImapError::InvalidName`] if `host` is not a valid TLS server name.
+/// - [`ImapError::Auth`] if the server rejects the password.
+/// - [`ImapError::Protocol`] if the greeting is missing or any other
+///   IMAP-level failure occurs.
 pub async fn connect<C: Connector>(
     connector: &C,
     host: &str,
@@ -99,6 +125,18 @@ pub async fn connect<C: Connector>(
     connect_with_credential(connector, host, port, username, &credential).await
 }
 
+/// Open an IMAP connection and authenticate with the given
+/// [`MailCredential`] (password or `XOAUTH2`).
+///
+/// # Errors
+///
+/// Returns:
+/// - [`ImapError::Io`] if the TCP connect or stream read fails.
+/// - [`ImapError::Tls`] if the TLS handshake fails.
+/// - [`ImapError::InvalidName`] if `host` is not a valid TLS server name.
+/// - [`ImapError::Auth`] if `LOGIN` or `AUTHENTICATE XOAUTH2` is rejected.
+/// - [`ImapError::Protocol`] if the greeting is missing or any other
+///   IMAP-level failure occurs.
 pub async fn connect_with_credential<C: Connector>(
     connector: &C,
     host: &str,
@@ -146,6 +184,12 @@ impl async_imap::Authenticator for Xoauth2<'_> {
 }
 
 /// Fetch the list of mailboxes on the server. Equivalent to `LIST "" "*"`.
+///
+/// # Errors
+///
+/// Returns [`ImapError::Protocol`] if the `LIST` command fails or the
+/// server closes the connection mid-response, or [`ImapError::Io`] if
+/// reading the underlying stream fails.
 pub async fn list_folders<S>(session: &mut Session<S>) -> Result<Vec<FolderInfo>, ImapError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send + 'static,
@@ -240,6 +284,12 @@ fn flag_name(f: async_imap::types::Flag<'_>) -> String {
 /// RFC822)`. Stops short of `LOGOUT` so callers can chain more
 /// operations; the wrapping `ImapSync::sync_folder` impl logs out for
 /// us.
+///
+/// # Errors
+///
+/// Returns [`ImapError::Protocol`] if `SELECT` or `UID FETCH` fails (for
+/// example, the folder does not exist or the server returns `NO`/`BAD`),
+/// or [`ImapError::Io`] if reading the underlying stream fails.
 pub async fn fetch_uid_range<S>(
     session: &mut Session<S>,
     folder: &str,
@@ -300,6 +350,20 @@ where
     })
 }
 
+/// Connect, authenticate, `SELECT request.folder`, and wait once for an
+/// IDLE change, the configured timeout, or the cancellation token.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`ImapError::Io`] if the TCP connect or stream read fails.
+/// - [`ImapError::Tls`] if the TLS handshake fails.
+/// - [`ImapError::InvalidName`] if `request.host` is not a valid TLS server name.
+/// - [`ImapError::Auth`] if the server rejects the credentials.
+/// - [`ImapError::Unsupported`] if the server does not advertise the
+///   IDLE capability.
+/// - [`ImapError::Protocol`] for any other IMAP-level failure during
+///   `CAPABILITY`/`SELECT`/`IDLE`.
 pub async fn wait_for_idle_change<C: Connector>(
     connector: &C,
     request: IdleRequest<'_>,

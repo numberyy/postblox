@@ -44,6 +44,24 @@ pub struct ReconcileReport {
     pub last_seen_uid: Option<i64>,
 }
 
+/// Pull new IMAP messages for `folder_name` and write them to the
+/// local SQLite store, returning a summary of what changed.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`SyncError::MissingCredentials`] if `credential` is empty.
+/// - [`SyncError::UnknownAccount`] if `account_id` does not exist locally.
+/// - [`SyncError::UnknownFolder`] if `folder_name` does not exist for the
+///   account.
+/// - [`SyncError::Imap`] wrapping any [`crate::imap::ImapError`] surfaced
+///   by [`ImapSync::sync_folder`] (auth, network, protocol).
+/// - [`SyncError::Db`] if any SQLite read or write fails (folder lookup,
+///   thread/message insert, UID-state update).
+/// - [`SyncError::Attachment`] if persisting a fetched attachment fails;
+///   the half-inserted message is best-effort rolled back.
+/// - [`SyncError::Parse`] is reserved for upstream parser errors and is
+///   not raised here — unparseable messages are skipped with a warning.
 pub async fn reconcile_folder(
     pool: &SqlitePool,
     hub: &Arc<Hub>,
