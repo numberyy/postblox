@@ -18,7 +18,10 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use crate::models::{Account, Attachment, Draft, Folder, Message};
+use crate::models::{
+    Account, AccountId, Attachment, AttachmentId, Draft, DraftId, Folder, FolderId, Message,
+    MessageId, ThreadId,
+};
 
 use super::theme::ThemeName;
 
@@ -147,7 +150,7 @@ impl ComposeField {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountItem {
-    pub id: Uuid,
+    pub id: AccountId,
     pub label: String,
     pub email: String,
     pub status: String,
@@ -173,7 +176,7 @@ impl From<Account> for AccountItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderItem {
-    pub id: Uuid,
+    pub id: FolderId,
     pub name: String,
     pub role: String,
 }
@@ -190,8 +193,8 @@ impl From<Folder> for FolderItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageItem {
-    pub id: Uuid,
-    pub thread_id: Option<Uuid>,
+    pub id: MessageId,
+    pub thread_id: Option<ThreadId>,
     pub subject: String,
     pub from: String,
     pub date: String,
@@ -229,7 +232,7 @@ impl MessageItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadItem {
     pub key: Uuid,
-    pub thread_id: Option<Uuid>,
+    pub thread_id: Option<ThreadId>,
     pub subject: String,
     pub message_count: usize,
     pub latest_date: String,
@@ -239,7 +242,7 @@ pub struct ThreadItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageDetail {
-    pub id: Uuid,
+    pub id: MessageId,
     pub subject: String,
     pub from: String,
     pub snippet: String,
@@ -274,8 +277,8 @@ impl From<Message> for MessageDetail {
 /// reuse the same widget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftItem {
-    pub id: Uuid,
-    pub account_id: Uuid,
+    pub id: DraftId,
+    pub account_id: AccountId,
     pub subject: String,
     pub to: String,
     pub date: String,
@@ -343,9 +346,9 @@ impl From<crate::tui::ipc::DraftAttachmentPayload> for DraftAttachmentBytes {
 /// One row returned by the `search` op, projected for the search pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchHit {
-    pub message_id: Uuid,
-    pub account_id: Uuid,
-    pub folder_id: Uuid,
+    pub message_id: MessageId,
+    pub account_id: AccountId,
+    pub folder_id: FolderId,
     pub subject: String,
     pub from: String,
     pub snippet: String,
@@ -371,7 +374,7 @@ impl From<Message> for SearchHit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchState {
     pub query: String,
-    pub scope_account: Option<Uuid>,
+    pub scope_account: Option<AccountId>,
     pub hits: Vec<SearchHit>,
     pub selected: usize,
     pub pending: bool,
@@ -382,7 +385,7 @@ pub struct SearchState {
 impl SearchState {
     pub fn new(
         query: impl Into<String>,
-        scope_account: Option<Uuid>,
+        scope_account: Option<AccountId>,
         previous_pane: ActivePane,
     ) -> Self {
         Self {
@@ -398,8 +401,8 @@ impl SearchState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentItem {
-    pub id: Uuid,
-    pub message_id: Uuid,
+    pub id: AttachmentId,
+    pub message_id: MessageId,
     pub filename: String,
     pub content_type: String,
     pub size_bytes: i64,
@@ -423,7 +426,7 @@ impl From<Attachment> for AttachmentItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentPreviewItem {
-    pub attachment_id: Uuid,
+    pub attachment_id: AttachmentId,
     pub text: Option<String>,
     pub message: String,
     pub truncated: bool,
@@ -461,8 +464,8 @@ pub struct ComposerAttachment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerDraft {
-    pub account_id: Uuid,
-    pub in_reply_to_msg: Option<Uuid>,
+    pub account_id: AccountId,
+    pub in_reply_to_msg: Option<MessageId>,
     pub to_addrs: Vec<String>,
     pub cc_addrs: Vec<String>,
     pub bcc_addrs: Vec<String>,
@@ -480,7 +483,7 @@ pub struct ComposerDraft {
 /// starts editing.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ComposerPrefill {
-    pub in_reply_to_msg: Option<Uuid>,
+    pub in_reply_to_msg: Option<MessageId>,
     pub to_addrs: Vec<String>,
     pub cc_addrs: Vec<String>,
     pub bcc_addrs: Vec<String>,
@@ -526,8 +529,8 @@ impl AttachError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerState {
-    pub account_id: Uuid,
-    pub draft_id: Option<Uuid>,
+    pub account_id: AccountId,
+    pub draft_id: Option<DraftId>,
     pub focused: ComposeField,
     pub to: String,
     pub to_cursor: usize,
@@ -547,13 +550,13 @@ pub struct ComposerState {
     pub attachments: Vec<ComposerAttachment>,
     pub selected_attachment: usize,
     pub attach_input: String,
-    pub in_reply_to_msg: Option<Uuid>,
+    pub in_reply_to_msg: Option<MessageId>,
     pub in_reply_to: Option<String>,
     pub references_header: Option<String>,
 }
 
 impl ComposerState {
-    fn new(account_id: Uuid) -> Self {
+    fn new(account_id: AccountId) -> Self {
         Self {
             account_id,
             draft_id: None,
@@ -585,7 +588,7 @@ impl ComposerState {
     /// Build a composer state already populated with reply / forward
     /// data. The composer is marked dirty so the autosaver persists it
     /// on the next idle tick.
-    fn from_prefill(account_id: Uuid, prefill: ComposerPrefill) -> Self {
+    fn from_prefill(account_id: AccountId, prefill: ComposerPrefill) -> Self {
         let mut state = Self::new(account_id);
         state.to = join_addresses(&prefill.to_addrs);
         state.to_cursor = char_count(&state.to);
@@ -1039,7 +1042,7 @@ pub struct AppState {
     pub selected_message: usize,
     pub selected_attachment: usize,
     pub pending_open_attachment: Option<AttachmentItem>,
-    pub pending_delete_message: Option<Uuid>,
+    pub pending_delete_message: Option<MessageId>,
     pub command_input: String,
     pub status: String,
     pub error: Option<String>,
@@ -1047,7 +1050,7 @@ pub struct AppState {
     pub composer: Option<ComposerState>,
     pub toasts: VecDeque<Toast>,
     pub next_toast_id: u64,
-    pub account_states: HashMap<Uuid, AccountStatus>,
+    pub account_states: HashMap<AccountId, AccountStatus>,
     pub search: Option<SearchState>,
     pub search_input: String,
     pub search_input_previous_pane: ActivePane,
@@ -1058,7 +1061,7 @@ pub struct AppState {
     pub selected_draft: usize,
     /// Pending draft to delete; mirrors `pending_delete_message` so
     /// the same y/n confirmation flow can be reused.
-    pub pending_delete_draft: Option<Uuid>,
+    pub pending_delete_draft: Option<DraftId>,
 }
 
 impl Default for AppState {
@@ -1259,7 +1262,7 @@ impl AppState {
         self.selected_draft = 0;
     }
 
-    pub fn selected_draft_id(&self) -> Option<Uuid> {
+    pub fn selected_draft_id(&self) -> Option<DraftId> {
         self.drafts.get(self.selected_draft).map(|d| d.id)
     }
 
@@ -1273,7 +1276,7 @@ impl AppState {
         move_index(&mut self.selected_draft, self.drafts.len(), delta)
     }
 
-    pub fn begin_draft_delete(&mut self, draft_id: Uuid) {
+    pub fn begin_draft_delete(&mut self, draft_id: DraftId) {
         self.pending_delete_draft = Some(draft_id);
         self.mode = InputMode::ConfirmDelete;
     }
@@ -1285,7 +1288,7 @@ impl AppState {
         }
     }
 
-    pub fn take_pending_delete_draft(&mut self) -> Option<Uuid> {
+    pub fn take_pending_delete_draft(&mut self) -> Option<DraftId> {
         let id = self.pending_delete_draft.take();
         if id.is_some() && self.mode == InputMode::ConfirmDelete {
             self.mode = InputMode::Normal;
@@ -1295,7 +1298,7 @@ impl AppState {
 
     /// Drop the row matching `draft_id` from the drafts list and
     /// clamp the selection. Used by the optimistic delete path.
-    pub fn remove_draft_locally(&mut self, draft_id: Uuid) -> bool {
+    pub fn remove_draft_locally(&mut self, draft_id: DraftId) -> bool {
         let before = self.drafts.len();
         self.drafts.retain(|d| d.id != draft_id);
         let removed = self.drafts.len() != before;
@@ -1741,7 +1744,7 @@ impl AppState {
         self.attachments.get(self.selected_attachment)
     }
 
-    pub fn selected_attachment_id(&self) -> Option<Uuid> {
+    pub fn selected_attachment_id(&self) -> Option<AttachmentId> {
         self.selected_attachment().map(|attachment| attachment.id)
     }
 
@@ -1851,7 +1854,7 @@ impl AppState {
     /// and, on `Error`, pushes (or coalesces) an Error toast.
     pub fn apply_sync_state(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
         state: SyncStateUi,
         last_error: Option<String>,
         now: Instant,
@@ -1878,7 +1881,12 @@ impl AppState {
     }
 
     /// Push a `mail.new` toast resolved against current accounts/folders.
-    pub fn push_mail_new_toast(&mut self, account_id: Uuid, folder_id: Option<Uuid>, now: Instant) {
+    pub fn push_mail_new_toast(
+        &mut self,
+        account_id: AccountId,
+        folder_id: Option<FolderId>,
+        now: Instant,
+    ) {
         let folder = folder_id
             .and_then(|id| self.folders.iter().find(|f| f.id == id))
             .map(|f| f.name.clone())
@@ -1889,7 +1897,7 @@ impl AppState {
     }
 
     /// Push (or coalesce) an `account.synced` toast for `account_id`.
-    pub fn push_account_synced_toast(&mut self, account_id: Uuid, now: Instant) {
+    pub fn push_account_synced_toast(&mut self, account_id: AccountId, now: Instant) {
         let label = self.account_label_for_toast(account_id);
         let text = format!("Synced {label}");
         if !self.coalesce_toast(ToastKind::Info, &text, now, COALESCE_ACCOUNT_SYNCED) {
@@ -1897,7 +1905,7 @@ impl AppState {
         }
     }
 
-    fn account_label_for_toast(&self, account_id: Uuid) -> String {
+    fn account_label_for_toast(&self, account_id: AccountId) -> String {
         self.accounts
             .iter()
             .find(|a| a.id == account_id)
@@ -1905,11 +1913,11 @@ impl AppState {
             .unwrap_or_else(|| short_id(account_id))
     }
 
-    pub fn selected_account_id(&self) -> Option<Uuid> {
+    pub fn selected_account_id(&self) -> Option<AccountId> {
         self.accounts.get(self.selected_account).map(|a| a.id)
     }
 
-    pub fn selected_folder_id(&self) -> Option<Uuid> {
+    pub fn selected_folder_id(&self) -> Option<FolderId> {
         self.folders.get(self.selected_folder).map(|f| f.id)
     }
 
@@ -1997,8 +2005,8 @@ impl AppState {
     }
 
     /// Resolve an account name (label or email, case-insensitive) to a
-    /// `Uuid`. Used by `:search --account <name>`.
-    pub fn account_id_by_name(&self, name: &str) -> Option<Uuid> {
+    /// `AccountId`. Used by `:search --account <name>`.
+    pub fn account_id_by_name(&self, name: &str) -> Option<AccountId> {
         let lowered = name.trim().to_lowercase();
         if lowered.is_empty() {
             return None;
@@ -2050,7 +2058,7 @@ impl AppState {
     /// Open the search pane with `query` and `scope_account`. Records
     /// `previous_pane` so Esc can restore it. Marks results as pending
     /// until [`AppState::apply_search_hits`] is called.
-    pub fn begin_search(&mut self, query: impl Into<String>, scope_account: Option<Uuid>) {
+    pub fn begin_search(&mut self, query: impl Into<String>, scope_account: Option<AccountId>) {
         let previous = if self.search_pane_visible() {
             self.search
                 .as_ref()
@@ -2102,7 +2110,7 @@ impl AppState {
         self.search.as_ref().map(|state| state.query.as_str())
     }
 
-    pub fn search_scope_account(&self) -> Option<Uuid> {
+    pub fn search_scope_account(&self) -> Option<AccountId> {
         self.search.as_ref().and_then(|state| state.scope_account)
     }
 
@@ -2154,7 +2162,7 @@ impl AppState {
         true
     }
 
-    pub fn selected_message_id(&self) -> Option<Uuid> {
+    pub fn selected_message_id(&self) -> Option<MessageId> {
         self.messages.get(self.selected_message).map(|m| m.id)
     }
 
@@ -2175,7 +2183,7 @@ impl AppState {
         &self,
         flag: &str,
         enabled: bool,
-    ) -> Option<(Uuid, Vec<String>)> {
+    ) -> Option<(MessageId, Vec<String>)> {
         self.selected_message()
             .map(|message| (message.id, message.with_flag(flag, enabled)))
     }
@@ -2194,7 +2202,7 @@ impl AppState {
     /// Drop the message with `message_id` from the visible folder list
     /// and refresh thread/message panes. Returns true when a row was
     /// removed.
-    pub fn remove_message_locally(&mut self, message_id: Uuid) -> bool {
+    pub fn remove_message_locally(&mut self, message_id: MessageId) -> bool {
         let before = self.folder_messages.len();
         let selected_thread_key = self.selected_thread().map(|thread| thread.key);
         self.folder_messages
@@ -2227,7 +2235,7 @@ impl AppState {
         self.normalize_active_pane();
     }
 
-    pub fn begin_delete_confirmation(&mut self, message_id: Uuid) {
+    pub fn begin_delete_confirmation(&mut self, message_id: MessageId) {
         self.pending_delete_message = Some(message_id);
         self.mode = InputMode::ConfirmDelete;
         self.set_status("Delete? y/n");
@@ -2239,7 +2247,7 @@ impl AppState {
         self.set_status("Delete cancelled");
     }
 
-    pub fn take_pending_delete_message(&mut self) -> Option<Uuid> {
+    pub fn take_pending_delete_message(&mut self) -> Option<MessageId> {
         let id = self.pending_delete_message.take();
         if id.is_some() {
             self.mode = InputMode::Normal;
@@ -2247,7 +2255,7 @@ impl AppState {
         id
     }
 
-    pub fn apply_message_flags(&mut self, message_id: Uuid, flags: Vec<String>) {
+    pub fn apply_message_flags(&mut self, message_id: MessageId, flags: Vec<String>) {
         let selected_thread = self.selected_thread().map(|thread| thread.key);
         if let Some(message) = self
             .folder_messages
@@ -2315,7 +2323,7 @@ impl AppState {
         std::mem::take(&mut self.command_input)
     }
 
-    pub fn enter_composer(&mut self, account_id: Uuid) {
+    pub fn enter_composer(&mut self, account_id: AccountId) {
         self.composer = Some(ComposerState::new(account_id));
         self.mode = InputMode::Compose;
         self.clear_error();
@@ -2325,7 +2333,7 @@ impl AppState {
     /// Enter the composer pre-populated with reply / forward state.
     /// The composer is marked dirty so the autosaver flushes it on the
     /// next idle.
-    pub fn enter_composer_with_prefill(&mut self, account_id: Uuid, prefill: ComposerPrefill) {
+    pub fn enter_composer_with_prefill(&mut self, account_id: AccountId, prefill: ComposerPrefill) {
         self.composer = Some(ComposerState::from_prefill(account_id, prefill));
         self.mode = InputMode::Compose;
         self.clear_error();
@@ -2339,7 +2347,7 @@ impl AppState {
     /// flips once the user starts editing.
     pub fn enter_composer_for_existing_draft(
         &mut self,
-        draft_id: Uuid,
+        draft_id: DraftId,
         draft: ComposerDraft,
         focus: ComposeField,
     ) {
@@ -2375,13 +2383,13 @@ impl AppState {
         self.composer.as_ref().map(ComposerState::draft)
     }
 
-    pub fn composer_draft_id(&self) -> Option<Uuid> {
+    pub fn composer_draft_id(&self) -> Option<DraftId> {
         self.composer
             .as_ref()
             .and_then(|composer| composer.draft_id)
     }
 
-    pub fn composer_account_id(&self) -> Option<Uuid> {
+    pub fn composer_account_id(&self) -> Option<AccountId> {
         self.composer.as_ref().map(|composer| composer.account_id)
     }
 
@@ -2391,7 +2399,7 @@ impl AppState {
             .is_some_and(|composer| composer.dirty)
     }
 
-    pub fn mark_composer_saved(&mut self, draft_id: Uuid) {
+    pub fn mark_composer_saved(&mut self, draft_id: DraftId) {
         if let Some(composer) = &mut self.composer {
             composer.draft_id = Some(draft_id);
             composer.dirty = false;
@@ -2865,7 +2873,10 @@ fn build_threads(messages: &[MessageItem]) -> Vec<ThreadItem> {
 }
 
 fn message_thread_key(message: &MessageItem) -> Uuid {
-    message.thread_id.unwrap_or(message.id)
+    message
+        .thread_id
+        .map(ThreadId::into_inner)
+        .unwrap_or_else(|| message.id.into_inner())
 }
 
 fn sort_messages_oldest_first(messages: &mut [MessageItem]) {
@@ -3074,8 +3085,8 @@ pub fn has_flag(flags: &[String], flag: &str) -> bool {
     flags.iter().any(|existing| existing == flag)
 }
 
-fn short_id(id: Uuid) -> String {
-    id.simple().to_string().chars().take(8).collect()
+fn short_id(id: AccountId) -> String {
+    id.as_uuid().simple().to_string().chars().take(8).collect()
 }
 
 pub fn set_flag_preserving(flags: &[String], flag: &str, enabled: bool) -> Vec<String> {
@@ -3106,7 +3117,7 @@ mod tests {
 
     fn account(label: &str) -> AccountItem {
         AccountItem {
-            id: Uuid::new_v4(),
+            id: AccountId::new(),
             label: label.into(),
             email: format!("{label}@example.com"),
             status: "idle".into(),
@@ -3115,7 +3126,7 @@ mod tests {
 
     fn folder(name: &str) -> FolderItem {
         FolderItem {
-            id: Uuid::new_v4(),
+            id: FolderId::new(),
             name: name.into(),
             role: "custom".into(),
         }
@@ -3123,7 +3134,7 @@ mod tests {
 
     fn message(subject: &str) -> MessageItem {
         MessageItem {
-            id: Uuid::new_v4(),
+            id: MessageId::new(),
             thread_id: None,
             subject: subject.into(),
             from: "alice@example.com".into(),
@@ -3135,8 +3146,8 @@ mod tests {
 
     fn attachment(filename: &str) -> AttachmentItem {
         AttachmentItem {
-            id: Uuid::new_v4(),
-            message_id: Uuid::new_v4(),
+            id: AttachmentId::new(),
+            message_id: MessageId::new(),
             filename: filename.into(),
             content_type: "text/plain".into(),
             size_bytes: 12,
@@ -3145,7 +3156,7 @@ mod tests {
         }
     }
 
-    fn detail(message_id: Uuid, body: &str) -> MessageDetail {
+    fn detail(message_id: MessageId, body: &str) -> MessageDetail {
         MessageDetail {
             id: message_id,
             subject: "hello".into(),
@@ -3156,9 +3167,14 @@ mod tests {
         }
     }
 
-    fn thread_message(thread_id: Uuid, subject: &str, date: &str, flags: &[&str]) -> MessageItem {
+    fn thread_message(
+        thread_id: ThreadId,
+        subject: &str,
+        date: &str,
+        flags: &[&str],
+    ) -> MessageItem {
         MessageItem {
-            id: Uuid::new_v4(),
+            id: MessageId::new(),
             thread_id: Some(thread_id),
             subject: subject.into(),
             from: "alice@example.com".into(),
@@ -3182,7 +3198,7 @@ mod tests {
 
     #[test]
     fn test_cycle_active_pane_includes_threads_when_visible() {
-        let thread_id = Uuid::new_v4();
+        let thread_id = ThreadId::new();
         let mut app = AppState::default();
         app.apply_folder_messages(vec![
             thread_message(thread_id, "reply", "2026-05-07 11:00", &[SEEN_FLAG]),
@@ -3264,8 +3280,8 @@ mod tests {
 
     #[test]
     fn test_move_thread_filters_messages_and_clears_stale_detail() {
-        let first_thread = Uuid::new_v4();
-        let second_thread = Uuid::new_v4();
+        let first_thread = ThreadId::new();
+        let second_thread = ThreadId::new();
         let mut app = AppState {
             active: ActivePane::Threads,
             ..Default::default()
@@ -3337,8 +3353,8 @@ mod tests {
 
     #[test]
     fn test_apply_folder_messages_groups_threads_with_counts_latest_and_indicators() {
-        let older_thread = Uuid::new_v4();
-        let latest_thread = Uuid::new_v4();
+        let older_thread = ThreadId::new();
+        let latest_thread = ThreadId::new();
         let single = message("single");
         let single_id = single.id;
         let mut app = AppState::default();
@@ -3369,7 +3385,7 @@ mod tests {
         assert!(app.threads[0].unread);
         assert!(app.threads[0].flagged);
 
-        assert_eq!(app.threads[1].key, single_id);
+        assert_eq!(app.threads[1].key, single_id.into_inner());
         assert_eq!(app.threads[1].thread_id, None);
         assert_eq!(app.threads[1].message_count, 1);
 
@@ -3404,7 +3420,7 @@ mod tests {
 
     #[test]
     fn test_apply_folder_messages_moves_active_threads_when_pane_becomes_hidden() {
-        let thread_id = Uuid::new_v4();
+        let thread_id = ThreadId::new();
         let mut app = AppState {
             active: ActivePane::Threads,
             ..Default::default()
@@ -3424,7 +3440,7 @@ mod tests {
 
     #[test]
     fn test_apply_folder_messages_moves_active_threads_to_folders_when_empty() {
-        let thread_id = Uuid::new_v4();
+        let thread_id = ThreadId::new();
         let mut app = AppState {
             active: ActivePane::Threads,
             ..Default::default()
@@ -3444,8 +3460,8 @@ mod tests {
 
     #[test]
     fn test_apply_folder_messages_filters_selected_thread_oldest_first() {
-        let first_thread = Uuid::new_v4();
-        let second_thread = Uuid::new_v4();
+        let first_thread = ThreadId::new();
+        let second_thread = ThreadId::new();
         let mut app = AppState::default();
         app.apply_folder_messages(vec![
             thread_message(second_thread, "other", "2026-05-07 12:00", &[SEEN_FLAG]),
@@ -3464,8 +3480,8 @@ mod tests {
 
     #[test]
     fn test_apply_folder_messages_clamps_selection_when_thread_disappears() {
-        let first_thread = Uuid::new_v4();
-        let second_thread = Uuid::new_v4();
+        let first_thread = ThreadId::new();
+        let second_thread = ThreadId::new();
         let mut app = AppState::default();
         app.apply_folder_messages(vec![
             thread_message(first_thread, "first", "2026-05-07 12:00", &[SEEN_FLAG]),
@@ -3487,9 +3503,9 @@ mod tests {
 
     #[test]
     fn test_apply_folder_messages_resets_selected_message_for_multi_message_replacement_thread() {
-        let top_thread = Uuid::new_v4();
-        let disappearing_thread = Uuid::new_v4();
-        let replacement_thread = Uuid::new_v4();
+        let top_thread = ThreadId::new();
+        let disappearing_thread = ThreadId::new();
+        let replacement_thread = ThreadId::new();
         let mut app = AppState {
             active: ActivePane::Threads,
             ..Default::default()
@@ -3674,7 +3690,7 @@ mod tests {
 
     #[test]
     fn test_apply_message_flags_updates_thread_indicators() {
-        let thread_id = Uuid::new_v4();
+        let thread_id = ThreadId::new();
         let mut app = AppState::default();
         let selected = thread_message(thread_id, "hello", "2026-05-07 10:00", &[SEEN_FLAG]);
         let message_id = selected.id;
@@ -3715,7 +3731,7 @@ mod tests {
         let thread = app
             .threads
             .iter()
-            .find(|thread| thread.key == message_id)
+            .find(|thread| thread.key == message_id.into_inner())
             .expect("thread group");
 
         assert_eq!(folder_message.flags, vec![SEEN_FLAG, FLAGGED_FLAG]);
@@ -3726,7 +3742,7 @@ mod tests {
 
     #[test]
     fn test_apply_detail_updates_thread_indicators_from_fresh_flags() {
-        let thread_id = Uuid::new_v4();
+        let thread_id = ThreadId::new();
         let mut app = AppState::default();
         let selected = thread_message(thread_id, "hello", "2026-05-07 10:00", &[SEEN_FLAG]);
         let message_id = selected.id;
@@ -3850,7 +3866,7 @@ mod tests {
             active: ActivePane::Details,
             ..Default::default()
         };
-        app.apply_detail(Some(detail(Uuid::new_v4(), "alpha\nb\nemoji café")));
+        app.apply_detail(Some(detail(MessageId::new(), "alpha\nb\nemoji café")));
 
         assert_eq!(app.detail_cursor_line_column(), (0, 0));
         assert!(!app.move_detail_cursor_left());
@@ -3889,7 +3905,7 @@ mod tests {
             active: ActivePane::Details,
             ..Default::default()
         };
-        app.apply_detail(Some(detail(Uuid::new_v4(), &body)));
+        app.apply_detail(Some(detail(MessageId::new(), &body)));
 
         assert!(app.move_detail_line(5, 3));
         assert_eq!(app.detail_cursor_line_column().0, 5);
@@ -3913,7 +3929,7 @@ mod tests {
             active: ActivePane::Details,
             ..Default::default()
         };
-        app.apply_detail(Some(detail(Uuid::new_v4(), "one\ntwo\nthree")));
+        app.apply_detail(Some(detail(MessageId::new(), "one\ntwo\nthree")));
 
         assert!(app.toggle_detail_line_selection());
         assert_eq!(app.detail_selected_line_range(), Some(0..=0));
@@ -3939,7 +3955,7 @@ mod tests {
             active: ActivePane::Details,
             ..Default::default()
         };
-        app.apply_detail(Some(detail(Uuid::new_v4(), "one\ntwo\nthree\nfour")));
+        app.apply_detail(Some(detail(MessageId::new(), "one\ntwo\nthree\nfour")));
         assert!(app.move_detail_line(5, 2));
         assert!(app.toggle_detail_line_selection());
 
@@ -3947,7 +3963,7 @@ mod tests {
         assert_ne!(app.detail_scroll, 0);
         assert!(app.detail_selected_line_range().is_some());
 
-        app.apply_detail(Some(detail(Uuid::new_v4(), "replacement")));
+        app.apply_detail(Some(detail(MessageId::new(), "replacement")));
 
         assert_eq!(app.detail_cursor, 0);
         assert_eq!(app.detail_scroll, 0);
@@ -4324,7 +4340,7 @@ mod tests {
         assert!(app.toggle_preview_selection());
         assert!(app.preview_focused);
 
-        let other_id = Uuid::new_v4();
+        let other_id = AttachmentId::new();
         app.apply_attachment_preview(AttachmentPreviewItem {
             attachment_id: other_id,
             text: Some("brand new".into()),
@@ -4340,7 +4356,7 @@ mod tests {
 
     #[test]
     fn test_composer_field_editing_and_payload_construction() {
-        let account_id = Uuid::new_v4();
+        let account_id = AccountId::new();
         let mut app = AppState::default();
         app.enter_composer(account_id);
 
@@ -4382,7 +4398,7 @@ mod tests {
     #[test]
     fn test_composer_inserts_at_cursor_in_header_and_body() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
 
         for ch in "ac".chars() {
             assert!(app.push_composer_char(ch));
@@ -4407,7 +4423,7 @@ mod tests {
     #[test]
     fn test_composer_cursor_editing_keys_handle_boundaries() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         for ch in "abcd".chars() {
             assert!(app.push_composer_char(ch));
         }
@@ -4431,7 +4447,7 @@ mod tests {
     #[test]
     fn test_composer_body_line_navigation_preserves_column() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         let composer = app.composer.as_mut().unwrap();
         composer.focused = ComposeField::Body;
         composer.body = "abcde\nxy\nwxyz".into();
@@ -4456,7 +4472,7 @@ mod tests {
     #[test]
     fn test_composer_body_scroll_keeps_cursor_visible() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         let composer = app.composer.as_mut().unwrap();
         composer.focused = ComposeField::Body;
         composer.body = "one\ntwo\nthree\nfour\nfive\nsix".into();
@@ -4478,7 +4494,7 @@ mod tests {
     #[test]
     fn test_composer_visual_line_selection_toggles_updates_and_clears() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         let composer = app.composer.as_mut().unwrap();
         composer.focused = ComposeField::Body;
         composer.body = "one\ntwo\nthree".into();
@@ -4505,7 +4521,7 @@ mod tests {
 
     #[test]
     fn test_composer_draft_payload_preserves_edited_multiline_body() {
-        let account_id = Uuid::new_v4();
+        let account_id = AccountId::new();
         let mut app = AppState::default();
         app.enter_composer(account_id);
         app.composer.as_mut().unwrap().focused = ComposeField::Body;
@@ -4531,8 +4547,8 @@ mod tests {
 
     #[test]
     fn test_composer_save_state_and_discard_confirmation() {
-        let account_id = Uuid::new_v4();
-        let draft_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let draft_id = DraftId::new();
         let mut app = AppState::default();
         app.enter_composer(account_id);
         assert!(app.push_composer_char('a'));
@@ -4780,7 +4796,7 @@ mod tests {
     #[test]
     fn test_compose_attach_path_mode_collects_chars_and_cancels_on_esc() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
 
         assert!(app.begin_compose_attach());
         assert_eq!(app.mode, InputMode::ComposeAttachPath);
@@ -4799,7 +4815,7 @@ mod tests {
     #[test]
     fn test_compose_attach_path_mode_rejects_control_chars_and_caps_length() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         app.begin_compose_attach();
 
         assert!(!app.push_compose_attach_char('\n'));
@@ -4816,7 +4832,7 @@ mod tests {
     #[tokio::test]
     async fn test_confirm_compose_attach_adds_attachment_with_filename_size_and_type() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         let (_dir, path) = temp_attach_file("notes.txt", b"hello world");
         app.begin_compose_attach();
         for ch in path.display().to_string().chars() {
@@ -4840,7 +4856,7 @@ mod tests {
     #[tokio::test]
     async fn test_confirm_compose_attach_unknown_extension_falls_back_to_octet_stream() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         let (_dir, path) = temp_attach_file("blob.weird", &[1, 2, 3]);
         app.begin_compose_attach();
         for ch in path.display().to_string().chars() {
@@ -4857,7 +4873,7 @@ mod tests {
     #[tokio::test]
     async fn test_confirm_compose_attach_missing_file_yields_not_found_toast_text() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         app.begin_compose_attach();
         for ch in "/nonexistent/path/does-not-exist.txt".chars() {
             app.push_compose_attach_char(ch);
@@ -4871,7 +4887,7 @@ mod tests {
     #[tokio::test]
     async fn test_confirm_compose_attach_directory_rejected_as_not_a_file() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         let dir = tempfile::tempdir().unwrap();
         app.begin_compose_attach();
         for ch in dir.path().display().to_string().chars() {
@@ -4885,7 +4901,7 @@ mod tests {
     #[tokio::test]
     async fn test_confirm_compose_attach_over_25mib_rejected_with_toast_text() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("big.bin");
         // One byte over the cap.
@@ -4906,7 +4922,7 @@ mod tests {
     #[tokio::test]
     async fn test_confirm_compose_attach_aggregate_over_limit_is_rejected() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         // Pre-seed a fake attachment that already eats most of the cap.
         let composer = app.composer.as_mut().unwrap();
         composer.attachments.push(ComposerAttachment {
@@ -4934,7 +4950,7 @@ mod tests {
     #[test]
     fn test_remove_selected_compose_attachment_clamps_index_at_end() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         let composer = app.composer.as_mut().unwrap();
         for name in ["a.txt", "b.txt", "c.txt"] {
             composer.attachments.push(ComposerAttachment {
@@ -4971,7 +4987,7 @@ mod tests {
     #[test]
     fn test_move_compose_attachment_selection_navigates_within_bounds() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         let composer = app.composer.as_mut().unwrap();
         for name in ["a", "b", "c"] {
             composer.attachments.push(ComposerAttachment {
@@ -4996,7 +5012,7 @@ mod tests {
     #[test]
     fn test_composer_state_survives_attach_path_mode_toggle() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         for ch in "to@x.com".chars() {
             assert!(app.push_composer_char(ch));
         }
@@ -5022,7 +5038,7 @@ mod tests {
     #[tokio::test]
     async fn test_composer_draft_payload_includes_attachments() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         let (_dir, path) = temp_attach_file("doc.txt", b"abc");
         app.begin_compose_attach();
         for ch in path.display().to_string().chars() {
@@ -5057,8 +5073,8 @@ mod tests {
 
     #[test]
     fn test_enter_composer_with_prefill_seeds_fields_focus_and_dirty_flag() {
-        let account_id = Uuid::new_v4();
-        let original_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let original_id = MessageId::new();
         let mut app = AppState::default();
         app.enter_composer_with_prefill(
             account_id,
@@ -5103,8 +5119,8 @@ mod tests {
 
     #[test]
     fn test_enter_composer_for_existing_draft_seeds_state_clean_and_records_id() {
-        let account_id = Uuid::new_v4();
-        let draft_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let draft_id = DraftId::new();
         let mut app = AppState::default();
         app.enter_composer_for_existing_draft(
             draft_id,
@@ -5138,11 +5154,11 @@ mod tests {
     #[test]
     fn test_enter_composer_for_existing_draft_typing_marks_dirty_but_keeps_id() {
         let mut app = AppState::default();
-        let draft_id = Uuid::new_v4();
+        let draft_id = DraftId::new();
         app.enter_composer_for_existing_draft(
             draft_id,
             ComposerDraft {
-                account_id: Uuid::new_v4(),
+                account_id: AccountId::new(),
                 in_reply_to_msg: None,
                 to_addrs: Vec::new(),
                 cc_addrs: Vec::new(),
@@ -5168,12 +5184,12 @@ mod tests {
         let mut app = AppState::default();
         app.apply_folders(vec![
             FolderItem {
-                id: Uuid::new_v4(),
+                id: FolderId::new(),
                 name: "INBOX".into(),
                 role: "inbox".into(),
             },
             FolderItem {
-                id: Uuid::new_v4(),
+                id: FolderId::new(),
                 name: "[Gmail]/Drafts".into(),
                 role: "drafts".into(),
             },
@@ -5187,12 +5203,12 @@ mod tests {
     #[test]
     fn test_apply_drafts_clamps_selection_and_remove_local_works() {
         let mut app = AppState::default();
-        let id_a = Uuid::new_v4();
-        let id_b = Uuid::new_v4();
-        let id_c = Uuid::new_v4();
+        let id_a = DraftId::new();
+        let id_b = DraftId::new();
+        let id_c = DraftId::new();
         let make = |id| DraftItem {
             id,
-            account_id: Uuid::new_v4(),
+            account_id: AccountId::new(),
             subject: "s".into(),
             to: "t".into(),
             date: "d".into(),
@@ -5211,7 +5227,7 @@ mod tests {
     #[test]
     fn test_begin_draft_delete_uses_confirm_delete_mode() {
         let mut app = AppState::default();
-        let id = Uuid::new_v4();
+        let id = DraftId::new();
         app.begin_draft_delete(id);
         assert_eq!(app.mode, InputMode::ConfirmDelete);
         assert_eq!(app.pending_delete_draft, Some(id));
@@ -5224,7 +5240,7 @@ mod tests {
     #[test]
     fn test_take_pending_delete_draft_returns_id_and_resets_mode() {
         let mut app = AppState::default();
-        let id = Uuid::new_v4();
+        let id = DraftId::new();
         app.begin_draft_delete(id);
         assert_eq!(app.take_pending_delete_draft(), Some(id));
         assert_eq!(app.mode, InputMode::Normal);
@@ -5234,7 +5250,7 @@ mod tests {
     #[test]
     fn test_finish_command_returns_to_compose_when_composer_open() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         app.enter_command_mode();
         app.push_command_char('w');
         let _ = app.finish_command();

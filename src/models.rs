@@ -22,7 +22,7 @@ use uuid::Uuid;
 macro_rules! entity_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         #[serde(transparent)]
         #[repr(transparent)]
         pub struct $name(pub Uuid);
@@ -69,6 +69,33 @@ macro_rules! entity_id {
             type Err = uuid::Error;
             fn from_str(s: &str) -> Result<Self, Self::Err> {
                 Uuid::from_str(s).map(Self)
+            }
+        }
+
+        impl sqlx::Type<sqlx::Sqlite> for $name {
+            fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+                <Uuid as sqlx::Type<sqlx::Sqlite>>::type_info()
+            }
+
+            fn compatible(ty: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+                <Uuid as sqlx::Type<sqlx::Sqlite>>::compatible(ty)
+            }
+        }
+
+        impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for $name {
+            fn decode(
+                value: sqlx::sqlite::SqliteValueRef<'r>,
+            ) -> Result<Self, sqlx::error::BoxDynError> {
+                <Uuid as sqlx::Decode<sqlx::Sqlite>>::decode(value).map(Self)
+            }
+        }
+
+        impl<'q> sqlx::Encode<'q, sqlx::Sqlite> for $name {
+            fn encode_by_ref(
+                &self,
+                buf: &mut <sqlx::Sqlite as sqlx::Database>::ArgumentBuffer<'q>,
+            ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+                <Uuid as sqlx::Encode<sqlx::Sqlite>>::encode_by_ref(&self.0, buf)
             }
         }
     };
@@ -246,7 +273,7 @@ text_enum! {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Account {
-    pub id: Uuid,
+    pub id: AccountId,
     pub email: String,
     pub display_name: Option<String>,
     pub auth_kind: AuthKind,
@@ -267,8 +294,8 @@ pub struct Account {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Folder {
-    pub id: Uuid,
-    pub account_id: Uuid,
+    pub id: FolderId,
+    pub account_id: AccountId,
     pub name: String,
     pub delimiter: String,
     pub role: FolderRole,
@@ -281,8 +308,8 @@ pub struct Folder {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Thread {
-    pub id: Uuid,
-    pub account_id: Uuid,
+    pub id: ThreadId,
+    pub account_id: AccountId,
     pub external_id: Option<String>,
     pub subject: Option<String>,
     pub last_message_at: Option<DateTime<Utc>>,
@@ -292,10 +319,10 @@ pub struct Thread {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Message {
-    pub id: Uuid,
-    pub account_id: Uuid,
-    pub folder_id: Uuid,
-    pub thread_id: Option<Uuid>,
+    pub id: MessageId,
+    pub account_id: AccountId,
+    pub folder_id: FolderId,
+    pub thread_id: Option<ThreadId>,
     pub uid: i64,
     pub message_id_header: Option<String>,
     pub in_reply_to: Option<String>,
@@ -318,8 +345,8 @@ pub struct Message {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Attachment {
-    pub id: Uuid,
-    pub message_id: Uuid,
+    pub id: AttachmentId,
+    pub message_id: MessageId,
     pub filename: String,
     pub content_type: String,
     pub content_id: Option<String>,
@@ -331,9 +358,9 @@ pub struct Attachment {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Draft {
-    pub id: Uuid,
-    pub account_id: Uuid,
-    pub in_reply_to_msg: Option<Uuid>,
+    pub id: DraftId,
+    pub account_id: AccountId,
+    pub in_reply_to_msg: Option<MessageId>,
     pub to_addrs: serde_json::Value,
     pub cc_addrs: serde_json::Value,
     pub bcc_addrs: serde_json::Value,
@@ -342,7 +369,7 @@ pub struct Draft {
     pub html_body: Option<String>,
     pub in_reply_to: Option<String>,
     pub references_header: Option<String>,
-    pub remote_folder_id: Option<Uuid>,
+    pub remote_folder_id: Option<FolderId>,
     pub remote_uid: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -351,7 +378,7 @@ pub struct Draft {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DraftAttachment {
     pub id: Uuid,
-    pub draft_id: Uuid,
+    pub draft_id: DraftId,
     pub filename: String,
     pub content_type: String,
     pub size_bytes: i64,
@@ -492,6 +519,18 @@ mod tests {
     #[test]
     fn test_account_id_from_str_rejects_non_uuid() {
         assert!(AccountId::from_str("not-a-uuid").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_account_id_sqlx_round_trip() {
+        let pool = crate::db::test_pool().await;
+        let id = AccountId::new();
+        let decoded: AccountId = sqlx::query_scalar("SELECT ?")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(decoded, id);
     }
 
     #[test]

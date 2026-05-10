@@ -7,17 +7,16 @@
 //! cascades on `message_id` keep orphan rows out of the table.
 
 use sqlx::SqlitePool;
-use uuid::Uuid;
 
 use crate::db::DbError;
-use crate::models::{Attachment, AttachmentDisposition};
+use crate::models::{Attachment, AttachmentDisposition, AttachmentId, MessageId};
 
 const COLS: &str = "id, message_id, filename, content_type, content_id, size_bytes, \
     disposition, storage_path, created_at";
 
 #[derive(Debug, Clone)]
 pub struct NewAttachment {
-    pub message_id: Uuid,
+    pub message_id: MessageId,
     pub filename: String,
     pub content_type: String,
     pub content_id: Option<String>,
@@ -33,7 +32,7 @@ pub struct NewAttachment {
 /// Returns [`DbError::Sqlx`] if the insert or the follow-up `SELECT` fails
 /// (FK violation when `message_id` is unknown, or any other SQLite error).
 pub async fn create(pool: &SqlitePool, new: &NewAttachment) -> Result<Attachment, DbError> {
-    let id = Uuid::new_v4();
+    let id = AttachmentId::new();
     sqlx::query(
         "INSERT INTO attachments (id, message_id, filename, content_type, content_id, \
          size_bytes, disposition, storage_path) VALUES (?,?,?,?,?,?,?,?)",
@@ -64,7 +63,7 @@ pub async fn create(pool: &SqlitePool, new: &NewAttachment) -> Result<Attachment
 /// `message_id` returns `Ok(Vec::new())`, not an error.
 pub async fn list_for_message(
     pool: &SqlitePool,
-    message_id: Uuid,
+    message_id: MessageId,
 ) -> Result<Vec<Attachment>, DbError> {
     Ok(sqlx::query_as::<_, Attachment>(&format!(
         "SELECT {COLS} FROM attachments WHERE message_id = ? ORDER BY created_at"
@@ -80,7 +79,7 @@ pub async fn list_for_message(
 ///
 /// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
 /// row is reported as `Ok(None)`, not an error.
-pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Attachment>, DbError> {
+pub async fn get(pool: &SqlitePool, id: AttachmentId) -> Result<Option<Attachment>, DbError> {
     Ok(
         sqlx::query_as::<_, Attachment>(&format!("SELECT {COLS} FROM attachments WHERE id = ?"))
             .bind(id)
@@ -96,8 +95,9 @@ mod tests {
     use crate::models::{AuthKind, FolderRole};
     use chrono::Utc;
     use serde_json::json;
+    use uuid::Uuid;
 
-    async fn message_id_for_test(pool: &SqlitePool) -> Uuid {
+    async fn message_id_for_test(pool: &SqlitePool) -> MessageId {
         let a = accounts::create(
             pool,
             &accounts::NewAccount {
@@ -183,7 +183,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_for_unknown_message_is_empty() {
         let pool = test_pool().await;
-        let list = list_for_message(&pool, Uuid::new_v4()).await.unwrap();
+        let list = list_for_message(&pool, MessageId::new()).await.unwrap();
         assert!(list.is_empty());
     }
 

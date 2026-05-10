@@ -23,8 +23,9 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use async_trait::async_trait;
 use rand::RngCore;
 use tokio::sync::Mutex;
-use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
+
+use crate::models::AccountId;
 
 use super::{Secret, SecretError, SecretStore};
 
@@ -120,7 +121,7 @@ impl FileSecretStore {
         &self.inner.path
     }
 
-    async fn read_map(&self) -> Result<BTreeMap<Uuid, String>, SecretError> {
+    async fn read_map(&self) -> Result<BTreeMap<AccountId, String>, SecretError> {
         let bytes = match tokio::fs::read(&self.inner.path).await {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
@@ -132,7 +133,7 @@ impl FileSecretStore {
         decrypt(&bytes, &self.inner.passphrase, &self.inner.kdf)
     }
 
-    async fn write_map(&self, map: &BTreeMap<Uuid, String>) -> Result<(), SecretError> {
+    async fn write_map(&self, map: &BTreeMap<AccountId, String>) -> Result<(), SecretError> {
         if let Some(parent) = self.inner.path.parent() {
             if !parent.as_os_str().is_empty() {
                 tokio::fs::create_dir_all(parent).await?;
@@ -149,7 +150,7 @@ impl FileSecretStore {
 
 #[async_trait]
 impl SecretStore for FileSecretStore {
-    async fn put(&self, account_id: Uuid, secret: Secret) -> Result<(), SecretError> {
+    async fn put(&self, account_id: AccountId, secret: Secret) -> Result<(), SecretError> {
         // SAFETY: serialise read-modify-write of the encrypted secrets file;
         // tokio::sync::Mutex is await-safe, so holding across .await is intentional.
         let _guard = self.inner.write_lock.lock().await;
@@ -164,12 +165,12 @@ impl SecretStore for FileSecretStore {
         Ok(())
     }
 
-    async fn get(&self, account_id: Uuid) -> Result<Option<Secret>, SecretError> {
+    async fn get(&self, account_id: AccountId) -> Result<Option<Secret>, SecretError> {
         let map = self.read_map().await?;
         Ok(map.get(&account_id).map(|s| Zeroizing::new(s.clone())))
     }
 
-    async fn delete(&self, account_id: Uuid) -> Result<(), SecretError> {
+    async fn delete(&self, account_id: AccountId) -> Result<(), SecretError> {
         // SAFETY: serialise read-modify-write of the encrypted secrets file;
         // tokio::sync::Mutex is await-safe, so holding across .await is intentional.
         let _guard = self.inner.write_lock.lock().await;
@@ -200,7 +201,7 @@ fn derive_key(
 }
 
 fn encrypt(
-    map: &BTreeMap<Uuid, String>,
+    map: &BTreeMap<AccountId, String>,
     passphrase: &str,
     kdf: &KdfParams,
 ) -> Result<Vec<u8>, SecretError> {
@@ -230,7 +231,7 @@ fn decrypt(
     bytes: &[u8],
     passphrase: &str,
     kdf: &KdfParams,
-) -> Result<BTreeMap<Uuid, String>, SecretError> {
+) -> Result<BTreeMap<AccountId, String>, SecretError> {
     if bytes.len() < 1 + SALT_LEN + NONCE_LEN + 16 {
         return Err(SecretError::Decode("file too short".into()));
     }
@@ -269,7 +270,7 @@ mod tests {
     async fn missing_file_returns_none_for_get() {
         let dir = TempDir::new().unwrap();
         let s = store(&dir, "pass");
-        let id = Uuid::new_v4();
+        let id = AccountId::new();
         assert!(s.get(id).await.unwrap().is_none());
     }
 
@@ -277,7 +278,7 @@ mod tests {
     async fn put_then_get_round_trip() {
         let dir = TempDir::new().unwrap();
         let s = store(&dir, "correct horse battery staple");
-        let id = Uuid::new_v4();
+        let id = AccountId::new();
         s.put(id, Zeroizing::new("hunter2".into())).await.unwrap();
         let got = s.get(id).await.unwrap().unwrap();
         assert_eq!(got.as_str(), "hunter2");
@@ -287,8 +288,8 @@ mod tests {
     async fn delete_removes_entry_but_leaves_others() {
         let dir = TempDir::new().unwrap();
         let s = store(&dir, "p");
-        let a = Uuid::new_v4();
-        let b = Uuid::new_v4();
+        let a = AccountId::new();
+        let b = AccountId::new();
         s.put(a, Zeroizing::new("aa".into())).await.unwrap();
         s.put(b, Zeroizing::new("bb".into())).await.unwrap();
         s.delete(a).await.unwrap();
@@ -300,13 +301,13 @@ mod tests {
     async fn delete_unknown_id_is_no_op() {
         let dir = TempDir::new().unwrap();
         let s = store(&dir, "p");
-        s.delete(Uuid::new_v4()).await.unwrap();
+        s.delete(AccountId::new()).await.unwrap();
     }
 
     #[tokio::test]
     async fn wrong_passphrase_fails_to_decrypt() {
         let dir = TempDir::new().unwrap();
-        let id = Uuid::new_v4();
+        let id = AccountId::new();
         {
             let s = store(&dir, "good");
             s.put(id, Zeroizing::new("secret".into())).await.unwrap();
@@ -319,7 +320,7 @@ mod tests {
     #[tokio::test]
     async fn tampered_ciphertext_fails_aead() {
         let dir = TempDir::new().unwrap();
-        let id = Uuid::new_v4();
+        let id = AccountId::new();
         let path = dir.path().join("secrets.bin");
         let kdf = KdfParams::insecure_for_tests();
         {
@@ -343,7 +344,7 @@ mod tests {
         let path = dir.path().join("secrets.bin");
         std::fs::write(&path, b"\xff\xff\xff\xff").unwrap();
         let s = FileSecretStore::with_params(&path, "pass", KdfParams::insecure_for_tests());
-        let err = s.get(Uuid::new_v4()).await.unwrap_err();
+        let err = s.get(AccountId::new()).await.unwrap_err();
         assert!(matches!(err, SecretError::Decode(_)));
     }
 
@@ -351,7 +352,7 @@ mod tests {
     async fn put_overwrites_existing_value() {
         let dir = TempDir::new().unwrap();
         let s = store(&dir, "p");
-        let id = Uuid::new_v4();
+        let id = AccountId::new();
         s.put(id, Zeroizing::new("v1".into())).await.unwrap();
         s.put(id, Zeroizing::new("v2".into())).await.unwrap();
         assert_eq!(s.get(id).await.unwrap().unwrap().as_str(), "v2");
@@ -362,7 +363,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let s = store(&dir, "p");
         let mut handles = Vec::new();
-        let ids: Vec<Uuid> = (0..16).map(|_| Uuid::new_v4()).collect();
+        let ids: Vec<AccountId> = (0..16).map(|_| AccountId::new()).collect();
         for id in ids.iter().copied() {
             let s2 = s.clone();
             handles.push(tokio::spawn(async move {
@@ -385,7 +386,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let nested = dir.path().join("a").join("b").join("c").join("secrets.bin");
         let s = FileSecretStore::with_params(&nested, "pass", KdfParams::insecure_for_tests());
-        s.put(Uuid::new_v4(), Zeroizing::new("v".into()))
+        s.put(AccountId::new(), Zeroizing::new("v".into()))
             .await
             .unwrap();
         assert!(nested.exists());
@@ -396,7 +397,7 @@ mod tests {
         // GCM is catastrophic if a nonce is reused with the same key.
         let dir = TempDir::new().unwrap();
         let s = store(&dir, "p");
-        let id = Uuid::new_v4();
+        let id = AccountId::new();
         s.put(id, Zeroizing::new("v1".into())).await.unwrap();
         let first = std::fs::read(dir.path().join("secrets.bin")).unwrap();
         s.put(id, Zeroizing::new("v1".into())).await.unwrap();

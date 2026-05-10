@@ -10,16 +10,15 @@
 
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
-use uuid::Uuid;
 
 use crate::db::DbError;
-use crate::models::Message;
+use crate::models::{AccountId, FolderId, Message, MessageId, ThreadId};
 
 #[derive(Debug, Clone)]
 pub struct NewMessage {
-    pub account_id: Uuid,
-    pub folder_id: Uuid,
-    pub thread_id: Option<Uuid>,
+    pub account_id: AccountId,
+    pub folder_id: FolderId,
+    pub thread_id: Option<ThreadId>,
     pub uid: i64,
     pub message_id_header: Option<String>,
     pub in_reply_to: Option<String>,
@@ -103,7 +102,7 @@ const EXISTING_UIDS_SUFFIX: &str = ")";
 /// violation on `(folder_id, uid)`, a FK violation when `account_id` /
 /// `folder_id` / `thread_id` is unknown, or any other SQLite error.
 pub async fn create(pool: &SqlitePool, new: &NewMessage) -> Result<Message, DbError> {
-    let id = Uuid::new_v4();
+    let id = MessageId::new();
     Ok(sqlx::query_as(INSERT_RETURNING_QUERY)
         .bind(id)
         .bind(new.account_id)
@@ -136,7 +135,7 @@ pub async fn create(pool: &SqlitePool, new: &NewMessage) -> Result<Message, DbEr
 ///
 /// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
 /// row is reported as `Ok(None)`, not an error.
-pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Message>, DbError> {
+pub async fn get(pool: &SqlitePool, id: MessageId) -> Result<Option<Message>, DbError> {
     Ok(sqlx::query_as(GET_BY_ID_QUERY)
         .bind(id)
         .fetch_optional(pool)
@@ -151,7 +150,7 @@ pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Message>, DbError
 /// row is reported as `Ok(None)`, not an error.
 pub async fn get_by_folder_uid(
     pool: &SqlitePool,
-    folder_id: Uuid,
+    folder_id: FolderId,
     uid: i64,
 ) -> Result<Option<Message>, DbError> {
     Ok(sqlx::query_as(GET_BY_FOLDER_UID_QUERY)
@@ -169,7 +168,7 @@ pub async fn get_by_folder_uid(
 /// Returns [`DbError::Sqlx`] if the query or row decode fails.
 pub async fn list_by_folder(
     pool: &SqlitePool,
-    folder_id: Uuid,
+    folder_id: FolderId,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Message>, DbError> {
@@ -186,7 +185,10 @@ pub async fn list_by_folder(
 /// # Errors
 ///
 /// Returns [`DbError::Sqlx`] if the query or row decode fails.
-pub async fn list_by_thread(pool: &SqlitePool, thread_id: Uuid) -> Result<Vec<Message>, DbError> {
+pub async fn list_by_thread(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+) -> Result<Vec<Message>, DbError> {
     Ok(sqlx::query_as(LIST_BY_THREAD_QUERY)
         .bind(thread_id)
         .fetch_all(pool)
@@ -202,7 +204,7 @@ pub async fn list_by_thread(pool: &SqlitePool, thread_id: Uuid) -> Result<Vec<Me
 /// header / unknown account is reported as `Ok(None)`, not an error.
 pub async fn find_by_msgid_header(
     pool: &SqlitePool,
-    account_id: Uuid,
+    account_id: AccountId,
     message_id_header: &str,
 ) -> Result<Option<Message>, DbError> {
     Ok(sqlx::query_as(FIND_BY_MSGID_HEADER_QUERY)
@@ -222,7 +224,7 @@ pub async fn find_by_msgid_header(
 /// touching the database.
 pub async fn existing_uids(
     pool: &SqlitePool,
-    folder_id: Uuid,
+    folder_id: FolderId,
     uids: &[i64],
 ) -> Result<std::collections::HashSet<i64>, DbError> {
     if uids.is_empty() {
@@ -259,8 +261,8 @@ pub async fn existing_uids(
 /// is a silent no-op.
 pub async fn set_thread(
     pool: &SqlitePool,
-    id: Uuid,
-    thread_id: Option<Uuid>,
+    id: MessageId,
+    thread_id: Option<ThreadId>,
 ) -> Result<(), DbError> {
     sqlx::query("UPDATE messages SET thread_id = ? WHERE id = ?")
         .bind(thread_id)
@@ -279,7 +281,7 @@ pub async fn set_thread(
 /// silent no-op.
 pub async fn set_flags(
     pool: &SqlitePool,
-    id: Uuid,
+    id: MessageId,
     flags: &serde_json::Value,
 ) -> Result<(), DbError> {
     sqlx::query("UPDATE messages SET flags = ? WHERE id = ?")
@@ -300,7 +302,11 @@ pub async fn set_flags(
 /// Returns [`DbError::Sqlx`] if the update fails (FK violation when
 /// `folder_id` is unknown, or any other SQLite error). A missing `id`
 /// is reported as `Ok(false)`, not an error.
-pub async fn set_folder(pool: &SqlitePool, id: Uuid, folder_id: Uuid) -> Result<bool, DbError> {
+pub async fn set_folder(
+    pool: &SqlitePool,
+    id: MessageId,
+    folder_id: FolderId,
+) -> Result<bool, DbError> {
     let r = sqlx::query("UPDATE messages SET folder_id = ? WHERE id = ?")
         .bind(folder_id)
         .bind(id)
@@ -315,7 +321,7 @@ pub async fn set_folder(pool: &SqlitePool, id: Uuid, folder_id: Uuid) -> Result<
 ///
 /// Returns [`DbError::Sqlx`] if the delete fails. A missing row is
 /// reported as `Ok(false)`, not an error.
-pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
+pub async fn delete(pool: &SqlitePool, id: MessageId) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM messages WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -332,7 +338,7 @@ pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
 /// reported as `Ok(false)`, not an error.
 pub async fn delete_by_folder_uid(
     pool: &SqlitePool,
-    folder_id: Uuid,
+    folder_id: FolderId,
     uid: i64,
 ) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM messages WHERE folder_id = ? AND uid = ?")
@@ -350,7 +356,7 @@ pub async fn delete_by_folder_uid(
 ///
 /// Returns [`DbError::Sqlx`] if the delete fails. Unknown `folder_id`
 /// is reported as `Ok(0)`, not an error.
-pub async fn delete_all_in_folder(pool: &SqlitePool, folder_id: Uuid) -> Result<u64, DbError> {
+pub async fn delete_all_in_folder(pool: &SqlitePool, folder_id: FolderId) -> Result<u64, DbError> {
     let r = sqlx::query("DELETE FROM messages WHERE folder_id = ?")
         .bind(folder_id)
         .execute(pool)
@@ -362,12 +368,13 @@ pub async fn delete_all_in_folder(pool: &SqlitePool, folder_id: Uuid) -> Result<
 mod tests {
     use super::*;
     use serde_json::json;
+    use uuid::Uuid;
 
     struct Ctx {
         pool: SqlitePool,
-        account_id: Uuid,
-        folder_id: Uuid,
-        thread_id: Uuid,
+        account_id: AccountId,
+        folder_id: FolderId,
+        thread_id: ThreadId,
     }
 
     async fn ctx() -> Ctx {
@@ -581,7 +588,7 @@ mod tests {
         // Catches column-list typos at runtime: SQLite errors out on an
         // unknown column even with zero rows.
         let c = ctx().await;
-        assert!(get(&c.pool, Uuid::new_v4()).await.unwrap().is_none());
+        assert!(get(&c.pool, MessageId::new()).await.unwrap().is_none());
         assert!(get_by_folder_uid(&c.pool, c.folder_id, 12345)
             .await
             .unwrap()
@@ -654,6 +661,8 @@ mod tests {
         assert!(set_folder(&c.pool, m.id, other.id).await.unwrap());
         let got = get(&c.pool, m.id).await.unwrap().unwrap();
         assert_eq!(got.folder_id, other.id);
-        assert!(!set_folder(&c.pool, Uuid::new_v4(), other.id).await.unwrap());
+        assert!(!set_folder(&c.pool, MessageId::new(), other.id)
+            .await
+            .unwrap());
     }
 }

@@ -10,8 +10,9 @@ pub mod keyring;
 
 use async_trait::async_trait;
 use thiserror::Error;
-use uuid::Uuid;
 use zeroize::Zeroizing;
+
+use crate::models::AccountId;
 
 /// A password held in memory. Wraps `Zeroizing<String>` so the buffer
 /// is wiped on drop.
@@ -55,7 +56,7 @@ pub trait SecretStore: Send + Sync {
     ///   entry, etc.).
     /// - [`SecretError::Backend`] if the configured backend is
     ///   unavailable (e.g. `UnconfiguredSecretStore`).
-    async fn put(&self, account_id: Uuid, secret: Secret) -> Result<(), SecretError>;
+    async fn put(&self, account_id: AccountId, secret: Secret) -> Result<(), SecretError>;
 
     /// Read the secret for `account_id`. Missing entries return
     /// `Ok(None)`.
@@ -75,7 +76,7 @@ pub trait SecretStore: Send + Sync {
     ///   platform failure or bad encoding.
     /// - [`SecretError::Backend`] if the configured backend is
     ///   unavailable (e.g. `UnconfiguredSecretStore`).
-    async fn get(&self, account_id: Uuid) -> Result<Option<Secret>, SecretError>;
+    async fn get(&self, account_id: AccountId) -> Result<Option<Secret>, SecretError>;
 
     /// Remove the secret for `account_id`. A missing entry is not an
     /// error.
@@ -92,14 +93,14 @@ pub trait SecretStore: Send + Sync {
     ///   (platform errors; `NoEntry` is treated as success).
     /// - [`SecretError::Backend`] if the configured backend is
     ///   unavailable (e.g. `UnconfiguredSecretStore`).
-    async fn delete(&self, account_id: Uuid) -> Result<(), SecretError>;
+    async fn delete(&self, account_id: AccountId) -> Result<(), SecretError>;
 
-    fn secret_ref(&self, account_id: Uuid) -> String {
+    fn secret_ref(&self, account_id: AccountId) -> String {
         account_secret_ref(account_id)
     }
 }
 
-pub fn account_secret_ref(account_id: Uuid) -> String {
+pub fn account_secret_ref(account_id: AccountId) -> String {
     format!("account:{account_id}")
 }
 
@@ -112,17 +113,17 @@ pub struct UnconfiguredSecretStore;
 
 #[async_trait]
 impl SecretStore for UnconfiguredSecretStore {
-    async fn put(&self, _: Uuid, _: Secret) -> Result<(), SecretError> {
+    async fn put(&self, _: AccountId, _: Secret) -> Result<(), SecretError> {
         Err(SecretError::Backend(
             "secrets backend not configured".into(),
         ))
     }
-    async fn get(&self, _: Uuid) -> Result<Option<Secret>, SecretError> {
+    async fn get(&self, _: AccountId) -> Result<Option<Secret>, SecretError> {
         Err(SecretError::Backend(
             "secrets backend not configured".into(),
         ))
     }
-    async fn delete(&self, _: Uuid) -> Result<(), SecretError> {
+    async fn delete(&self, _: AccountId) -> Result<(), SecretError> {
         Err(SecretError::Backend(
             "secrets backend not configured".into(),
         ))

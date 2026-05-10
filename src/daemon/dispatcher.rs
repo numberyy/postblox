@@ -16,7 +16,10 @@ use crate::daemon::Op;
 use crate::db;
 use crate::imap::{self, ImapAuth, ImapError, ImapIdle, ImapSync};
 use crate::ipc::{Dispatcher, Hub, RpcError, Topic};
-use crate::models::{Account, ApprovalState, AuthKind, FolderRole, GateAction};
+use crate::models::{
+    Account, AccountId, ApprovalState, AttachmentId, AuthKind, DraftId, FolderId, FolderRole,
+    GateAction, MessageId, ThreadId,
+};
 use crate::oauth::google::{
     self, GoogleOAuth, GoogleOAuthConfig, GoogleOAuthError, GoogleOAuthHttpClient,
 };
@@ -54,7 +57,7 @@ struct DaemonCredentialResolver {
 
 #[async_trait::async_trait]
 impl sync::WorkerCredentialResolver for DaemonCredentialResolver {
-    async fn resolve(&self, account_id: uuid::Uuid) -> Result<MailCredential, sync::SyncError> {
+    async fn resolve(&self, account_id: AccountId) -> Result<MailCredential, sync::SyncError> {
         let account = db::accounts::get(&self.pool, account_id)
             .await?
             .ok_or(sync::SyncError::UnknownAccount)?;
@@ -477,7 +480,7 @@ async fn op_account_list(pool: &SqlitePool) -> Result<Value, RpcError> {
 }
 
 async fn op_folder_list(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
-    let id = parse_uuid(&args, "account_id")?;
+    let id = parse_id::<AccountId>(&args, "account_id")?;
     encode(
         db::folders::list_by_account(pool, id).await,
         "folders::list_by_account",
@@ -485,7 +488,7 @@ async fn op_folder_list(pool: &SqlitePool, args: Value) -> Result<Value, RpcErro
 }
 
 async fn op_thread_list(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
-    let account_id = parse_uuid(&args, "account_id")?;
+    let account_id = parse_id::<AccountId>(&args, "account_id")?;
     let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
     let offset = args.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
     encode(
@@ -495,7 +498,7 @@ async fn op_thread_list(pool: &SqlitePool, args: Value) -> Result<Value, RpcErro
 }
 
 async fn op_messages_by_folder(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
-    let folder_id = parse_uuid(&args, "folder_id")?;
+    let folder_id = parse_id::<FolderId>(&args, "folder_id")?;
     let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
     let offset = args.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
     encode(
@@ -505,7 +508,7 @@ async fn op_messages_by_folder(pool: &SqlitePool, args: Value) -> Result<Value, 
 }
 
 async fn op_messages_by_thread(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
-    let thread_id = parse_uuid(&args, "thread_id")?;
+    let thread_id = parse_id::<ThreadId>(&args, "thread_id")?;
     encode(
         db::messages::list_by_thread(pool, thread_id).await,
         "messages::list_by_thread",
@@ -513,12 +516,12 @@ async fn op_messages_by_thread(pool: &SqlitePool, args: Value) -> Result<Value, 
 }
 
 async fn op_message_get(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
-    let id = parse_uuid(&args, "id")?;
+    let id = parse_id::<MessageId>(&args, "id")?;
     encode(db::messages::get(pool, id).await, "messages::get")
 }
 
 async fn op_attachment_list(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
-    let message_id = parse_uuid(&args, "message_id")?;
+    let message_id = parse_id::<MessageId>(&args, "message_id")?;
     encode(
         db::attachments::list_for_message(pool, message_id).await,
         "attachments::list_for_message",
@@ -526,7 +529,7 @@ async fn op_attachment_list(pool: &SqlitePool, args: Value) -> Result<Value, Rpc
 }
 
 async fn op_attachment_preview(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
-    let id = parse_uuid(&args, "id")?;
+    let id = parse_id::<AttachmentId>(&args, "id")?;
     let attachment = db::attachments::get(pool, id)
         .await
         .map_err(|e| RpcError::internal(format!("attachments::get: {e}")))?
@@ -546,9 +549,9 @@ async fn op_search(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
         return Err(RpcError::bad_args("'q' must not be empty"));
     }
     let filters = db::search::SearchFilters {
-        account_id: optional_uuid(&args, "account_id")?,
-        folder_id: optional_uuid(&args, "folder_id")?,
-        thread_id: optional_uuid(&args, "thread_id")?,
+        account_id: optional_id::<AccountId>(&args, "account_id")?,
+        folder_id: optional_id::<FolderId>(&args, "folder_id")?,
+        thread_id: optional_id::<ThreadId>(&args, "thread_id")?,
         date_from: optional_rfc3339(&args, "date_from")?,
         date_to: optional_rfc3339(&args, "date_to")?,
         from_addr: optional_nonempty_string(&args, "from_addr")?,
@@ -798,7 +801,7 @@ async fn op_account_create(pool: &SqlitePool, args: Value) -> Result<Value, RpcE
 }
 
 async fn op_account_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
-    let id = parse_uuid(&args, "id")?;
+    let id = parse_id::<AccountId>(&args, "id")?;
     let removed = db::accounts::delete(pool, id)
         .await
         .map_err(|e| RpcError::internal(format!("accounts::delete: {e}")))?;
@@ -821,7 +824,7 @@ async fn op_message_set_flags(
     args: Value,
 ) -> Result<Value, RpcError> {
     let actor = actor_from_args(&args);
-    let id = parse_uuid(&args, "id")?;
+    let id = parse_id::<MessageId>(&args, "id")?;
     let flags = args
         .get("flags")
         .cloned()
@@ -847,7 +850,7 @@ async fn op_message_set_flags(
 
 async fn op_message_archive(pool: &SqlitePool, hub: &Hub, args: Value) -> Result<Value, RpcError> {
     let actor = actor_from_args(&args);
-    let id = parse_uuid(&args, "id")?;
+    let id = parse_id::<MessageId>(&args, "id")?;
     let message = require_message(pool, id).await?;
     let archive = require_role_folder(pool, message.account_id, FolderRole::Archive).await?;
     if message.folder_id == archive.id {
@@ -878,7 +881,7 @@ async fn op_message_archive(pool: &SqlitePool, hub: &Hub, args: Value) -> Result
 
 async fn op_message_delete(pool: &SqlitePool, hub: &Hub, args: Value) -> Result<Value, RpcError> {
     let actor = actor_from_args(&args);
-    let id = parse_uuid(&args, "id")?;
+    let id = parse_id::<MessageId>(&args, "id")?;
     let message = require_message(pool, id).await?;
     let trash = require_role_folder(pool, message.account_id, FolderRole::Trash).await?;
     if message.folder_id == trash.id {
@@ -909,7 +912,7 @@ async fn op_message_delete(pool: &SqlitePool, hub: &Hub, args: Value) -> Result<
 
 async fn op_message_move(pool: &SqlitePool, hub: &Hub, args: Value) -> Result<Value, RpcError> {
     let actor = actor_from_args(&args);
-    let id = parse_uuid(&args, "id")?;
+    let id = parse_id::<MessageId>(&args, "id")?;
     let folder_name = parse_str(&args, "folder_name")?;
     let message = require_message(pool, id).await?;
     let target = db::folders::get_by_name(pool, message.account_id, folder_name)
@@ -944,7 +947,7 @@ async fn op_message_move(pool: &SqlitePool, hub: &Hub, args: Value) -> Result<Va
 
 async fn require_message(
     pool: &SqlitePool,
-    id: uuid::Uuid,
+    id: MessageId,
 ) -> Result<crate::models::Message, RpcError> {
     db::messages::get(pool, id)
         .await
@@ -954,7 +957,7 @@ async fn require_message(
 
 async fn require_role_folder(
     pool: &SqlitePool,
-    account_id: uuid::Uuid,
+    account_id: AccountId,
     role: FolderRole,
 ) -> Result<crate::models::Folder, RpcError> {
     db::folders::list_by_account(pool, account_id)
@@ -993,7 +996,7 @@ async fn op_draft_create(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
 
 #[derive(Deserialize)]
 struct DraftUpdate {
-    id: uuid::Uuid,
+    id: DraftId,
     #[serde(default = "default_addrs")]
     to_addrs: Value,
     #[serde(default = "default_addrs")]
@@ -1070,7 +1073,7 @@ fn take_attachment_specs(args: &Value) -> Result<Option<Vec<DraftAttachmentSpec>
 
 async fn replace_draft_attachments(
     pool: &SqlitePool,
-    draft_id: uuid::Uuid,
+    draft_id: DraftId,
     specs: Option<Vec<DraftAttachmentSpec>>,
 ) -> Result<(), RpcError> {
     let Some(specs) = specs else {
@@ -1150,7 +1153,7 @@ fn guess_content_type(path: &Path) -> String {
 
 async fn op_draft_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
     let actor = actor_from_args(&args);
-    let id = parse_uuid(&args, "id")?;
+    let id = parse_id::<DraftId>(&args, "id")?;
     let removed = db::drafts::delete(pool, id)
         .await
         .map_err(|e| RpcError::internal(format!("drafts::delete: {e}")))?;
@@ -1166,7 +1169,7 @@ async fn op_draft_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
 }
 
 async fn op_draft_list(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
-    let account_id = parse_uuid(&args, "account_id")?;
+    let account_id = parse_id::<AccountId>(&args, "account_id")?;
     encode(
         db::drafts::list_by_account(pool, account_id).await,
         "drafts::list_by_account",
@@ -1176,7 +1179,7 @@ async fn op_draft_list(pool: &SqlitePool, args: Value) -> Result<Value, RpcError
 async fn op_draft_get(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
     use base64::Engine;
 
-    let id = parse_uuid(&args, "id")?;
+    let id = parse_id::<DraftId>(&args, "id")?;
     let draft = db::drafts::get(pool, id)
         .await
         .map_err(|e| RpcError::internal(format!("drafts::get: {e}")))?;
@@ -1209,7 +1212,7 @@ async fn op_draft_get(pool: &SqlitePool, args: Value) -> Result<Value, RpcError>
 
 fn message_view(message: &crate::models::Message) -> crate::mail::reply::MessageView<'_> {
     crate::mail::reply::MessageView {
-        id: message.id,
+        id: message.id.into_inner(),
         from_addr: &message.from_addr,
         reply_to: message.reply_to.as_deref(),
         subject: message.subject.as_deref(),
@@ -1229,7 +1232,7 @@ fn message_view(message: &crate::models::Message) -> crate::mail::reply::Message
 /// uses the response to pre-fill the composer, and persistence happens
 /// when the composer first auto-saves through `draft.create`.
 async fn op_message_prepare_reply(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
-    let message_id = parse_uuid(&args, "message_id")?;
+    let message_id = parse_id::<MessageId>(&args, "message_id")?;
     let reply_all = args
         .get("reply_all")
         .and_then(Value::as_bool)
@@ -1256,7 +1259,7 @@ async fn op_message_prepare_reply(pool: &SqlitePool, args: Value) -> Result<Valu
 /// attachments. The TUI then asks `attachment.fetch_for_forward` per
 /// entry to materialise bytes before the user sends.
 async fn op_message_prepare_forward(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
-    let message_id = parse_uuid(&args, "message_id")?;
+    let message_id = parse_id::<MessageId>(&args, "message_id")?;
     let message = require_message(pool, message_id).await?;
     let account = db::accounts::get(pool, message.account_id)
         .await
@@ -1267,7 +1270,7 @@ async fn op_message_prepare_forward(pool: &SqlitePool, args: Value) -> Result<Va
         .map_err(|e| RpcError::internal(format!("attachments::list_for_message: {e}")))?;
     let attachment_tuples: Vec<(uuid::Uuid, String, String, i64)> = attachments
         .into_iter()
-        .map(|a| (a.id, a.filename, a.content_type, a.size_bytes))
+        .map(|a| (a.id.into_inner(), a.filename, a.content_type, a.size_bytes))
         .collect();
     let draft = crate::mail::reply::forward_draft(message_view(&message), &attachment_tuples);
     let attachments_json: Vec<Value> = draft
@@ -1294,7 +1297,7 @@ async fn op_message_prepare_forward(pool: &SqlitePool, args: Value) -> Result<Va
 
 async fn op_attachment_export(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
     let actor = actor_from_args(&args);
-    let id = parse_uuid(&args, "id")?;
+    let id = parse_id::<AttachmentId>(&args, "id")?;
     let destination_path = parse_str(&args, "destination_path")?;
     let attachment = db::attachments::get(pool, id)
         .await
@@ -1328,7 +1331,7 @@ async fn op_attachment_fetch_for_forward(
 ) -> Result<Value, RpcError> {
     use base64::Engine;
 
-    let attachment_id = parse_uuid(&args, "attachment_id")?;
+    let attachment_id = parse_id::<AttachmentId>(&args, "attachment_id")?;
     let attachment = db::attachments::get(pool, attachment_id)
         .await
         .map_err(|e| RpcError::internal(format!("attachments::get: {e}")))?
@@ -1481,8 +1484,8 @@ async fn op_message_send(
     args: Value,
 ) -> Result<Value, RpcError> {
     let actor = actor_from_args(&args);
-    let account_id = parse_uuid(&args, "account_id")?;
-    let draft_id = parse_uuid(&args, "draft_id")?;
+    let account_id = parse_id::<AccountId>(&args, "account_id")?;
+    let draft_id = parse_id::<DraftId>(&args, "draft_id")?;
 
     let account = db::accounts::get(pool, account_id)
         .await
@@ -1570,7 +1573,7 @@ async fn op_message_send(
 
 async fn load_draft_mime_attachments(
     pool: &SqlitePool,
-    draft_id: uuid::Uuid,
+    draft_id: DraftId,
 ) -> Result<Vec<crate::mail::builder::MimeAttachment>, RpcError> {
     let rows = db::draft_attachments::list_for_draft(pool, draft_id)
         .await
@@ -1646,7 +1649,7 @@ async fn op_account_test_login(
     oauth: &dyn GoogleOAuth,
     args: Value,
 ) -> Result<Value, RpcError> {
-    let account_id = parse_uuid(&args, "account_id")?;
+    let account_id = parse_id::<AccountId>(&args, "account_id")?;
 
     let account = db::accounts::get(pool, account_id)
         .await
@@ -1737,7 +1740,7 @@ async fn op_account_sync_folder(
     oauth: &dyn GoogleOAuth,
     args: Value,
 ) -> Result<Value, RpcError> {
-    let account_id = parse_uuid(&args, "account_id")?;
+    let account_id = parse_id::<AccountId>(&args, "account_id")?;
     let folder_name = args
         .get("folder_name")
         .and_then(|v| v.as_str())
@@ -1807,7 +1810,7 @@ async fn op_account_start_sync(
     manager: &sync::WorkerManager,
     args: Value,
 ) -> Result<Value, RpcError> {
-    let account_id = parse_uuid(&args, "account_id")?;
+    let account_id = parse_id::<AccountId>(&args, "account_id")?;
     let folder_name = args
         .get("folder_name")
         .and_then(|v| v.as_str())
@@ -1839,7 +1842,7 @@ async fn op_account_stop_sync(
     manager: &sync::WorkerManager,
     args: Value,
 ) -> Result<Value, RpcError> {
-    let account_id = parse_uuid(&args, "account_id")?;
+    let account_id = parse_id::<AccountId>(&args, "account_id")?;
     let folder_name = args
         .get("folder_name")
         .and_then(|v| v.as_str())
@@ -1858,7 +1861,7 @@ async fn op_account_stop_sync(
 
 async fn ensure_account_folder(
     pool: &SqlitePool,
-    account_id: uuid::Uuid,
+    account_id: AccountId,
     folder_name: &str,
 ) -> Result<(), RpcError> {
     let account = db::accounts::get(pool, account_id)
@@ -1887,7 +1890,7 @@ async fn op_account_set_secret(
     secrets: &dyn SecretStore,
     args: Value,
 ) -> Result<Value, RpcError> {
-    let account_id = parse_uuid(&args, "account_id")?;
+    let account_id = parse_id::<AccountId>(&args, "account_id")?;
     let password = args
         .get("password")
         .and_then(|v| v.as_str())
@@ -1931,7 +1934,7 @@ async fn op_account_delete_secret(
     secrets: &dyn SecretStore,
     args: Value,
 ) -> Result<Value, RpcError> {
-    let account_id = parse_uuid(&args, "account_id")?;
+    let account_id = parse_id::<AccountId>(&args, "account_id")?;
     secrets
         .delete(account_id)
         .await
@@ -1952,7 +1955,7 @@ async fn op_account_delete_secret(
 // ---------- OAuth ops -------------------------------------------------------
 
 async fn op_oauth_google_auth_url(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
-    let account_id = parse_uuid(&args, "account_id")?;
+    let account_id = parse_id::<AccountId>(&args, "account_id")?;
     let client_id = parse_str(&args, "client_id")?;
     let redirect_uri = parse_str(&args, "redirect_uri")?;
     let state = parse_str(&args, "state")?;
@@ -1977,7 +1980,7 @@ async fn op_oauth_google_complete(
     oauth: &dyn GoogleOAuth,
     args: Value,
 ) -> Result<Value, RpcError> {
-    let account_id = parse_uuid(&args, "account_id")?;
+    let account_id = parse_id::<AccountId>(&args, "account_id")?;
     let client_id = parse_str(&args, "client_id")?;
     let client_secret = parse_str(&args, "client_secret")?;
     let redirect_uri = parse_str(&args, "redirect_uri")?;
@@ -2018,7 +2021,7 @@ async fn op_oauth_google_complete(
 
 async fn ensure_oauth_google_account(
     pool: &SqlitePool,
-    account_id: uuid::Uuid,
+    account_id: AccountId,
 ) -> Result<(), RpcError> {
     let account = db::accounts::get(pool, account_id)
         .await
@@ -2143,6 +2146,18 @@ fn parse_uuid(args: &Value, key: &str) -> Result<uuid::Uuid, RpcError> {
     uuid::Uuid::parse_str(s).map_err(|e| RpcError::bad_args(format!("bad '{key}': {e}")))
 }
 
+fn parse_id<T>(args: &Value, key: &str) -> Result<T, RpcError>
+where
+    T: std::str::FromStr<Err = uuid::Error>,
+{
+    let s = args
+        .get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RpcError::bad_args(format!("missing '{key}'")))?;
+    s.parse::<T>()
+        .map_err(|e| RpcError::bad_args(format!("bad '{key}': {e}")))
+}
+
 fn parse_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, RpcError> {
     args.get(key)
         .and_then(Value::as_str)
@@ -2158,10 +2173,13 @@ fn optional_str<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, RpcEr
     }
 }
 
-fn optional_uuid(args: &Value, key: &str) -> Result<Option<uuid::Uuid>, RpcError> {
+fn optional_id<T>(args: &Value, key: &str) -> Result<Option<T>, RpcError>
+where
+    T: std::str::FromStr<Err = uuid::Error>,
+{
     match args.get(key) {
         Some(Value::Null) | None => Ok(None),
-        Some(_) => Ok(Some(parse_uuid(args, key)?)),
+        Some(_) => Ok(Some(parse_id(args, key)?)),
     }
 }
 
@@ -2423,8 +2441,8 @@ mod tests {
             },
         ];
         let attachment = crate::models::Attachment {
-            id: uuid::Uuid::new_v4(),
-            message_id: uuid::Uuid::new_v4(),
+            id: AttachmentId::new(),
+            message_id: MessageId::new(),
             filename: "logo.png".into(),
             content_type: "image/png".into(),
             content_id: Some("cid-target".into()),
@@ -2448,8 +2466,8 @@ mod tests {
             content_id: None,
         }];
         let attachment = crate::models::Attachment {
-            id: uuid::Uuid::new_v4(),
-            message_id: uuid::Uuid::new_v4(),
+            id: AttachmentId::new(),
+            message_id: MessageId::new(),
             filename: "report.pdf".into(),
             content_type: "application/pdf".into(),
             content_id: None,

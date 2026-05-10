@@ -14,11 +14,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use uuid::Uuid;
 
 use crate::db::{self, DbError};
 use crate::mail::parser::{Disposition, ParsedAttachment};
-use crate::models::{Attachment, AttachmentDisposition};
+use crate::models::{Attachment, AttachmentDisposition, AttachmentId, MessageId};
 
 pub const PREVIEW_LIMIT_BYTES: usize = 16 * 1024;
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
@@ -46,14 +45,14 @@ pub struct AttachmentPreview {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentExport {
-    pub attachment_id: Uuid,
+    pub attachment_id: AttachmentId,
     pub destination_path: String,
     pub bytes_copied: u64,
 }
 
 pub async fn persist_parsed_for_message(
     pool: &SqlitePool,
-    message_id: Uuid,
+    message_id: MessageId,
     attachments: &[ParsedAttachment],
 ) -> Result<Vec<Attachment>, AttachmentError> {
     if attachments.is_empty() {
@@ -202,7 +201,12 @@ async fn attachment_root(pool: &SqlitePool) -> Result<PathBuf, AttachmentError> 
     }
 }
 
-fn stored_attachment_path(root: &Path, message_id: Uuid, index: usize, filename: &str) -> PathBuf {
+fn stored_attachment_path(
+    root: &Path,
+    message_id: MessageId,
+    index: usize,
+    filename: &str,
+) -> PathBuf {
     root.join(message_id.to_string()).join(format!(
         "{:03}_{}",
         index + 1,
@@ -273,8 +277,9 @@ mod tests {
     use crate::models::{AuthKind, FolderRole};
     use chrono::Utc;
     use serde_json::json;
+    use uuid::Uuid;
 
-    async fn message_id_for_test(pool: &SqlitePool) -> Uuid {
+    async fn message_id_for_test(pool: &SqlitePool) -> MessageId {
         let account = accounts::create(
             pool,
             &accounts::NewAccount {
@@ -351,8 +356,8 @@ mod tests {
         let content = "a".repeat(PREVIEW_LIMIT_BYTES + 4);
         tokio::fs::write(&path, content.as_bytes()).await.unwrap();
         let attachment = Attachment {
-            id: Uuid::new_v4(),
-            message_id: Uuid::new_v4(),
+            id: AttachmentId::new(),
+            message_id: MessageId::new(),
             filename: "long.txt".into(),
             content_type: "text/plain".into(),
             content_id: None,
@@ -374,8 +379,8 @@ mod tests {
         let path = dir.path().join("img.png");
         tokio::fs::write(&path, [0, 159, 146, 150]).await.unwrap();
         let attachment = Attachment {
-            id: Uuid::new_v4(),
-            message_id: Uuid::new_v4(),
+            id: AttachmentId::new(),
+            message_id: MessageId::new(),
             filename: "img.png".into(),
             content_type: "image/png".into(),
             content_id: None,
@@ -425,8 +430,8 @@ mod tests {
         tokio::fs::write(&source, b"source").await.unwrap();
         tokio::fs::write(&destination, b"existing").await.unwrap();
         let attachment = Attachment {
-            id: Uuid::new_v4(),
-            message_id: Uuid::new_v4(),
+            id: AttachmentId::new(),
+            message_id: MessageId::new(),
             filename: "source.txt".into(),
             content_type: "text/plain".into(),
             content_id: None,

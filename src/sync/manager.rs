@@ -7,18 +7,18 @@ use sqlx::SqlitePool;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use crate::auth::{CredentialKind, MailCredential};
 use crate::imap::{ImapIdle, ImapSync};
 use crate::ipc::Hub;
+use crate::models::AccountId;
 
 use super::state::{publish_sync_state, SyncState, SyncStateEvent};
 use super::worker::{
     run_sync_worker, SyncWorker, WorkerConfig, WorkerCredentialResolver, WorkerCredentialSource,
 };
 
-type WorkerKey = (Uuid, String);
+type WorkerKey = (AccountId, String);
 
 pub struct WorkerManager {
     pool: SqlitePool,
@@ -115,7 +115,7 @@ impl WorkerManager {
 
     pub async fn start(
         &self,
-        account_id: Uuid,
+        account_id: AccountId,
         folder_name: String,
         credential: MailCredential,
     ) -> bool {
@@ -157,7 +157,7 @@ impl WorkerManager {
 
     fn credential_source(
         &self,
-        account_id: Uuid,
+        account_id: AccountId,
         credential: MailCredential,
     ) -> WorkerCredentialSource {
         if credential.kind() == CredentialKind::OAuth2Bearer {
@@ -168,7 +168,7 @@ impl WorkerManager {
         WorkerCredentialSource::static_credential(credential)
     }
 
-    pub async fn stop(&self, account_id: Uuid, folder_name: &str) -> bool {
+    pub async fn stop(&self, account_id: AccountId, folder_name: &str) -> bool {
         let key = (account_id, folder_name.to_string());
         let handle = self.workers.lock().await.remove(&key);
         if let Some(handle) = handle {
@@ -285,7 +285,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WorkerCredentialResolver for ScriptedCredentialResolver {
-        async fn resolve(&self, _: Uuid) -> Result<MailCredential, SyncError> {
+        async fn resolve(&self, _: AccountId) -> Result<MailCredential, SyncError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let secret = self
                 .secrets
@@ -297,7 +297,7 @@ mod tests {
         }
     }
 
-    async fn seed_account_folder(pool: &SqlitePool) -> Uuid {
+    async fn seed_account_folder(pool: &SqlitePool) -> AccountId {
         let account = accounts::create(
             pool,
             &accounts::NewAccount {

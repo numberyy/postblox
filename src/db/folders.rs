@@ -1,13 +1,12 @@
 use serde::Deserialize;
 use sqlx::SqlitePool;
-use uuid::Uuid;
 
 use crate::db::DbError;
-use crate::models::{Folder, FolderRole};
+use crate::models::{AccountId, Folder, FolderId, FolderRole};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewFolder {
-    pub account_id: Uuid,
+    pub account_id: AccountId,
     pub name: String,
     pub delimiter: String,
     pub role: FolderRole,
@@ -26,7 +25,7 @@ const SELECT: &str = "\
 /// violation when `account_id` is unknown or a `UNIQUE` violation on
 /// `(account_id, name)`, but also any other SQLite error.
 pub async fn create(pool: &SqlitePool, new: &NewFolder) -> Result<Folder, DbError> {
-    let id = Uuid::new_v4();
+    let id = FolderId::new();
     let q = format!(
         "INSERT INTO folders (id, account_id, name, delimiter, role, selectable) \
          VALUES (?,?,?,?,?,?) RETURNING {SELECT}"
@@ -77,7 +76,10 @@ pub async fn upsert(pool: &SqlitePool, new: &NewFolder) -> Result<Folder, DbErro
 /// # Errors
 ///
 /// Returns [`DbError::Sqlx`] if the query or row decode fails.
-pub async fn list_by_account(pool: &SqlitePool, account_id: Uuid) -> Result<Vec<Folder>, DbError> {
+pub async fn list_by_account(
+    pool: &SqlitePool,
+    account_id: AccountId,
+) -> Result<Vec<Folder>, DbError> {
     let q = format!("SELECT {SELECT} FROM folders WHERE account_id = ? ORDER BY name");
     Ok(sqlx::query_as(&q).bind(account_id).fetch_all(pool).await?)
 }
@@ -88,7 +90,7 @@ pub async fn list_by_account(pool: &SqlitePool, account_id: Uuid) -> Result<Vec<
 ///
 /// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
 /// row is reported as `Ok(None)`, not an error.
-pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Folder>, DbError> {
+pub async fn get(pool: &SqlitePool, id: FolderId) -> Result<Option<Folder>, DbError> {
     let q = format!("SELECT {SELECT} FROM folders WHERE id = ?");
     Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
@@ -101,7 +103,7 @@ pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Folder>, DbError>
 /// row is reported as `Ok(None)`, not an error.
 pub async fn get_by_name(
     pool: &SqlitePool,
-    account_id: Uuid,
+    account_id: AccountId,
     name: &str,
 ) -> Result<Option<Folder>, DbError> {
     let q = format!("SELECT {SELECT} FROM folders WHERE account_id = ? AND name = ?");
@@ -121,7 +123,7 @@ pub async fn get_by_name(
 /// silent no-op (rows_affected = 0), not an error.
 pub async fn update_uid_state(
     pool: &SqlitePool,
-    id: Uuid,
+    id: FolderId,
     uid_validity: Option<i64>,
     uid_next: Option<i64>,
     last_seen_uid: Option<i64>,
@@ -146,7 +148,7 @@ pub async fn update_uid_state(
 ///
 /// Returns [`DbError::Sqlx`] if the delete fails (FK or IO). A missing
 /// row is reported as `Ok(false)`, not an error.
-pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
+pub async fn delete(pool: &SqlitePool, id: FolderId) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM folders WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -157,8 +159,9 @@ pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
-    async fn account(pool: &SqlitePool) -> Uuid {
+    async fn account(pool: &SqlitePool) -> AccountId {
         let acc = crate::db::accounts::create(
             pool,
             &crate::db::accounts::NewAccount {
@@ -179,7 +182,7 @@ mod tests {
         acc.id
     }
 
-    fn folder(account_id: Uuid, name: &str, role: FolderRole) -> NewFolder {
+    fn folder(account_id: AccountId, name: &str, role: FolderRole) -> NewFolder {
         NewFolder {
             account_id,
             name: name.into(),

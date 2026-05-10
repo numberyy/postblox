@@ -6,10 +6,9 @@
 
 use chrono::{DateTime, Utc};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
-use uuid::Uuid;
 
 use crate::db::DbError;
-use crate::models::Message;
+use crate::models::{AccountId, FolderId, Message, ThreadId};
 
 /// `\Seen` marks a message as read; absence means unread. Stored as a
 /// JSON-array entry in `messages.flags`.
@@ -81,7 +80,7 @@ const SEARCH_ALL_QUERY: &str = concat!(
 pub async fn search_scoped(
     pool: &SqlitePool,
     fts_query: &str,
-    account_id: Option<Uuid>,
+    account_id: Option<AccountId>,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Message>, DbError> {
@@ -109,9 +108,9 @@ pub async fn search_scoped(
 /// to keep call sites brief.
 #[derive(Default, Debug, Clone)]
 pub struct SearchFilters {
-    pub account_id: Option<Uuid>,
-    pub folder_id: Option<Uuid>,
-    pub thread_id: Option<Uuid>,
+    pub account_id: Option<AccountId>,
+    pub folder_id: Option<FolderId>,
+    pub thread_id: Option<ThreadId>,
     pub date_from: Option<DateTime<Utc>>,
     pub date_to: Option<DateTime<Utc>>,
     /// Substring match against `messages.from_addr` (case-insensitive
@@ -229,9 +228,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use serde_json::json;
-    use uuid::Uuid;
-
-    async fn seed() -> (SqlitePool, Uuid, Uuid) {
+    async fn seed() -> (SqlitePool, AccountId, FolderId) {
         let pool = crate::db::test_pool().await;
         let acc = crate::db::accounts::create(
             &pool,
@@ -266,8 +263,8 @@ mod tests {
     }
 
     fn msg(
-        account_id: Uuid,
-        folder_id: Uuid,
+        account_id: AccountId,
+        folder_id: FolderId,
         uid: i64,
         subject: &str,
         body: &str,

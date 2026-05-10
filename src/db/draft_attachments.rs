@@ -6,7 +6,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::db::DbError;
-use crate::models::DraftAttachment;
+use crate::models::{DraftAttachment, DraftId};
 
 /// Maximum bytes for any single draft attachment (and the aggregate cap
 /// per draft). Mirrors the `CLAUDE.md` "Attachment size: max 25 MB"
@@ -17,7 +17,7 @@ const COLS: &str = "id, draft_id, filename, content_type, size_bytes, created_at
 
 #[derive(Debug, Clone)]
 pub struct NewDraftAttachment {
-    pub draft_id: Uuid,
+    pub draft_id: DraftId,
     pub filename: String,
     pub content_type: String,
     pub content: Vec<u8>,
@@ -64,7 +64,7 @@ pub async fn create(
 /// `draft_id` returns `Ok(Vec::new())`, not an error.
 pub async fn list_for_draft(
     pool: &SqlitePool,
-    draft_id: Uuid,
+    draft_id: DraftId,
 ) -> Result<Vec<DraftAttachment>, DbError> {
     Ok(sqlx::query_as::<_, DraftAttachment>(&format!(
         "SELECT {COLS} FROM draft_attachments WHERE draft_id = ? ORDER BY created_at, id"
@@ -95,7 +95,10 @@ pub async fn load_content(pool: &SqlitePool, id: Uuid) -> Result<Option<Vec<u8>>
 /// # Errors
 ///
 /// Returns [`DbError::Sqlx`] if the aggregate query fails.
-pub async fn aggregate_size_for_draft(pool: &SqlitePool, draft_id: Uuid) -> Result<i64, DbError> {
+pub async fn aggregate_size_for_draft(
+    pool: &SqlitePool,
+    draft_id: DraftId,
+) -> Result<i64, DbError> {
     let row: (Option<i64>,) =
         sqlx::query_as("SELECT SUM(size_bytes) FROM draft_attachments WHERE draft_id = ?")
             .bind(draft_id)
@@ -110,7 +113,7 @@ pub async fn aggregate_size_for_draft(pool: &SqlitePool, draft_id: Uuid) -> Resu
 ///
 /// Returns [`DbError::Sqlx`] if the delete fails (FK or IO). Unknown
 /// `draft_id` returns `Ok(0)`, not an error.
-pub async fn delete_all_for_draft(pool: &SqlitePool, draft_id: Uuid) -> Result<u64, DbError> {
+pub async fn delete_all_for_draft(pool: &SqlitePool, draft_id: DraftId) -> Result<u64, DbError> {
     let r = sqlx::query("DELETE FROM draft_attachments WHERE draft_id = ?")
         .bind(draft_id)
         .execute(pool)
@@ -124,7 +127,7 @@ mod tests {
     use crate::db::{drafts, test_pool};
     use serde_json::json;
 
-    async fn account_and_draft(pool: &SqlitePool) -> Uuid {
+    async fn account_and_draft(pool: &SqlitePool) -> DraftId {
         let account = crate::db::accounts::create(
             pool,
             &crate::db::accounts::NewAccount {

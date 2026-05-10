@@ -9,10 +9,9 @@
 
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
-use uuid::Uuid;
 
 use crate::db::DbError;
-use crate::models::Thread;
+use crate::models::{AccountId, Thread, ThreadId};
 
 const SELECT: &str = "\
     id, account_id, external_id, subject, last_message_at, message_count, created_at";
@@ -26,11 +25,11 @@ const SELECT: &str = "\
 /// `account_id` is unknown, but also any other SQLite error.
 pub async fn create(
     pool: &SqlitePool,
-    account_id: Uuid,
+    account_id: AccountId,
     external_id: Option<&str>,
     subject: Option<&str>,
 ) -> Result<Thread, DbError> {
-    let id = Uuid::new_v4();
+    let id = ThreadId::new();
     let q = format!(
         "INSERT INTO threads (id, account_id, external_id, subject) \
          VALUES (?,?,?,?) RETURNING {SELECT}"
@@ -50,7 +49,7 @@ pub async fn create(
 ///
 /// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
 /// row is reported as `Ok(None)`, not an error.
-pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Thread>, DbError> {
+pub async fn get(pool: &SqlitePool, id: ThreadId) -> Result<Option<Thread>, DbError> {
     let q = format!("SELECT {SELECT} FROM threads WHERE id = ?");
     Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
@@ -63,7 +62,7 @@ pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Thread>, DbError>
 /// row is reported as `Ok(None)`, not an error.
 pub async fn get_by_external_id(
     pool: &SqlitePool,
-    account_id: Uuid,
+    account_id: AccountId,
     external_id: &str,
 ) -> Result<Option<Thread>, DbError> {
     let q = format!("SELECT {SELECT} FROM threads WHERE account_id = ? AND external_id = ?");
@@ -82,7 +81,7 @@ pub async fn get_by_external_id(
 /// Returns [`DbError::Sqlx`] if the query or row decode fails.
 pub async fn list_recent(
     pool: &SqlitePool,
-    account_id: Uuid,
+    account_id: AccountId,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<Thread>, DbError> {
@@ -106,7 +105,7 @@ pub async fn list_recent(
 ///
 /// Returns [`DbError::Sqlx`] if the update fails. A missing id is a
 /// silent no-op (rows_affected = 0), not an error.
-pub async fn refresh_aggregates(pool: &SqlitePool, id: Uuid) -> Result<(), DbError> {
+pub async fn refresh_aggregates(pool: &SqlitePool, id: ThreadId) -> Result<(), DbError> {
     sqlx::query(
         "UPDATE threads SET \
          message_count = (SELECT count(*) FROM messages WHERE thread_id = ?), \
@@ -132,7 +131,7 @@ pub async fn refresh_aggregates(pool: &SqlitePool, id: Uuid) -> Result<(), DbErr
 /// = 0), not an error.
 pub async fn touch_last_message_at(
     pool: &SqlitePool,
-    id: Uuid,
+    id: ThreadId,
     when: DateTime<Utc>,
 ) -> Result<(), DbError> {
     sqlx::query(
@@ -153,7 +152,7 @@ pub async fn touch_last_message_at(
 ///
 /// Returns [`DbError::Sqlx`] if the delete fails (FK or IO). A missing
 /// row is reported as `Ok(false)`, not an error.
-pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
+pub async fn delete(pool: &SqlitePool, id: ThreadId) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM threads WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -164,8 +163,9 @@ pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
-    async fn account(pool: &SqlitePool) -> Uuid {
+    async fn account(pool: &SqlitePool) -> AccountId {
         crate::db::accounts::create(
             pool,
             &crate::db::accounts::NewAccount {

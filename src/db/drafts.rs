@@ -10,15 +10,14 @@
 
 use serde::Deserialize;
 use sqlx::SqlitePool;
-use uuid::Uuid;
 
 use crate::db::DbError;
-use crate::models::Draft;
+use crate::models::{AccountId, Draft, DraftId, FolderId, MessageId};
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct NewDraft {
-    pub account_id: Uuid,
-    pub in_reply_to_msg: Option<Uuid>,
+    pub account_id: AccountId,
+    pub in_reply_to_msg: Option<MessageId>,
     pub to_addrs: serde_json::Value,
     pub cc_addrs: serde_json::Value,
     pub bcc_addrs: serde_json::Value,
@@ -44,7 +43,7 @@ const SELECT: &str = "\
 /// violation when `account_id` (or `in_reply_to_msg`) is unknown, or
 /// any other SQLite error.
 pub async fn create(pool: &SqlitePool, new: &NewDraft) -> Result<Draft, DbError> {
-    let id = Uuid::new_v4();
+    let id = DraftId::new();
     let q = format!(
         "INSERT INTO drafts \
          (id, account_id, in_reply_to_msg, to_addrs, cc_addrs, bcc_addrs, \
@@ -86,7 +85,7 @@ pub struct DraftPatch<'a> {
 /// reported as `Ok(None)`, not an error.
 pub async fn update(
     pool: &SqlitePool,
-    id: Uuid,
+    id: DraftId,
     patch: &DraftPatch<'_>,
 ) -> Result<Option<Draft>, DbError> {
     let q = format!(
@@ -116,8 +115,8 @@ pub async fn update(
 /// `id` is a silent no-op (rows_affected = 0).
 pub async fn set_remote(
     pool: &SqlitePool,
-    id: Uuid,
-    folder_id: Uuid,
+    id: DraftId,
+    folder_id: FolderId,
     uid: i64,
 ) -> Result<(), DbError> {
     sqlx::query("UPDATE drafts SET remote_folder_id = ?, remote_uid = ? WHERE id = ?")
@@ -135,7 +134,7 @@ pub async fn set_remote(
 ///
 /// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
 /// row is reported as `Ok(None)`, not an error.
-pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Draft>, DbError> {
+pub async fn get(pool: &SqlitePool, id: DraftId) -> Result<Option<Draft>, DbError> {
     let q = format!("SELECT {SELECT} FROM drafts WHERE id = ?");
     Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
@@ -145,7 +144,10 @@ pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Draft>, DbError> 
 /// # Errors
 ///
 /// Returns [`DbError::Sqlx`] if the query or row decode fails.
-pub async fn list_by_account(pool: &SqlitePool, account_id: Uuid) -> Result<Vec<Draft>, DbError> {
+pub async fn list_by_account(
+    pool: &SqlitePool,
+    account_id: AccountId,
+) -> Result<Vec<Draft>, DbError> {
     let q = format!("SELECT {SELECT} FROM drafts WHERE account_id = ? ORDER BY updated_at DESC");
     Ok(sqlx::query_as(&q).bind(account_id).fetch_all(pool).await?)
 }
@@ -156,7 +158,7 @@ pub async fn list_by_account(pool: &SqlitePool, account_id: Uuid) -> Result<Vec<
 ///
 /// Returns [`DbError::Sqlx`] if the delete fails. A missing row is
 /// reported as `Ok(false)`, not an error.
-pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
+pub async fn delete(pool: &SqlitePool, id: DraftId) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM drafts WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -168,8 +170,9 @@ pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use uuid::Uuid;
 
-    async fn account(pool: &SqlitePool) -> Uuid {
+    async fn account(pool: &SqlitePool) -> AccountId {
         crate::db::accounts::create(
             pool,
             &crate::db::accounts::NewAccount {
@@ -190,7 +193,7 @@ mod tests {
         .id
     }
 
-    fn sample(account_id: Uuid) -> NewDraft {
+    fn sample(account_id: AccountId) -> NewDraft {
         NewDraft {
             account_id,
             in_reply_to_msg: None,
@@ -251,7 +254,7 @@ mod tests {
         let empty = json!([]);
         let res = update(
             &pool,
-            Uuid::new_v4(),
+            DraftId::new(),
             &DraftPatch {
                 to_addrs: &empty,
                 cc_addrs: &empty,

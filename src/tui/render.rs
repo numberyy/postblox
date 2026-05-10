@@ -939,9 +939,9 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::style::Color;
     use ratatui::Terminal;
-    use uuid::Uuid;
 
     use super::*;
+    use crate::models::{AccountId, AttachmentId, FolderId, MessageId, ThreadId};
     use crate::tui::app::{
         AccountItem, AttachmentItem, AttachmentPreviewItem, FolderItem, MessageDetail, MessageItem,
     };
@@ -987,22 +987,22 @@ mod tests {
     #[test]
     fn test_render_loaded_state_shows_lists_and_detail() {
         let mut app = AppState::default();
-        let selected_id = Uuid::new_v4();
-        let thread_id = Uuid::new_v4();
+        let selected_id = MessageId::new();
+        let thread_id = ThreadId::new();
         app.apply_accounts(vec![AccountItem {
-            id: Uuid::new_v4(),
+            id: AccountId::new(),
             label: "Work".into(),
             email: "work@example.com".into(),
             status: "idle".into(),
         }]);
         app.apply_folders(vec![FolderItem {
-            id: Uuid::new_v4(),
+            id: FolderId::new(),
             name: "INBOX".into(),
             role: "inbox".into(),
         }]);
         app.apply_folder_messages(vec![
             MessageItem {
-                id: Uuid::new_v4(),
+                id: MessageId::new(),
                 thread_id: Some(thread_id),
                 subject: "Launch plan reply".into(),
                 from: "alice@example.com".into(),
@@ -1045,12 +1045,12 @@ mod tests {
     fn test_render_hides_threads_title_for_singleton_only_folder() {
         let mut app = AppState::default();
         app.apply_folders(vec![FolderItem {
-            id: Uuid::new_v4(),
+            id: FolderId::new(),
             name: "INBOX".into(),
             role: "inbox".into(),
         }]);
         app.apply_folder_messages(vec![MessageItem {
-            id: Uuid::new_v4(),
+            id: MessageId::new(),
             thread_id: None,
             subject: "Solo update".into(),
             from: "alice@example.com".into(),
@@ -1123,7 +1123,7 @@ mod tests {
         let mut app = AppState::default();
         app.set_theme(ThemeName::HighContrast);
         app.apply_accounts(vec![AccountItem {
-            id: Uuid::new_v4(),
+            id: AccountId::new(),
             label: "Work".into(),
             email: "work@example.com".into(),
             status: "idle".into(),
@@ -1139,8 +1139,8 @@ mod tests {
     #[test]
     fn test_render_attachment_split_preview() {
         let mut app = AppState::default();
-        let message_id = Uuid::new_v4();
-        let attachment_id = Uuid::new_v4();
+        let message_id = MessageId::new();
+        let attachment_id = AttachmentId::new();
         app.apply_folder_messages(vec![MessageItem {
             id: message_id,
             thread_id: None,
@@ -1188,8 +1188,8 @@ mod tests {
     #[test]
     fn test_render_preview_focus_applies_scroll_offset_and_selection_style() {
         let mut app = AppState::default();
-        let message_id = Uuid::new_v4();
-        let attachment_id = Uuid::new_v4();
+        let message_id = MessageId::new();
+        let attachment_id = AttachmentId::new();
         app.apply_folder_messages(vec![MessageItem {
             id: message_id,
             thread_id: None,
@@ -1251,7 +1251,7 @@ mod tests {
         app.set_theme(ThemeName::HighContrast);
         app.active = ActivePane::Details;
         app.apply_detail(Some(MessageDetail {
-            id: Uuid::new_v4(),
+            id: MessageId::new(),
             subject: "Long detail".into(),
             from: "alice@example.com".into(),
             snippet: "Preview".into(),
@@ -1286,7 +1286,7 @@ mod tests {
     #[test]
     fn test_render_full_screen_composer() {
         let mut app = AppState::default();
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         for ch in "bob@example.com".chars() {
             assert!(app.push_composer_char(ch));
         }
@@ -1318,7 +1318,7 @@ mod tests {
     fn test_render_long_composer_body_scroll_indicator_cursor_and_selection() {
         let mut app = AppState::default();
         app.set_theme(ThemeName::HighContrast);
-        app.enter_composer(Uuid::new_v4());
+        app.enter_composer(AccountId::new());
         let composer = app.composer.as_mut().unwrap();
         composer.focused = ComposeField::Body;
         composer.body = (1..=20)
@@ -1356,19 +1356,19 @@ mod tests {
         use std::time::Instant;
         let mut app = AppState::default();
         let personal = AccountItem {
-            id: Uuid::new_v4(),
+            id: AccountId::new(),
             label: "Personal".into(),
             email: "p@example.com".into(),
             status: "idle".into(),
         };
         let work = AccountItem {
-            id: Uuid::new_v4(),
+            id: AccountId::new(),
             label: "Work".into(),
             email: "w@example.com".into(),
             status: "idle".into(),
         };
         let side = AccountItem {
-            id: Uuid::new_v4(),
+            id: AccountId::new(),
             label: "Side".into(),
             email: "s@example.com".into(),
             status: "idle".into(),
@@ -1395,7 +1395,7 @@ mod tests {
         use std::time::Instant;
         let mut app = AppState::default();
         let acct = AccountItem {
-            id: Uuid::new_v4(),
+            id: AccountId::new(),
             label: "Work".into(),
             email: "w@example.com".into(),
             status: "idle".into(),
@@ -1419,7 +1419,7 @@ mod tests {
         use std::time::Instant;
         let mut app = AppState::default();
         let acct = AccountItem {
-            id: Uuid::new_v4(),
+            id: AccountId::new(),
             label: "Work".into(),
             email: "w@example.com".into(),
             status: "idle".into(),

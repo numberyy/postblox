@@ -20,7 +20,6 @@ use std::sync::Arc;
 use chrono::Utc;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
-use uuid::Uuid;
 
 use crate::auth::MailCredential;
 use crate::db;
@@ -28,7 +27,7 @@ use crate::imap::ImapSync;
 use crate::ipc::{Hub, Topic};
 use crate::mail::parser::{parse, ParsedEmail};
 use crate::mail::threading::{assign_thread, ThreadMatch, ThreadRef};
-use crate::models::{Folder, Message};
+use crate::models::{AccountId, Folder, FolderId, Message, ThreadId};
 
 use super::error::SyncError;
 
@@ -37,7 +36,7 @@ use super::error::SyncError;
 /// to refetch from scratch.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReconcileReport {
-    pub folder_id: Uuid,
+    pub folder_id: FolderId,
     pub inserted: u64,
     pub wiped: u64,
     pub uid_validity: Option<i64>,
@@ -49,7 +48,7 @@ pub async fn reconcile_folder(
     pool: &SqlitePool,
     hub: &Arc<Hub>,
     imap: &dyn ImapSync,
-    account_id: Uuid,
+    account_id: AccountId,
     folder_name: &str,
     credential: &MailCredential,
 ) -> Result<ReconcileReport, SyncError> {
@@ -114,7 +113,7 @@ pub async fn reconcile_folder(
             .filter_map(|m| m.message_id_header)
             .collect::<Vec<_>>();
         thread_refs.push(ThreadRef {
-            thread_id: t.id,
+            thread_id: t.id.into_inner(),
             message_ids: ids,
             subject: t.subject.clone().unwrap_or_default(),
             last_message_at: t.last_message_at.unwrap_or_else(Utc::now),
@@ -141,7 +140,7 @@ pub async fn reconcile_folder(
         };
 
         let thread_id = match assign_thread(&parsed, &thread_refs) {
-            ThreadMatch::Existing(id) => id,
+            ThreadMatch::Existing(id) => ThreadId::from(id),
             ThreadMatch::New => {
                 let t = db::threads::create(
                     pool,
@@ -153,7 +152,7 @@ pub async fn reconcile_folder(
                 // Add to the in-memory list so subsequent messages in
                 // this same batch can match against it.
                 thread_refs.push(ThreadRef {
-                    thread_id: t.id,
+                    thread_id: t.id.into_inner(),
                     message_ids: parsed
                         .message_id
                         .as_ref()
@@ -242,9 +241,9 @@ pub async fn reconcile_folder(
 /// layer wants. Pulled out as a small helper because the field list is
 /// long and the test below is easier to read this way.
 fn build_message_row(
-    account_id: Uuid,
-    folder_id: Uuid,
-    thread_id: Uuid,
+    account_id: AccountId,
+    folder_id: FolderId,
+    thread_id: ThreadId,
     fetched: &crate::imap::FetchedMessage,
     parsed: ParsedEmail,
 ) -> db::messages::NewMessage {

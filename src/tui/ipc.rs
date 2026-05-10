@@ -17,7 +17,10 @@ use uuid::Uuid;
 
 use crate::ipc::client::{Client, ClientError};
 use crate::ipc::{Event, Response, RpcError, Topic};
-use crate::models::{Account, Attachment, Draft, Folder, Message};
+use crate::models::{
+    Account, AccountId, Attachment, AttachmentId, Draft, DraftId, Folder, FolderId, Message,
+    MessageId,
+};
 
 use super::app::{
     AccountItem, AttachmentItem, AttachmentPreviewItem, ComposerDraft, DraftItem, DraftSummary,
@@ -26,7 +29,7 @@ use super::app::{
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct AttachmentExportResult {
-    pub attachment_id: Uuid,
+    pub attachment_id: AttachmentId,
     pub destination_path: String,
     pub bytes_copied: u64,
 }
@@ -34,8 +37,8 @@ pub struct AttachmentExportResult {
 /// Decoded `message.prepare_reply` response.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct ReplyPrepared {
-    pub message_id: Uuid,
-    pub account_id: Uuid,
+    pub message_id: MessageId,
+    pub account_id: AccountId,
     pub to: Vec<String>,
     pub cc: Vec<String>,
     pub subject: String,
@@ -47,8 +50,8 @@ pub struct ReplyPrepared {
 /// Decoded `message.prepare_forward` response.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct ForwardPrepared {
-    pub message_id: Uuid,
-    pub account_id: Uuid,
+    pub message_id: MessageId,
+    pub account_id: AccountId,
     pub subject: String,
     pub forwarded_body: String,
     pub forwarded_attachments: Vec<ForwardAttachmentMeta>,
@@ -56,8 +59,8 @@ pub struct ForwardPrepared {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct ForwardAttachmentMeta {
-    pub message_id: Uuid,
-    pub attachment_id: Uuid,
+    pub message_id: MessageId,
+    pub attachment_id: AttachmentId,
     pub filename: String,
     pub content_type: String,
     pub size_bytes: i64,
@@ -68,7 +71,7 @@ pub struct ForwardAttachmentMeta {
 /// [`ForwardAttachmentBytes::decoded_bytes`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct ForwardAttachmentBytes {
-    pub attachment_id: Uuid,
+    pub attachment_id: AttachmentId,
     pub filename: String,
     pub content_type: String,
     pub size_bytes: i64,
@@ -99,7 +102,7 @@ pub struct DraftGetResult {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct DraftAttachmentPayload {
     pub id: Uuid,
-    pub draft_id: Uuid,
+    pub draft_id: DraftId,
     pub filename: String,
     pub content_type: String,
     pub size_bytes: i64,
@@ -157,7 +160,7 @@ impl MailboxClient {
 
     pub async fn list_folders(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
     ) -> Result<Vec<FolderItem>, MailboxError> {
         let response = self
             .request("folder.list", json!({ "account_id": account_id }))
@@ -168,7 +171,7 @@ impl MailboxClient {
 
     pub async fn list_messages(
         &mut self,
-        folder_id: Uuid,
+        folder_id: FolderId,
     ) -> Result<Vec<MessageItem>, MailboxError> {
         let response = self
             .request(
@@ -182,7 +185,7 @@ impl MailboxClient {
 
     pub async fn get_message(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
     ) -> Result<Option<MessageDetail>, MailboxError> {
         let response = self
             .request("message.get", json!({ "id": message_id }))
@@ -193,7 +196,7 @@ impl MailboxClient {
 
     pub async fn sync_folder(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
         folder_name: &str,
     ) -> Result<Value, MailboxError> {
         let response = self
@@ -207,7 +210,7 @@ impl MailboxClient {
 
     pub async fn start_sync(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
         folder_name: &str,
     ) -> Result<Value, MailboxError> {
         let response = self
@@ -221,7 +224,7 @@ impl MailboxClient {
 
     pub async fn stop_sync(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
         folder_name: &str,
     ) -> Result<Value, MailboxError> {
         let response = self
@@ -235,7 +238,7 @@ impl MailboxClient {
 
     pub async fn set_flags(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
         flags: &[String],
     ) -> Result<(), MailboxError> {
         let response = self
@@ -245,7 +248,7 @@ impl MailboxClient {
         Ok(())
     }
 
-    pub async fn archive_message(&mut self, message_id: Uuid) -> Result<(), MailboxError> {
+    pub async fn archive_message(&mut self, message_id: MessageId) -> Result<(), MailboxError> {
         let response = self
             .request("message.archive", json!({ "id": message_id }))
             .await?;
@@ -253,7 +256,7 @@ impl MailboxClient {
         Ok(())
     }
 
-    pub async fn delete_message(&mut self, message_id: Uuid) -> Result<(), MailboxError> {
+    pub async fn delete_message(&mut self, message_id: MessageId) -> Result<(), MailboxError> {
         let response = self
             .request("message.delete", json!({ "id": message_id }))
             .await?;
@@ -263,7 +266,7 @@ impl MailboxClient {
 
     pub async fn move_message(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
         folder_name: &str,
     ) -> Result<(), MailboxError> {
         let response = self
@@ -278,7 +281,7 @@ impl MailboxClient {
 
     pub async fn list_attachments(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
     ) -> Result<Vec<AttachmentItem>, MailboxError> {
         let response = self
             .request("attachment.list", attachment_list_args(message_id))
@@ -289,7 +292,7 @@ impl MailboxClient {
 
     pub async fn preview_attachment(
         &mut self,
-        attachment_id: Uuid,
+        attachment_id: AttachmentId,
     ) -> Result<AttachmentPreviewItem, MailboxError> {
         let response = self
             .request("attachment.preview", attachment_preview_args(attachment_id))
@@ -301,7 +304,7 @@ impl MailboxClient {
 
     pub async fn export_attachment(
         &mut self,
-        attachment_id: Uuid,
+        attachment_id: AttachmentId,
         destination_path: &Path,
     ) -> Result<AttachmentExportResult, MailboxError> {
         let response = self
@@ -313,7 +316,7 @@ impl MailboxClient {
         decode_response("attachment.export", response)
     }
 
-    pub async fn create_draft(&mut self, draft: &ComposerDraft) -> Result<Uuid, MailboxError> {
+    pub async fn create_draft(&mut self, draft: &ComposerDraft) -> Result<DraftId, MailboxError> {
         let response = self
             .request("draft.create", draft_create_args(draft))
             .await?;
@@ -323,9 +326,9 @@ impl MailboxClient {
 
     pub async fn update_draft(
         &mut self,
-        draft_id: Uuid,
+        draft_id: DraftId,
         draft: &ComposerDraft,
-    ) -> Result<Uuid, MailboxError> {
+    ) -> Result<DraftId, MailboxError> {
         let response = self
             .request("draft.update", draft_update_args(draft_id, draft))
             .await?;
@@ -341,8 +344,8 @@ impl MailboxClient {
 
     pub async fn send_draft(
         &mut self,
-        account_id: Uuid,
-        draft_id: Uuid,
+        account_id: AccountId,
+        draft_id: DraftId,
     ) -> Result<String, MailboxError> {
         let response = self
             .request("message.send", message_send_args(account_id, draft_id))
@@ -351,7 +354,10 @@ impl MailboxClient {
         Ok(sent.message_id)
     }
 
-    pub async fn list_drafts(&mut self, account_id: Uuid) -> Result<Vec<DraftItem>, MailboxError> {
+    pub async fn list_drafts(
+        &mut self,
+        account_id: AccountId,
+    ) -> Result<Vec<DraftItem>, MailboxError> {
         let response = self
             .request("draft.list", json!({ "account_id": account_id }))
             .await?;
@@ -361,14 +367,14 @@ impl MailboxClient {
 
     pub async fn get_draft(
         &mut self,
-        draft_id: Uuid,
+        draft_id: DraftId,
     ) -> Result<Option<DraftSummary>, MailboxError> {
         let response = self.request("draft.get", json!({ "id": draft_id })).await?;
         let payload: Option<DraftGetResult> = decode_response("draft.get", response)?;
         Ok(payload.map(DraftSummary::from))
     }
 
-    pub async fn delete_draft(&mut self, draft_id: Uuid) -> Result<(), MailboxError> {
+    pub async fn delete_draft(&mut self, draft_id: DraftId) -> Result<(), MailboxError> {
         let response = self
             .request("draft.delete", json!({ "id": draft_id }))
             .await?;
@@ -379,7 +385,7 @@ impl MailboxClient {
     pub async fn search(
         &mut self,
         query: &str,
-        account_id: Option<Uuid>,
+        account_id: Option<AccountId>,
     ) -> Result<Vec<SearchHit>, MailboxError> {
         let response = self
             .request("search", search_args(query, account_id))
@@ -390,7 +396,7 @@ impl MailboxClient {
 
     pub async fn prepare_reply(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
         reply_all: bool,
     ) -> Result<ReplyPrepared, MailboxError> {
         let response = self
@@ -404,7 +410,7 @@ impl MailboxClient {
 
     pub async fn prepare_forward(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
     ) -> Result<ForwardPrepared, MailboxError> {
         let response = self
             .request(
@@ -417,7 +423,7 @@ impl MailboxClient {
 
     pub async fn fetch_attachment_for_forward(
         &mut self,
-        attachment_id: Uuid,
+        attachment_id: AttachmentId,
     ) -> Result<ForwardAttachmentBytes, MailboxError> {
         let response = self
             .request(
@@ -482,23 +488,26 @@ where
     serde_json::from_value(response.data).map_err(|source| MailboxError::Decode { op, source })
 }
 
-pub(crate) fn account_folder_args(account_id: Uuid, folder_name: &str) -> Value {
+pub(crate) fn account_folder_args(account_id: AccountId, folder_name: &str) -> Value {
     json!({ "account_id": account_id, "folder_name": folder_name })
 }
 
-pub(crate) fn set_flags_args(message_id: Uuid, flags: &[String]) -> Value {
+pub(crate) fn set_flags_args(message_id: MessageId, flags: &[String]) -> Value {
     json!({ "id": message_id, "flags": flags })
 }
 
-pub(crate) fn attachment_list_args(message_id: Uuid) -> Value {
+pub(crate) fn attachment_list_args(message_id: MessageId) -> Value {
     json!({ "message_id": message_id })
 }
 
-pub(crate) fn attachment_preview_args(attachment_id: Uuid) -> Value {
+pub(crate) fn attachment_preview_args(attachment_id: AttachmentId) -> Value {
     json!({ "id": attachment_id })
 }
 
-pub(crate) fn attachment_export_args(attachment_id: Uuid, destination_path: &Path) -> Value {
+pub(crate) fn attachment_export_args(
+    attachment_id: AttachmentId,
+    destination_path: &Path,
+) -> Value {
     json!({
         "id": attachment_id,
         "destination_path": destination_path.display().to_string(),
@@ -521,7 +530,7 @@ pub(crate) fn draft_create_args(draft: &ComposerDraft) -> Value {
     })
 }
 
-pub(crate) fn draft_update_args(draft_id: Uuid, draft: &ComposerDraft) -> Value {
+pub(crate) fn draft_update_args(draft_id: DraftId, draft: &ComposerDraft) -> Value {
     json!({
         "id": draft_id,
         "to_addrs": &draft.to_addrs,
@@ -550,11 +559,11 @@ fn draft_attachment_specs(draft: &ComposerDraft) -> Value {
     )
 }
 
-pub(crate) fn message_send_args(account_id: Uuid, draft_id: Uuid) -> Value {
+pub(crate) fn message_send_args(account_id: AccountId, draft_id: DraftId) -> Value {
     json!({ "account_id": account_id, "draft_id": draft_id })
 }
 
-pub(crate) fn search_args(query: &str, account_id: Option<Uuid>) -> Value {
+pub(crate) fn search_args(query: &str, account_id: Option<AccountId>) -> Value {
     match account_id {
         Some(account_id) => json!({ "q": query, "account_id": account_id, "limit": 50 }),
         None => json!({ "q": query, "limit": 50 }),
@@ -567,13 +576,14 @@ mod tests {
     use serde_json::json;
 
     use crate::models::Message;
+    use crate::models::ThreadId;
 
     use super::*;
 
     fn message() -> Message {
-        let id = Uuid::new_v4();
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let id = MessageId::new();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         Message {
             id,
             account_id,
@@ -617,7 +627,7 @@ mod tests {
     #[test]
     fn test_message_item_from_preserves_thread_id() {
         let mut original = message();
-        let thread_id = Uuid::new_v4();
+        let thread_id = ThreadId::new();
         original.thread_id = Some(thread_id);
 
         let item = MessageItem::from(original);
@@ -646,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_account_folder_args_match_daemon_write_ops() {
-        let account_id = Uuid::new_v4();
+        let account_id = AccountId::new();
 
         let args = account_folder_args(account_id, "INBOX");
 
@@ -661,7 +671,7 @@ mod tests {
 
     #[test]
     fn test_set_flags_args_serializes_complete_flag_list() {
-        let message_id = Uuid::new_v4();
+        let message_id = MessageId::new();
         let flags = vec!["\\Answered".to_string(), "\\Seen".to_string()];
 
         let args = set_flags_args(message_id, &flags);
@@ -677,8 +687,8 @@ mod tests {
 
     #[test]
     fn test_attachment_args_match_daemon_ops() {
-        let message_id = Uuid::new_v4();
-        let attachment_id = Uuid::new_v4();
+        let message_id = MessageId::new();
+        let attachment_id = AttachmentId::new();
 
         assert_eq!(
             attachment_list_args(message_id),
@@ -696,8 +706,8 @@ mod tests {
 
     #[test]
     fn test_draft_and_send_args_match_daemon_payloads() {
-        let account_id = Uuid::new_v4();
-        let draft_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let draft_id = DraftId::new();
         let draft = super::super::app::ComposerDraft {
             account_id,
             in_reply_to_msg: None,

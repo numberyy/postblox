@@ -24,9 +24,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use std::time::Duration as StdDuration;
 use thiserror::Error;
-use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::models::AccountId;
 use crate::secrets::{SecretError, SecretStore};
 
 const AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -379,7 +379,7 @@ pub fn xoauth2_sasl_string(username: &str, access_token: &str) -> String {
 
 pub async fn load_stored_oauth(
     secrets: &dyn SecretStore,
-    account_id: Uuid,
+    account_id: AccountId,
 ) -> Result<Option<StoredGoogleOAuth>, GoogleOAuthError> {
     let Some(secret) = secrets.get(account_id).await? else {
         return Ok(None);
@@ -391,7 +391,7 @@ pub async fn load_stored_oauth(
 
 pub async fn store_stored_oauth(
     secrets: &dyn SecretStore,
-    account_id: Uuid,
+    account_id: AccountId,
     stored: &StoredGoogleOAuth,
 ) -> Result<(), GoogleOAuthError> {
     let json = serde_json::to_string(stored)
@@ -586,7 +586,7 @@ mod tests {
             "test",
             KdfParams::insecure_for_tests(),
         );
-        let id = Uuid::new_v4();
+        let id = AccountId::new();
         let stored = StoredGoogleOAuth::new(
             config(),
             GoogleOAuthToken {

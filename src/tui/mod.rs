@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::ipc::Topic;
+use crate::models::{AccountId, AttachmentId, DraftId, FolderId, MessageId};
 use app::{ActivePane, AppState, InputMode, SyncStateUi, FLAGGED_FLAG, SEEN_FLAG};
 use command::{parse_command, Command};
 use ipc::MailboxClient;
@@ -60,94 +61,96 @@ trait Mailbox {
     async fn list_accounts(&mut self) -> Result<Vec<app::AccountItem>, ipc::MailboxError>;
     async fn list_folders(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
     ) -> Result<Vec<app::FolderItem>, ipc::MailboxError>;
     async fn list_messages(
         &mut self,
-        folder_id: Uuid,
+        folder_id: FolderId,
     ) -> Result<Vec<app::MessageItem>, ipc::MailboxError>;
     async fn get_message(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
     ) -> Result<Option<app::MessageDetail>, ipc::MailboxError>;
     async fn sync_folder(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
         folder_name: &str,
     ) -> Result<serde_json::Value, ipc::MailboxError>;
     async fn start_sync(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
         folder_name: &str,
     ) -> Result<serde_json::Value, ipc::MailboxError>;
     async fn stop_sync(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
         folder_name: &str,
     ) -> Result<serde_json::Value, ipc::MailboxError>;
     async fn set_flags(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
         flags: &[String],
     ) -> Result<(), ipc::MailboxError>;
-    async fn archive_message(&mut self, message_id: Uuid) -> Result<(), ipc::MailboxError>;
-    async fn delete_message(&mut self, message_id: Uuid) -> Result<(), ipc::MailboxError>;
+    async fn archive_message(&mut self, message_id: MessageId) -> Result<(), ipc::MailboxError>;
+    async fn delete_message(&mut self, message_id: MessageId) -> Result<(), ipc::MailboxError>;
     async fn move_message(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
         folder_name: &str,
     ) -> Result<(), ipc::MailboxError>;
     async fn list_attachments(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
     ) -> Result<Vec<app::AttachmentItem>, ipc::MailboxError>;
     async fn preview_attachment(
         &mut self,
-        attachment_id: Uuid,
+        attachment_id: AttachmentId,
     ) -> Result<app::AttachmentPreviewItem, ipc::MailboxError>;
     async fn export_attachment(
         &mut self,
-        attachment_id: Uuid,
+        attachment_id: AttachmentId,
         destination_path: &std::path::Path,
     ) -> Result<ipc::AttachmentExportResult, ipc::MailboxError>;
-    async fn create_draft(&mut self, draft: &app::ComposerDraft)
-        -> Result<Uuid, ipc::MailboxError>;
+    async fn create_draft(
+        &mut self,
+        draft: &app::ComposerDraft,
+    ) -> Result<DraftId, ipc::MailboxError>;
     async fn update_draft(
         &mut self,
-        draft_id: Uuid,
+        draft_id: DraftId,
         draft: &app::ComposerDraft,
-    ) -> Result<Uuid, ipc::MailboxError>;
+    ) -> Result<DraftId, ipc::MailboxError>;
     async fn send_draft(
         &mut self,
-        account_id: Uuid,
-        draft_id: Uuid,
+        account_id: AccountId,
+        draft_id: DraftId,
     ) -> Result<String, ipc::MailboxError>;
     async fn list_drafts(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
     ) -> Result<Vec<app::DraftItem>, ipc::MailboxError>;
     async fn get_draft(
         &mut self,
-        draft_id: Uuid,
+        draft_id: DraftId,
     ) -> Result<Option<app::DraftSummary>, ipc::MailboxError>;
-    async fn delete_draft(&mut self, draft_id: Uuid) -> Result<(), ipc::MailboxError>;
+    async fn delete_draft(&mut self, draft_id: DraftId) -> Result<(), ipc::MailboxError>;
     async fn search(
         &mut self,
         query: &str,
-        account_id: Option<Uuid>,
+        account_id: Option<AccountId>,
     ) -> Result<Vec<app::SearchHit>, ipc::MailboxError>;
     async fn prepare_reply(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
         reply_all: bool,
     ) -> Result<ipc::ReplyPrepared, ipc::MailboxError>;
     async fn prepare_forward(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
     ) -> Result<ipc::ForwardPrepared, ipc::MailboxError>;
     async fn fetch_attachment_for_forward(
         &mut self,
-        attachment_id: Uuid,
+        attachment_id: AttachmentId,
     ) -> Result<ipc::ForwardAttachmentBytes, ipc::MailboxError>;
 }
 
@@ -159,28 +162,28 @@ impl Mailbox for MailboxClient {
 
     async fn list_folders(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
     ) -> Result<Vec<app::FolderItem>, ipc::MailboxError> {
         MailboxClient::list_folders(self, account_id).await
     }
 
     async fn list_messages(
         &mut self,
-        folder_id: Uuid,
+        folder_id: FolderId,
     ) -> Result<Vec<app::MessageItem>, ipc::MailboxError> {
         MailboxClient::list_messages(self, folder_id).await
     }
 
     async fn get_message(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
     ) -> Result<Option<app::MessageDetail>, ipc::MailboxError> {
         MailboxClient::get_message(self, message_id).await
     }
 
     async fn sync_folder(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
         folder_name: &str,
     ) -> Result<serde_json::Value, ipc::MailboxError> {
         MailboxClient::sync_folder(self, account_id, folder_name).await
@@ -188,7 +191,7 @@ impl Mailbox for MailboxClient {
 
     async fn start_sync(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
         folder_name: &str,
     ) -> Result<serde_json::Value, ipc::MailboxError> {
         MailboxClient::start_sync(self, account_id, folder_name).await
@@ -196,7 +199,7 @@ impl Mailbox for MailboxClient {
 
     async fn stop_sync(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
         folder_name: &str,
     ) -> Result<serde_json::Value, ipc::MailboxError> {
         MailboxClient::stop_sync(self, account_id, folder_name).await
@@ -204,23 +207,23 @@ impl Mailbox for MailboxClient {
 
     async fn set_flags(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
         flags: &[String],
     ) -> Result<(), ipc::MailboxError> {
         MailboxClient::set_flags(self, message_id, flags).await
     }
 
-    async fn archive_message(&mut self, message_id: Uuid) -> Result<(), ipc::MailboxError> {
+    async fn archive_message(&mut self, message_id: MessageId) -> Result<(), ipc::MailboxError> {
         MailboxClient::archive_message(self, message_id).await
     }
 
-    async fn delete_message(&mut self, message_id: Uuid) -> Result<(), ipc::MailboxError> {
+    async fn delete_message(&mut self, message_id: MessageId) -> Result<(), ipc::MailboxError> {
         MailboxClient::delete_message(self, message_id).await
     }
 
     async fn move_message(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
         folder_name: &str,
     ) -> Result<(), ipc::MailboxError> {
         MailboxClient::move_message(self, message_id, folder_name).await
@@ -228,21 +231,21 @@ impl Mailbox for MailboxClient {
 
     async fn list_attachments(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
     ) -> Result<Vec<app::AttachmentItem>, ipc::MailboxError> {
         MailboxClient::list_attachments(self, message_id).await
     }
 
     async fn preview_attachment(
         &mut self,
-        attachment_id: Uuid,
+        attachment_id: AttachmentId,
     ) -> Result<app::AttachmentPreviewItem, ipc::MailboxError> {
         MailboxClient::preview_attachment(self, attachment_id).await
     }
 
     async fn export_attachment(
         &mut self,
-        attachment_id: Uuid,
+        attachment_id: AttachmentId,
         destination_path: &std::path::Path,
     ) -> Result<ipc::AttachmentExportResult, ipc::MailboxError> {
         MailboxClient::export_attachment(self, attachment_id, destination_path).await
@@ -251,55 +254,55 @@ impl Mailbox for MailboxClient {
     async fn create_draft(
         &mut self,
         draft: &app::ComposerDraft,
-    ) -> Result<Uuid, ipc::MailboxError> {
+    ) -> Result<DraftId, ipc::MailboxError> {
         MailboxClient::create_draft(self, draft).await
     }
 
     async fn update_draft(
         &mut self,
-        draft_id: Uuid,
+        draft_id: DraftId,
         draft: &app::ComposerDraft,
-    ) -> Result<Uuid, ipc::MailboxError> {
+    ) -> Result<DraftId, ipc::MailboxError> {
         MailboxClient::update_draft(self, draft_id, draft).await
     }
 
     async fn send_draft(
         &mut self,
-        account_id: Uuid,
-        draft_id: Uuid,
+        account_id: AccountId,
+        draft_id: DraftId,
     ) -> Result<String, ipc::MailboxError> {
         MailboxClient::send_draft(self, account_id, draft_id).await
     }
 
     async fn list_drafts(
         &mut self,
-        account_id: Uuid,
+        account_id: AccountId,
     ) -> Result<Vec<app::DraftItem>, ipc::MailboxError> {
         MailboxClient::list_drafts(self, account_id).await
     }
 
     async fn get_draft(
         &mut self,
-        draft_id: Uuid,
+        draft_id: DraftId,
     ) -> Result<Option<app::DraftSummary>, ipc::MailboxError> {
         MailboxClient::get_draft(self, draft_id).await
     }
 
-    async fn delete_draft(&mut self, draft_id: Uuid) -> Result<(), ipc::MailboxError> {
+    async fn delete_draft(&mut self, draft_id: DraftId) -> Result<(), ipc::MailboxError> {
         MailboxClient::delete_draft(self, draft_id).await
     }
 
     async fn search(
         &mut self,
         query: &str,
-        account_id: Option<Uuid>,
+        account_id: Option<AccountId>,
     ) -> Result<Vec<app::SearchHit>, ipc::MailboxError> {
         MailboxClient::search(self, query, account_id).await
     }
 
     async fn prepare_reply(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
         reply_all: bool,
     ) -> Result<ipc::ReplyPrepared, ipc::MailboxError> {
         MailboxClient::prepare_reply(self, message_id, reply_all).await
@@ -307,14 +310,14 @@ impl Mailbox for MailboxClient {
 
     async fn prepare_forward(
         &mut self,
-        message_id: Uuid,
+        message_id: MessageId,
     ) -> Result<ipc::ForwardPrepared, ipc::MailboxError> {
         MailboxClient::prepare_forward(self, message_id).await
     }
 
     async fn fetch_attachment_for_forward(
         &mut self,
-        attachment_id: Uuid,
+        attachment_id: AttachmentId,
     ) -> Result<ipc::ForwardAttachmentBytes, ipc::MailboxError> {
         MailboxClient::fetch_attachment_for_forward(self, attachment_id).await
     }
@@ -445,18 +448,30 @@ pub fn on_daemon_event(app: &mut AppState, event: &crate::ipc::Event) {
     let now = Instant::now();
     match event.topic.as_str() {
         "mail.new" => {
-            if let Some(account_id) = event.data.get("account_id").and_then(parse_uuid_value) {
-                let folder_id = event.data.get("folder_id").and_then(parse_uuid_value);
+            if let Some(account_id) = event
+                .data
+                .get("account_id")
+                .and_then(parse_account_id_value)
+            {
+                let folder_id = event.data.get("folder_id").and_then(parse_folder_id_value);
                 app.push_mail_new_toast(account_id, folder_id, now);
             }
         }
         "account.synced" => {
-            if let Some(account_id) = event.data.get("account_id").and_then(parse_uuid_value) {
+            if let Some(account_id) = event
+                .data
+                .get("account_id")
+                .and_then(parse_account_id_value)
+            {
                 app.push_account_synced_toast(account_id, now);
             }
         }
         "sync.state" => {
-            let Some(account_id) = event.data.get("account_id").and_then(parse_uuid_value) else {
+            let Some(account_id) = event
+                .data
+                .get("account_id")
+                .and_then(parse_account_id_value)
+            else {
                 return;
             };
             let state = event.data.get("state").and_then(|v| v.as_str());
@@ -476,6 +491,14 @@ pub fn on_daemon_event(app: &mut AppState, event: &crate::ipc::Event) {
 
 fn parse_uuid_value(value: &serde_json::Value) -> Option<Uuid> {
     value.as_str().and_then(|s| Uuid::parse_str(s).ok())
+}
+
+fn parse_account_id_value(value: &serde_json::Value) -> Option<AccountId> {
+    parse_uuid_value(value).map(AccountId::from)
+}
+
+fn parse_folder_id_value(value: &serde_json::Value) -> Option<FolderId> {
+    parse_uuid_value(value).map(FolderId::from)
 }
 
 fn parse_sync_state_str(state: &str) -> Option<SyncStateUi> {
@@ -1443,7 +1466,7 @@ async fn submit_search<C: Mailbox + ?Sized>(
     app: &mut AppState,
     client: &mut C,
     query: String,
-    scope_account: Option<Uuid>,
+    scope_account: Option<AccountId>,
 ) {
     let trimmed = query.trim();
     if trimmed.is_empty() {
@@ -1660,7 +1683,7 @@ async fn run_message_remove_for<C: Mailbox + ?Sized>(
     app: &mut AppState,
     client: &mut C,
     op: MessageRemove,
-    message_id: Uuid,
+    message_id: MessageId,
 ) {
     app.clear_error();
     let snapshot = app.snapshot_message_list();
@@ -1847,7 +1870,7 @@ async fn handle_search_pane_key<C: Mailbox + ?Sized>(
     }
 }
 
-async fn save_composer<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) -> Option<Uuid> {
+async fn save_composer<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) -> Option<DraftId> {
     let Some(draft) = app.composer_draft() else {
         app.set_status("No composer open");
         return None;
@@ -1984,7 +2007,7 @@ fn safe_export_filename(filename: &str) -> String {
     }
 }
 
-fn selected_account_folder(app: &AppState) -> Result<(Uuid, String), CommandRunError> {
+fn selected_account_folder(app: &AppState) -> Result<(AccountId, String), CommandRunError> {
     let account_id = app
         .selected_account_id()
         .ok_or(CommandRunError::AccountNotSelected)?;
@@ -2300,33 +2323,34 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::models::ThreadId;
     use crate::tui::app::{AccountItem, FolderItem, MessageDetail, MessageItem};
     use crate::tui::theme::ThemeName;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Call {
-        Sync(Uuid, String),
-        StartSync(Uuid, String),
-        StopSync(Uuid, String),
-        SetFlags(Uuid, Vec<String>),
-        ArchiveMessage(Uuid),
-        DeleteMessage(Uuid),
-        MoveMessage(Uuid, String),
-        ListMessages(Uuid),
-        GetMessage(Uuid),
-        ListAttachments(Uuid),
-        PreviewAttachment(Uuid),
-        ExportAttachment(Uuid, PathBuf),
+        Sync(AccountId, String),
+        StartSync(AccountId, String),
+        StopSync(AccountId, String),
+        SetFlags(MessageId, Vec<String>),
+        ArchiveMessage(MessageId),
+        DeleteMessage(MessageId),
+        MoveMessage(MessageId, String),
+        ListMessages(FolderId),
+        GetMessage(MessageId),
+        ListAttachments(MessageId),
+        PreviewAttachment(AttachmentId),
+        ExportAttachment(AttachmentId, PathBuf),
         CreateDraft(app::ComposerDraft),
-        UpdateDraft(Uuid, app::ComposerDraft),
-        SendDraft(Uuid, Uuid),
-        Search(String, Option<Uuid>),
-        PrepareReply(Uuid, bool),
-        PrepareForward(Uuid),
-        FetchAttachmentForForward(Uuid),
-        ListDrafts(Uuid),
-        GetDraft(Uuid),
-        DeleteDraft(Uuid),
+        UpdateDraft(DraftId, app::ComposerDraft),
+        SendDraft(AccountId, DraftId),
+        Search(String, Option<AccountId>),
+        PrepareReply(MessageId, bool),
+        PrepareForward(MessageId),
+        FetchAttachmentForForward(AttachmentId),
+        ListDrafts(AccountId),
+        GetDraft(DraftId),
+        DeleteDraft(DraftId),
     }
 
     #[derive(Default)]
@@ -2336,7 +2360,7 @@ mod tests {
         detail: Option<MessageDetail>,
         attachments: Vec<app::AttachmentItem>,
         preview: Option<app::AttachmentPreviewItem>,
-        draft_id: Option<Uuid>,
+        draft_id: Option<DraftId>,
         send_message_id: Option<String>,
         search_hits: Vec<app::SearchHit>,
         reply_prepared: Option<ipc::ReplyPrepared>,
@@ -2366,13 +2390,16 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_folders(&mut self, _: Uuid) -> Result<Vec<FolderItem>, ipc::MailboxError> {
+        async fn list_folders(
+            &mut self,
+            _: AccountId,
+        ) -> Result<Vec<FolderItem>, ipc::MailboxError> {
             Ok(Vec::new())
         }
 
         async fn list_messages(
             &mut self,
-            folder_id: Uuid,
+            folder_id: FolderId,
         ) -> Result<Vec<MessageItem>, ipc::MailboxError> {
             self.calls.push(Call::ListMessages(folder_id));
             Ok(self.messages.clone())
@@ -2380,7 +2407,7 @@ mod tests {
 
         async fn get_message(
             &mut self,
-            message_id: Uuid,
+            message_id: MessageId,
         ) -> Result<Option<MessageDetail>, ipc::MailboxError> {
             self.calls.push(Call::GetMessage(message_id));
             Ok(self.detail.clone())
@@ -2388,7 +2415,7 @@ mod tests {
 
         async fn sync_folder(
             &mut self,
-            account_id: Uuid,
+            account_id: AccountId,
             folder_name: &str,
         ) -> Result<serde_json::Value, ipc::MailboxError> {
             self.calls
@@ -2402,7 +2429,7 @@ mod tests {
 
         async fn start_sync(
             &mut self,
-            account_id: Uuid,
+            account_id: AccountId,
             folder_name: &str,
         ) -> Result<serde_json::Value, ipc::MailboxError> {
             self.calls
@@ -2412,7 +2439,7 @@ mod tests {
 
         async fn stop_sync(
             &mut self,
-            account_id: Uuid,
+            account_id: AccountId,
             folder_name: &str,
         ) -> Result<serde_json::Value, ipc::MailboxError> {
             self.calls
@@ -2422,7 +2449,7 @@ mod tests {
 
         async fn set_flags(
             &mut self,
-            message_id: Uuid,
+            message_id: MessageId,
             flags: &[String],
         ) -> Result<(), ipc::MailboxError> {
             self.calls.push(Call::SetFlags(message_id, flags.to_vec()));
@@ -2433,7 +2460,10 @@ mod tests {
             }
         }
 
-        async fn archive_message(&mut self, message_id: Uuid) -> Result<(), ipc::MailboxError> {
+        async fn archive_message(
+            &mut self,
+            message_id: MessageId,
+        ) -> Result<(), ipc::MailboxError> {
             self.calls.push(Call::ArchiveMessage(message_id));
             if self.fail_archive {
                 Err(server_error("message.archive"))
@@ -2442,7 +2472,7 @@ mod tests {
             }
         }
 
-        async fn delete_message(&mut self, message_id: Uuid) -> Result<(), ipc::MailboxError> {
+        async fn delete_message(&mut self, message_id: MessageId) -> Result<(), ipc::MailboxError> {
             self.calls.push(Call::DeleteMessage(message_id));
             if self.fail_delete {
                 Err(server_error("message.delete"))
@@ -2453,7 +2483,7 @@ mod tests {
 
         async fn move_message(
             &mut self,
-            message_id: Uuid,
+            message_id: MessageId,
             folder_name: &str,
         ) -> Result<(), ipc::MailboxError> {
             self.calls
@@ -2467,7 +2497,7 @@ mod tests {
 
         async fn list_attachments(
             &mut self,
-            message_id: Uuid,
+            message_id: MessageId,
         ) -> Result<Vec<app::AttachmentItem>, ipc::MailboxError> {
             self.calls.push(Call::ListAttachments(message_id));
             Ok(self.attachments.clone())
@@ -2475,7 +2505,7 @@ mod tests {
 
         async fn preview_attachment(
             &mut self,
-            attachment_id: Uuid,
+            attachment_id: AttachmentId,
         ) -> Result<app::AttachmentPreviewItem, ipc::MailboxError> {
             self.calls.push(Call::PreviewAttachment(attachment_id));
             Ok(self.preview.clone().unwrap_or(app::AttachmentPreviewItem {
@@ -2489,7 +2519,7 @@ mod tests {
 
         async fn export_attachment(
             &mut self,
-            attachment_id: Uuid,
+            attachment_id: AttachmentId,
             destination_path: &std::path::Path,
         ) -> Result<ipc::AttachmentExportResult, ipc::MailboxError> {
             self.calls.push(Call::ExportAttachment(
@@ -2506,20 +2536,20 @@ mod tests {
         async fn create_draft(
             &mut self,
             draft: &app::ComposerDraft,
-        ) -> Result<uuid::Uuid, ipc::MailboxError> {
+        ) -> Result<DraftId, ipc::MailboxError> {
             self.calls.push(Call::CreateDraft(draft.clone()));
             if self.fail_draft {
                 Err(server_error("draft.create"))
             } else {
-                Ok(self.draft_id.unwrap_or_else(Uuid::new_v4))
+                Ok(self.draft_id.unwrap_or_else(DraftId::new))
             }
         }
 
         async fn update_draft(
             &mut self,
-            draft_id: Uuid,
+            draft_id: DraftId,
             draft: &app::ComposerDraft,
-        ) -> Result<uuid::Uuid, ipc::MailboxError> {
+        ) -> Result<DraftId, ipc::MailboxError> {
             self.calls.push(Call::UpdateDraft(draft_id, draft.clone()));
             if self.fail_draft {
                 Err(server_error("draft.update"))
@@ -2530,8 +2560,8 @@ mod tests {
 
         async fn send_draft(
             &mut self,
-            account_id: Uuid,
-            draft_id: Uuid,
+            account_id: AccountId,
+            draft_id: DraftId,
         ) -> Result<String, ipc::MailboxError> {
             self.calls.push(Call::SendDraft(account_id, draft_id));
             if self.fail_send {
@@ -2547,7 +2577,7 @@ mod tests {
         async fn search(
             &mut self,
             query: &str,
-            account_id: Option<Uuid>,
+            account_id: Option<AccountId>,
         ) -> Result<Vec<app::SearchHit>, ipc::MailboxError> {
             self.calls.push(Call::Search(query.to_string(), account_id));
             if self.fail_search {
@@ -2559,7 +2589,7 @@ mod tests {
 
         async fn prepare_reply(
             &mut self,
-            message_id: Uuid,
+            message_id: MessageId,
             reply_all: bool,
         ) -> Result<ipc::ReplyPrepared, ipc::MailboxError> {
             self.calls.push(Call::PrepareReply(message_id, reply_all));
@@ -2571,7 +2601,7 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| ipc::ReplyPrepared {
                     message_id,
-                    account_id: Uuid::nil(),
+                    account_id: AccountId::from(uuid::Uuid::nil()),
                     to: Vec::new(),
                     cc: Vec::new(),
                     subject: String::new(),
@@ -2583,7 +2613,7 @@ mod tests {
 
         async fn prepare_forward(
             &mut self,
-            message_id: Uuid,
+            message_id: MessageId,
         ) -> Result<ipc::ForwardPrepared, ipc::MailboxError> {
             self.calls.push(Call::PrepareForward(message_id));
             if self.fail_prepare_forward {
@@ -2594,7 +2624,7 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| ipc::ForwardPrepared {
                     message_id,
-                    account_id: Uuid::nil(),
+                    account_id: AccountId::from(uuid::Uuid::nil()),
                     subject: String::new(),
                     forwarded_body: String::new(),
                     forwarded_attachments: Vec::new(),
@@ -2603,7 +2633,7 @@ mod tests {
 
         async fn fetch_attachment_for_forward(
             &mut self,
-            attachment_id: Uuid,
+            attachment_id: AttachmentId,
         ) -> Result<ipc::ForwardAttachmentBytes, ipc::MailboxError> {
             self.calls
                 .push(Call::FetchAttachmentForForward(attachment_id));
@@ -2623,7 +2653,7 @@ mod tests {
 
         async fn list_drafts(
             &mut self,
-            account_id: Uuid,
+            account_id: AccountId,
         ) -> Result<Vec<app::DraftItem>, ipc::MailboxError> {
             self.calls.push(Call::ListDrafts(account_id));
             if self.fail_list_drafts {
@@ -2635,7 +2665,7 @@ mod tests {
 
         async fn get_draft(
             &mut self,
-            draft_id: Uuid,
+            draft_id: DraftId,
         ) -> Result<Option<app::DraftSummary>, ipc::MailboxError> {
             self.calls.push(Call::GetDraft(draft_id));
             if self.fail_get_draft {
@@ -2645,7 +2675,7 @@ mod tests {
             }
         }
 
-        async fn delete_draft(&mut self, draft_id: Uuid) -> Result<(), ipc::MailboxError> {
+        async fn delete_draft(&mut self, draft_id: DraftId) -> Result<(), ipc::MailboxError> {
             self.calls.push(Call::DeleteDraft(draft_id));
             if self.fail_delete_draft {
                 Err(server_error("draft.delete"))
@@ -2663,7 +2693,7 @@ mod tests {
         }
     }
 
-    fn account_item(id: Uuid) -> AccountItem {
+    fn account_item(id: AccountId) -> AccountItem {
         AccountItem {
             id,
             label: "Work".into(),
@@ -2672,7 +2702,7 @@ mod tests {
         }
     }
 
-    fn folder_item(id: Uuid) -> FolderItem {
+    fn folder_item(id: FolderId) -> FolderItem {
         FolderItem {
             id,
             name: "INBOX".into(),
@@ -2680,7 +2710,7 @@ mod tests {
         }
     }
 
-    fn message_item(id: Uuid, flags: Vec<&str>) -> MessageItem {
+    fn message_item(id: MessageId, flags: Vec<&str>) -> MessageItem {
         MessageItem {
             id,
             thread_id: None,
@@ -2693,13 +2723,13 @@ mod tests {
     }
 
     fn thread_message_item(
-        thread_id: Uuid,
+        thread_id: ThreadId,
         subject: &str,
         date: &str,
         flags: Vec<&str>,
     ) -> MessageItem {
         MessageItem {
-            id: Uuid::new_v4(),
+            id: MessageId::new(),
             thread_id: Some(thread_id),
             subject: subject.into(),
             from: "alice@example.com".into(),
@@ -2720,7 +2750,7 @@ mod tests {
         }
     }
 
-    fn detail_with_body(message_id: Uuid, body: &str) -> MessageDetail {
+    fn detail_with_body(message_id: MessageId, body: &str) -> MessageDetail {
         MessageDetail {
             id: message_id,
             subject: "Hello".into(),
@@ -2731,14 +2761,14 @@ mod tests {
         }
     }
 
-    fn app_with_account_folder(account_id: Uuid, folder_id: Uuid) -> AppState {
+    fn app_with_account_folder(account_id: AccountId, folder_id: FolderId) -> AppState {
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(account_id)]);
         app.apply_folders(vec![folder_item(folder_id)]);
         app
     }
 
-    fn attachment_item(id: Uuid, message_id: Uuid) -> app::AttachmentItem {
+    fn attachment_item(id: AttachmentId, message_id: MessageId) -> app::AttachmentItem {
         app::AttachmentItem {
             id,
             message_id,
@@ -2751,7 +2781,7 @@ mod tests {
     }
 
     fn app_with_threaded_messages() -> AppState {
-        let thread_id = Uuid::new_v4();
+        let thread_id = ThreadId::new();
         let mut app = AppState::default();
         app.apply_folder_messages(vec![
             thread_message_item(thread_id, "Reply", "2026-05-07 11:00", vec!["\\Seen"]),
@@ -2762,8 +2792,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_command_sync_calls_daemon_and_refreshes_messages() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let mut app = app_with_account_folder(account_id, folder_id);
         let mut client = MockMailbox::default();
 
@@ -2782,8 +2812,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_command_start_and_stop_sync_use_selected_folder() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let mut app = app_with_account_folder(account_id, folder_id);
         let mut client = MockMailbox::default();
 
@@ -2805,9 +2835,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_command_seen_preserves_other_flags() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
-        let message_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let message_id = MessageId::new();
         let mut app = app_with_account_folder(account_id, folder_id);
         app.apply_messages(vec![message_item(message_id, vec!["\\Answered"])]);
         let mut client = MockMailbox::default();
@@ -2827,9 +2857,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_messages_builds_thread_rows_and_loads_selected_message() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
-        let thread_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let thread_id = ThreadId::new();
         let mut app = app_with_account_folder(account_id, folder_id);
         let older = thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]);
         let newer = thread_message_item(thread_id, "Reply", "2026-05-07 10:00", vec![]);
@@ -2859,17 +2889,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_messages_moves_active_threads_to_messages_when_threads_hide() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
-        let thread_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let thread_id = ThreadId::new();
         let mut app = app_with_account_folder(account_id, folder_id);
         app.apply_folder_messages(vec![
             thread_message_item(thread_id, "Reply", "2026-05-07 10:00", vec!["\\Seen"]),
             thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]),
         ]);
         app.active = ActivePane::Threads;
-        let first = message_item(Uuid::new_v4(), vec!["\\Seen"]);
-        let second = message_item(Uuid::new_v4(), vec![]);
+        let first = message_item(MessageId::new(), vec!["\\Seen"]);
+        let second = message_item(MessageId::new(), vec![]);
         let mut client = MockMailbox {
             messages: vec![first.clone(), second.clone()],
             detail: Some(detail_for(&first)),
@@ -2900,9 +2930,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_command_flag_error_keeps_local_flags_and_reports_daemon_error() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
-        let message_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let message_id = MessageId::new();
         let mut app = app_with_account_folder(account_id, folder_id);
         app.apply_messages(vec![message_item(message_id, vec!["\\Seen"])]);
         let mut client = MockMailbox {
@@ -2987,7 +3017,7 @@ mod tests {
         assert_eq!(app.active, ActivePane::Messages);
         assert_eq!(app.status, "No message detail open");
 
-        app.apply_detail(Some(detail_with_body(Uuid::new_v4(), "body")));
+        app.apply_detail(Some(detail_with_body(MessageId::new(), "body")));
 
         assert!(
             !handle_key(
@@ -3011,7 +3041,7 @@ mod tests {
             active: ActivePane::Details,
             ..Default::default()
         };
-        app.apply_detail(Some(detail_with_body(Uuid::new_v4(), &body)));
+        app.apply_detail(Some(detail_with_body(MessageId::new(), &body)));
         let mut client = MockMailbox::default();
 
         assert!(
@@ -3272,8 +3302,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_up_down_move_selection_without_switching_panes() {
-        let first_thread = Uuid::new_v4();
-        let second_thread = Uuid::new_v4();
+        let first_thread = ThreadId::new();
+        let second_thread = ThreadId::new();
         let mut app = AppState {
             active: ActivePane::Threads,
             ..Default::default()
@@ -3315,8 +3345,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_j_k_move_selection_without_switching_panes() {
-        let first_thread = Uuid::new_v4();
-        let second_thread = Uuid::new_v4();
+        let first_thread = ThreadId::new();
+        let second_thread = ThreadId::new();
         let mut app = AppState {
             active: ActivePane::Threads,
             ..Default::default()
@@ -3382,7 +3412,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_enter_on_thread_focuses_messages_and_loads_detail() {
-        let thread_id = Uuid::new_v4();
+        let thread_id = ThreadId::new();
         let selected = thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]);
         let reply = thread_message_item(thread_id, "Reply", "2026-05-07 10:00", vec!["\\Seen"]);
         let mut app = AppState {
@@ -3454,8 +3484,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_detail_loads_attachments_and_first_preview() {
-        let message_id = Uuid::new_v4();
-        let attachment_id = Uuid::new_v4();
+        let message_id = MessageId::new();
+        let attachment_id = AttachmentId::new();
         let selected = message_item(message_id, vec![]);
         let mut app = AppState::default();
         app.apply_messages(vec![selected.clone()]);
@@ -3493,9 +3523,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_attachment_focus_and_selection_refresh_preview() {
-        let message_id = Uuid::new_v4();
-        let first_id = Uuid::new_v4();
-        let second_id = Uuid::new_v4();
+        let message_id = MessageId::new();
+        let first_id = AttachmentId::new();
+        let second_id = AttachmentId::new();
         let mut app = AppState::default();
         app.apply_detail(Some(MessageDetail {
             id: message_id,
@@ -3550,8 +3580,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_composer_ctrl_s_creates_then_updates_draft() {
-        let account_id = Uuid::new_v4();
-        let draft_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let draft_id = DraftId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(account_id)]);
         let mut client = MockMailbox {
@@ -3612,7 +3642,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_composer_arrows_insert_and_delete_at_cursor() {
-        let account_id = Uuid::new_v4();
+        let account_id = AccountId::new();
         let mut app = AppState::default();
         app.enter_composer(account_id);
         let mut client = MockMailbox::default();
@@ -3683,7 +3713,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_composer_body_page_selection_and_escape() {
-        let account_id = Uuid::new_v4();
+        let account_id = AccountId::new();
         let mut app = AppState::default();
         app.enter_composer(account_id);
         let composer = app.composer.as_mut().unwrap();
@@ -3758,8 +3788,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_composer_ctrl_x_saves_sends_and_exits() {
-        let account_id = Uuid::new_v4();
-        let draft_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let draft_id = DraftId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(account_id)]);
         let mut client = MockMailbox {
@@ -3818,7 +3848,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_composer_ctrl_k_with_no_attachments_sets_empty_state_status() {
-        let account_id = Uuid::new_v4();
+        let account_id = AccountId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(account_id)]);
         let mut client = MockMailbox::default();
@@ -3844,9 +3874,12 @@ mod tests {
         assert!(client.calls.is_empty());
     }
 
-    fn app_with_message_list_focused(account_id: Uuid, folder_id: Uuid) -> (AppState, MessageItem) {
+    fn app_with_message_list_focused(
+        account_id: AccountId,
+        folder_id: FolderId,
+    ) -> (AppState, MessageItem) {
         let mut app = app_with_account_folder(account_id, folder_id);
-        let message = message_item(Uuid::new_v4(), vec!["\\Seen"]);
+        let message = message_item(MessageId::new(), vec!["\\Seen"]);
         app.apply_folder_messages(vec![message.clone()]);
         app.active = ActivePane::Messages;
         (app, message)
@@ -3854,8 +3887,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_e_archives_when_message_list_focused() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         let mut client = MockMailbox::default();
 
@@ -3875,8 +3908,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_d_opens_delete_confirmation_when_message_list_focused() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         let mut client = MockMailbox::default();
 
@@ -3896,8 +3929,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_confirm_delete_yes_deletes_and_clears_pending() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         app.begin_delete_confirmation(message.id);
         let mut client = MockMailbox::default();
@@ -3920,8 +3953,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_confirm_delete_no_cancels_without_calling_daemon() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         app.begin_delete_confirmation(message.id);
         let mut client = MockMailbox::default();
@@ -3943,8 +3976,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_confirm_delete_esc_cancels() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         app.begin_delete_confirmation(message.id);
         let mut client = MockMailbox::default();
@@ -3965,8 +3998,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_archive_failure_restores_message_list() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         let mut client = MockMailbox {
             fail_archive: true,
@@ -3983,8 +4016,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_m_opens_command_bar_with_move_prefix() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, _) = app_with_message_list_focused(account_id, folder_id);
         let mut client = MockMailbox::default();
 
@@ -4003,8 +4036,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_command_move_calls_daemon_with_folder_name() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         let mut client = MockMailbox::default();
 
@@ -4018,8 +4051,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_command_move_failure_restores_message_list() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         let mut client = MockMailbox {
             fail_move: true,
@@ -4039,8 +4072,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_star_toggles_flag_when_message_list_focused() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         let mut client = MockMailbox::default();
 
@@ -4062,10 +4095,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_star_unflags_when_already_flagged() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let mut app = app_with_account_folder(account_id, folder_id);
-        let message = message_item(Uuid::new_v4(), vec!["\\Flagged"]);
+        let message = message_item(MessageId::new(), vec!["\\Flagged"]);
         app.apply_messages(vec![message.clone()]);
         app.active = ActivePane::Messages;
         let mut client = MockMailbox::default();
@@ -4161,7 +4194,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_key_x_in_compose_mode_inserts_text_and_keeps_toast() {
         use std::time::Instant;
-        let account_id = Uuid::new_v4();
+        let account_id = AccountId::new();
         let mut app = AppState::default();
         app.enter_composer(account_id);
         app.push_toast(app::ToastKind::Info, "stay", Instant::now());
@@ -4183,8 +4216,8 @@ mod tests {
     #[tokio::test]
     async fn test_handle_key_x_in_confirm_delete_does_not_dismiss_toast() {
         use std::time::Instant;
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         app.begin_delete_confirmation(message.id);
         app.push_toast(app::ToastKind::Info, "stay", Instant::now());
@@ -4203,7 +4236,11 @@ mod tests {
         assert_eq!(app.mode, InputMode::ConfirmDelete);
     }
 
-    fn app_with_specific_message(account_id: Uuid, folder_id: Uuid, message_id: Uuid) -> AppState {
+    fn app_with_specific_message(
+        account_id: AccountId,
+        folder_id: FolderId,
+        message_id: MessageId,
+    ) -> AppState {
         let mut app = app_with_account_folder(account_id, folder_id);
         let message = MessageItem {
             id: message_id,
@@ -4224,9 +4261,9 @@ mod tests {
     /// and post-state.
     #[tokio::test]
     async fn test_command_bar_archive_matches_e_keybinding() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
-        let message_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let message_id = MessageId::new();
 
         let mut key_app = app_with_specific_message(account_id, folder_id, message_id);
         let mut key_client = MockMailbox::default();
@@ -4251,9 +4288,9 @@ mod tests {
     /// confirm-modal + delete path as pressing `d` then `y`.
     #[tokio::test]
     async fn test_command_bar_delete_with_confirm_matches_d_keybinding() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
-        let message_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let message_id = MessageId::new();
 
         let mut key_app = app_with_specific_message(account_id, folder_id, message_id);
         let mut key_client = MockMailbox::default();
@@ -4289,8 +4326,8 @@ mod tests {
     /// the same `Command::Move` path as the `m` key prefill.
     #[tokio::test]
     async fn test_command_bar_move_dispatches_move_message_call() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         let mut client = MockMailbox::default();
 
@@ -4306,7 +4343,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_bar_compose_opens_composer_for_current_account() {
-        let account_id = Uuid::new_v4();
+        let account_id = AccountId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(account_id)]);
         let mut client = MockMailbox::default();
@@ -4347,7 +4384,7 @@ mod tests {
     async fn test_command_bar_search_runs_unscoped_query() {
         let mut app = AppState::default();
         let mut client = MockMailbox {
-            search_hits: vec![search_hit("test mail", Uuid::new_v4(), Uuid::new_v4())],
+            search_hits: vec![search_hit("test mail", AccountId::new(), FolderId::new())],
             ..Default::default()
         };
 
@@ -4364,7 +4401,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_bar_search_scopes_to_named_account() {
-        let work_id = Uuid::new_v4();
+        let work_id = AccountId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(work_id)]);
         let mut client = MockMailbox::default();
@@ -4386,7 +4423,7 @@ mod tests {
     #[tokio::test]
     async fn test_command_bar_search_unknown_account_errors_and_no_call() {
         let mut app = AppState::default();
-        app.apply_accounts(vec![account_item(Uuid::new_v4())]);
+        app.apply_accounts(vec![account_item(AccountId::new())]);
         let mut client = MockMailbox::default();
 
         run_command_line(
@@ -4403,7 +4440,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_quick_search_slash_collects_chars_then_submits_with_account_scope() {
-        let work_id = Uuid::new_v4();
+        let work_id = AccountId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(work_id)]);
         let mut client = MockMailbox::default();
@@ -4499,7 +4536,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_pane_r_reruns_active_query_with_same_scope() {
-        let work_id = Uuid::new_v4();
+        let work_id = AccountId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(work_id)]);
         let mut client = MockMailbox::default();
@@ -4548,9 +4585,9 @@ mod tests {
         ));
     }
 
-    fn search_hit(subject: &str, account_id: Uuid, folder_id: Uuid) -> app::SearchHit {
+    fn search_hit(subject: &str, account_id: AccountId, folder_id: FolderId) -> app::SearchHit {
         app::SearchHit {
-            message_id: Uuid::new_v4(),
+            message_id: MessageId::new(),
             account_id,
             folder_id,
             subject: subject.into(),
@@ -4562,9 +4599,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_bar_goto_switches_folder_and_loads_messages() {
-        let account_id = Uuid::new_v4();
-        let inbox_id = Uuid::new_v4();
-        let archive_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let inbox_id = FolderId::new();
+        let archive_id = FolderId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(account_id)]);
         app.apply_folders(vec![
@@ -4586,8 +4623,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_bar_goto_unknown_folder_records_error() {
-        let account_id = Uuid::new_v4();
-        let inbox_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let inbox_id = FolderId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(account_id)]);
         app.apply_folders(vec![folder_item(inbox_id)]);
@@ -4605,8 +4642,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_bar_account_switches_active_account() {
-        let work_id = Uuid::new_v4();
-        let home_id = Uuid::new_v4();
+        let work_id = AccountId::new();
+        let home_id = AccountId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![
             AccountItem {
@@ -4632,7 +4669,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_bar_account_unknown_records_error() {
-        let work_id = Uuid::new_v4();
+        let work_id = AccountId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(work_id)]);
         let mut client = MockMailbox::default();
@@ -4760,7 +4797,7 @@ mod tests {
         assert!(app.status.contains("search"));
     }
 
-    fn reply_prepared_fixture(message_id: Uuid, account_id: Uuid) -> ipc::ReplyPrepared {
+    fn reply_prepared_fixture(message_id: MessageId, account_id: AccountId) -> ipc::ReplyPrepared {
         ipc::ReplyPrepared {
             message_id,
             account_id,
@@ -4773,7 +4810,10 @@ mod tests {
         }
     }
 
-    fn forward_prepared_fixture(message_id: Uuid, account_id: Uuid) -> ipc::ForwardPrepared {
+    fn forward_prepared_fixture(
+        message_id: MessageId,
+        account_id: AccountId,
+    ) -> ipc::ForwardPrepared {
         ipc::ForwardPrepared {
             message_id,
             account_id,
@@ -4785,8 +4825,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_capital_r_runs_reply_and_seeds_composer() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         let mut client = MockMailbox {
             reply_prepared: Some(reply_prepared_fixture(message.id, account_id)),
@@ -4818,8 +4858,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_capital_a_runs_reply_all_and_passes_flag() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         let mut client = MockMailbox {
             reply_prepared: Some(reply_prepared_fixture(message.id, account_id)),
@@ -4842,8 +4882,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_capital_f_runs_forward_and_seeds_composer() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
         let mut client = MockMailbox {
             forward_prepared: Some(forward_prepared_fixture(message.id, account_id)),
@@ -4886,8 +4926,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_key_reply_failure_surfaces_toast_and_keeps_normal_mode() {
-        let account_id = Uuid::new_v4();
-        let folder_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
         let (mut app, _message) = app_with_message_list_focused(account_id, folder_id);
         let mut client = MockMailbox {
             fail_prepare_reply: true,
@@ -4908,7 +4948,7 @@ mod tests {
 
     // -- Slice 8: drafts list / reopen / delete -----------------------
 
-    fn drafts_folder_item(id: Uuid) -> FolderItem {
+    fn drafts_folder_item(id: FolderId) -> FolderItem {
         FolderItem {
             id,
             name: "[Gmail]/Drafts".into(),
@@ -4916,7 +4956,7 @@ mod tests {
         }
     }
 
-    fn draft_item(id: Uuid, account_id: Uuid, subject: &str) -> app::DraftItem {
+    fn draft_item(id: DraftId, account_id: AccountId, subject: &str) -> app::DraftItem {
         app::DraftItem {
             id,
             account_id,
@@ -4927,7 +4967,7 @@ mod tests {
         }
     }
 
-    fn draft_summary(account_id: Uuid, draft_id: Uuid) -> app::DraftSummary {
+    fn draft_summary(account_id: AccountId, draft_id: DraftId) -> app::DraftSummary {
         use chrono::Utc;
         app::DraftSummary {
             draft: crate::models::Draft {
@@ -4953,9 +4993,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_drafts_pane_enter_reopens_draft_into_composer() {
-        let account_id = Uuid::new_v4();
-        let drafts_id = Uuid::new_v4();
-        let draft_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let drafts_id = FolderId::new();
+        let draft_id = DraftId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(account_id)]);
         app.apply_folders(vec![drafts_folder_item(drafts_id)]);
@@ -4984,10 +5024,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_drafts_pane_d_then_y_deletes_via_daemon_and_removes_locally() {
-        let account_id = Uuid::new_v4();
-        let drafts_id = Uuid::new_v4();
-        let draft_id = Uuid::new_v4();
-        let other_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let drafts_id = FolderId::new();
+        let draft_id = DraftId::new();
+        let other_id = DraftId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(account_id)]);
         app.apply_folders(vec![drafts_folder_item(drafts_id)]);
@@ -5020,9 +5060,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_drafts_pane_d_then_n_cancels_without_calling_daemon() {
-        let account_id = Uuid::new_v4();
-        let drafts_id = Uuid::new_v4();
-        let draft_id = Uuid::new_v4();
+        let account_id = AccountId::new();
+        let drafts_id = FolderId::new();
+        let draft_id = DraftId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(account_id)]);
         app.apply_folders(vec![drafts_folder_item(drafts_id)]);
@@ -5054,13 +5094,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_bar_w_inside_composer_calls_create_draft() {
-        let account_id = Uuid::new_v4();
+        let account_id = AccountId::new();
         let mut app = AppState::default();
         app.apply_accounts(vec![account_item(account_id)]);
         app.enter_composer(account_id);
         // Type a single char so the composer is non-empty.
         let mut client = MockMailbox {
-            draft_id: Some(Uuid::new_v4()),
+            draft_id: Some(DraftId::new()),
             ..Default::default()
         };
         let _ = handle_key(

@@ -15,7 +15,10 @@ use postblox::db::{accounts, attachments as db_attachments, connect, folders, me
 use postblox::imap::{FetchedMessage, FolderInfo, FolderSync, ImapAuth, ImapError, ImapSync};
 use postblox::ipc::client::Client;
 use postblox::ipc::{listen, Hub, Topic};
-use postblox::models::{ApprovalState, AttachmentDisposition, AuthKind, FolderRole};
+use postblox::models::{
+    AccountId, ApprovalState, AttachmentDisposition, AuthKind, DraftId, FolderId, FolderRole,
+    MessageId, ThreadId,
+};
 use postblox::oauth::google::{
     self, GoogleOAuth, GoogleOAuthConfig, GoogleOAuthError, GoogleOAuthToken,
 };
@@ -1219,7 +1222,7 @@ async fn account_test_login_unknown_account_returns_bad_args() {
         .request(
             "account.test_login",
             json!({
-                "account_id": uuid::Uuid::new_v4(),
+                "account_id": AccountId::new(),
                 "password": "x",
             }),
         )
@@ -1234,7 +1237,7 @@ async fn account_test_login_unknown_account_returns_bad_args() {
 
 // ---- account.set_secret / delete_secret ------------------------------------
 
-async fn make_account(h: &Harness, email: &str) -> uuid::Uuid {
+async fn make_account(h: &Harness, email: &str) -> AccountId {
     accounts::create(
         &h.pool,
         &accounts::NewAccount {
@@ -1255,7 +1258,7 @@ async fn make_account(h: &Harness, email: &str) -> uuid::Uuid {
     .id
 }
 
-async fn make_oauth_account(h: &Harness, email: &str) -> uuid::Uuid {
+async fn make_oauth_account(h: &Harness, email: &str) -> AccountId {
     accounts::create(
         &h.pool,
         &accounts::NewAccount {
@@ -1317,7 +1320,7 @@ async fn account_set_secret_rejects_unknown_account() {
         .request(
             "account.set_secret",
             json!({
-                "account_id": uuid::Uuid::new_v4(),
+                "account_id": AccountId::new(),
                 "password": "x",
             }),
         )
@@ -1664,7 +1667,7 @@ Content-Transfer-Encoding: base64\r\n\
     .into_bytes()
 }
 
-async fn setup_account_with_secret(h: &Harness) -> uuid::Uuid {
+async fn setup_account_with_secret(h: &Harness) -> AccountId {
     let id = make_account(h, "u@example.com").await;
     folders::upsert(
         &h.pool,
@@ -1701,7 +1704,7 @@ fn fast_worker_config() -> WorkerConfig {
 
 async fn wait_for_message_count(
     pool: &SqlitePool,
-    account_id: uuid::Uuid,
+    account_id: AccountId,
     folder_name: &str,
     expected: usize,
 ) {
@@ -1923,7 +1926,7 @@ async fn account_start_sync_unknown_account_or_folder_returns_bad_args() {
     let missing_account = c
         .request(
             "account.start_sync",
-            json!({"account_id": uuid::Uuid::new_v4(), "folder_name": "INBOX"}),
+            json!({"account_id": AccountId::new(), "folder_name": "INBOX"}),
         )
         .await
         .unwrap();
@@ -2473,7 +2476,7 @@ async fn account_sync_folder_missing_secret_surfaces_specific_error() {
 /// Returns (account_id, inbox_id, archive_id, trash_id, message_id).
 async fn seed_account_with_message(
     h: &Harness,
-) -> (uuid::Uuid, uuid::Uuid, uuid::Uuid, uuid::Uuid, uuid::Uuid) {
+) -> (AccountId, FolderId, FolderId, FolderId, MessageId) {
     let acc = accounts::create(
         &h.pool,
         &accounts::NewAccount {
@@ -2685,7 +2688,7 @@ async fn message_archive_unknown_id_returns_bad_args() {
     let resp = c
         .request(
             "message.archive",
-            json!({"id": uuid::Uuid::new_v4().to_string()}),
+            json!({"id": MessageId::new().to_string()}),
         )
         .await
         .unwrap();
@@ -2840,7 +2843,7 @@ async fn seed_searchable_message(
     email: &str,
     subject: &str,
     body: &str,
-) -> (uuid::Uuid, uuid::Uuid) {
+) -> (AccountId, MessageId) {
     let acc = accounts::create(
         &h.pool,
         &accounts::NewAccount {
@@ -2991,10 +2994,8 @@ async fn tui_reducer_creates_toast_for_mail_new_event() {
     use postblox::ipc::Event as IpcEvent;
     use postblox::tui::app::{AccountItem, AppState, FolderItem, ToastKind};
     use postblox::tui::on_daemon_event;
-    use uuid::Uuid;
-
-    let account_id = Uuid::new_v4();
-    let folder_id = Uuid::new_v4();
+    let account_id = AccountId::new();
+    let folder_id = FolderId::new();
     let mut app = AppState::default();
     app.apply_accounts(vec![AccountItem {
         id: account_id,
@@ -3014,8 +3015,8 @@ async fn tui_reducer_creates_toast_for_mail_new_event() {
         data: json!({
             "account_id": account_id.to_string(),
             "folder_id": folder_id.to_string(),
-            "thread_id": Uuid::new_v4().to_string(),
-            "message_id": Uuid::new_v4().to_string(),
+            "thread_id": ThreadId::new().to_string(),
+            "message_id": MessageId::new().to_string(),
             "uid": 42,
         }),
     };
@@ -3059,7 +3060,7 @@ async fn draft_create_with_attachments_persists_rows() {
         .await
         .unwrap();
     assert!(created.ok, "{:?}", created.error);
-    let draft_id: uuid::Uuid = created.data["id"].as_str().unwrap().parse().unwrap();
+    let draft_id: DraftId = created.data["id"].as_str().unwrap().parse().unwrap();
 
     let rows = postblox::db::draft_attachments::list_for_draft(&h.pool, draft_id)
         .await
@@ -3107,7 +3108,7 @@ async fn draft_update_replaces_attachments() {
         .await
         .unwrap();
     assert!(created.ok, "{:?}", created.error);
-    let draft_id: uuid::Uuid = created.data["id"].as_str().unwrap().parse().unwrap();
+    let draft_id: DraftId = created.data["id"].as_str().unwrap().parse().unwrap();
 
     // Replace with a different file.
     let updated = c
@@ -3210,8 +3211,8 @@ async fn draft_create_attachment_over_limit_returns_attachment_too_large() {
     );
 
     // Draft was rolled back on attachment failure.
-    let acc_uuid: uuid::Uuid = acc_id.parse().unwrap();
-    let drafts = postblox::db::drafts::list_by_account(&h.pool, acc_uuid)
+    let account_id: AccountId = acc_id.parse().unwrap();
+    let drafts = postblox::db::drafts::list_by_account(&h.pool, account_id)
         .await
         .unwrap();
     assert!(drafts.is_empty(), "expected rollback, got {drafts:?}");
@@ -3247,8 +3248,8 @@ async fn draft_create_attachment_missing_path_returns_bad_args() {
         resp.error.as_ref().map(|e| e.code.as_str()),
         Some("bad_args")
     );
-    let acc_uuid: uuid::Uuid = acc_id.parse().unwrap();
-    let drafts = postblox::db::drafts::list_by_account(&h.pool, acc_uuid)
+    let account_id: AccountId = acc_id.parse().unwrap();
+    let drafts = postblox::db::drafts::list_by_account(&h.pool, account_id)
         .await
         .unwrap();
     assert!(drafts.is_empty(), "expected rollback, got {drafts:?}");
@@ -3332,7 +3333,7 @@ async fn message_send_with_attachments_builds_multipart_mime() {
 
 // -- Slice 7: reply / reply-all / forward ----------------------------------
 
-async fn insert_reply_seed(h: &Harness) -> (uuid::Uuid, uuid::Uuid, uuid::Uuid) {
+async fn insert_reply_seed(h: &Harness) -> (AccountId, FolderId, MessageId) {
     let acc = accounts::create(
         &h.pool,
         &accounts::NewAccount {
@@ -3736,7 +3737,7 @@ async fn draft_get_returns_null_for_missing_draft() {
     let h = make_harness().await;
     let mut c = Client::connect(&h.sock).await.unwrap();
     let resp = c
-        .request("draft.get", json!({ "id": uuid::Uuid::new_v4() }))
+        .request("draft.get", json!({ "id": DraftId::new() }))
         .await
         .unwrap();
     assert!(resp.ok);

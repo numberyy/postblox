@@ -11,10 +11,9 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sqlx::SqlitePool;
-use uuid::Uuid;
 
 use crate::db::DbError;
-use crate::models::{Account, AuthKind, SyncStatus};
+use crate::models::{Account, AccountId, AuthKind, SyncStatus};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewAccount {
@@ -43,7 +42,7 @@ const SELECT: &str = "\
 /// `UNIQUE` violation on `email`, but also any other SQLite constraint
 /// or IO error from the pool.
 pub async fn create(pool: &SqlitePool, new: &NewAccount) -> Result<Account, DbError> {
-    let id = Uuid::new_v4();
+    let id = AccountId::new();
     let q = format!(
         "INSERT INTO accounts \
          (id, email, display_name, auth_kind, imap_host, imap_port, imap_use_tls, \
@@ -82,7 +81,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<Account>, DbError> {
 ///
 /// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
 /// row is reported as `Ok(None)`, not an error.
-pub async fn get(pool: &SqlitePool, id: Uuid) -> Result<Option<Account>, DbError> {
+pub async fn get(pool: &SqlitePool, id: AccountId) -> Result<Option<Account>, DbError> {
     let q = format!("SELECT {SELECT} FROM accounts WHERE id = ?");
     Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
@@ -104,7 +103,7 @@ pub async fn get_by_email(pool: &SqlitePool, email: &str) -> Result<Option<Accou
 ///
 /// Returns [`DbError::Sqlx`] if the delete fails (FK or IO). A missing
 /// row is reported as `Ok(false)`, not an error.
-pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
+pub async fn delete(pool: &SqlitePool, id: AccountId) -> Result<bool, DbError> {
     let res = sqlx::query("DELETE FROM accounts WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -120,7 +119,7 @@ pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<bool, DbError> {
 /// silent no-op (rows_affected = 0), not an error.
 pub async fn set_secret_ref(
     pool: &SqlitePool,
-    id: Uuid,
+    id: AccountId,
     secret_ref: Option<&str>,
 ) -> Result<(), DbError> {
     sqlx::query(
@@ -144,7 +143,7 @@ pub async fn set_secret_ref(
 /// silent no-op (rows_affected = 0), not an error.
 pub async fn update_sync(
     pool: &SqlitePool,
-    id: Uuid,
+    id: AccountId,
     status: SyncStatus,
     error: Option<&str>,
     last_synced_at: Option<DateTime<Utc>>,
@@ -279,7 +278,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_sync_unknown_id_noop() {
         let pool = crate::db::test_pool().await;
-        update_sync(&pool, Uuid::new_v4(), SyncStatus::Idle, None, None)
+        update_sync(&pool, AccountId::new(), SyncStatus::Idle, None, None)
             .await
             .unwrap();
     }
@@ -287,6 +286,6 @@ mod tests {
     #[tokio::test]
     async fn test_get_unknown_returns_none() {
         let pool = crate::db::test_pool().await;
-        assert!(get(&pool, Uuid::new_v4()).await.unwrap().is_none());
+        assert!(get(&pool, AccountId::new()).await.unwrap().is_none());
     }
 }

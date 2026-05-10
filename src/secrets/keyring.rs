@@ -5,8 +5,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::Mutex;
-use uuid::Uuid;
 use zeroize::Zeroizing;
+
+use crate::models::AccountId;
 
 use super::{Secret, SecretError, SecretStore};
 
@@ -63,22 +64,22 @@ impl KeyringSecretStore {
         &self.service
     }
 
-    pub fn account_key(account_id: Uuid) -> String {
+    pub fn account_key(account_id: AccountId) -> String {
         account_id.to_string()
     }
 
-    pub fn keyring_ref(&self, account_id: Uuid) -> String {
+    pub fn keyring_ref(&self, account_id: AccountId) -> String {
         format!("keyring:{}:{}", self.service, Self::account_key(account_id))
     }
 
-    fn entry(service: &str, account_id: Uuid) -> Result<::keyring::Entry, KeyringSecretError> {
+    fn entry(service: &str, account_id: AccountId) -> Result<::keyring::Entry, KeyringSecretError> {
         ::keyring::Entry::new(service, &Self::account_key(account_id)).map_err(map_keyring_error)
     }
 }
 
 #[async_trait]
 impl SecretStore for KeyringSecretStore {
-    async fn put(&self, account_id: Uuid, secret: Secret) -> Result<(), SecretError> {
+    async fn put(&self, account_id: AccountId, secret: Secret) -> Result<(), SecretError> {
         let _guard = self.write_lock.lock().await;
         let service = self.service.clone();
         tokio::task::spawn_blocking(move || {
@@ -92,7 +93,7 @@ impl SecretStore for KeyringSecretStore {
         Ok(())
     }
 
-    async fn get(&self, account_id: Uuid) -> Result<Option<Secret>, SecretError> {
+    async fn get(&self, account_id: AccountId) -> Result<Option<Secret>, SecretError> {
         let service = self.service.clone();
         let password = tokio::task::spawn_blocking(move || {
             let entry = Self::entry(&service, account_id)?;
@@ -107,7 +108,7 @@ impl SecretStore for KeyringSecretStore {
         Ok(password)
     }
 
-    async fn delete(&self, account_id: Uuid) -> Result<(), SecretError> {
+    async fn delete(&self, account_id: AccountId) -> Result<(), SecretError> {
         let _guard = self.write_lock.lock().await;
         let service = self.service.clone();
         tokio::task::spawn_blocking(move || {
@@ -122,7 +123,7 @@ impl SecretStore for KeyringSecretStore {
         Ok(())
     }
 
-    fn secret_ref(&self, account_id: Uuid) -> String {
+    fn secret_ref(&self, account_id: AccountId) -> String {
         self.keyring_ref(account_id)
     }
 }
@@ -148,7 +149,8 @@ mod tests {
 
     #[test]
     fn test_account_key_is_uuid_string() {
-        let id = Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
+        let id =
+            AccountId::from(uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap());
         assert_eq!(
             KeyringSecretStore::account_key(id),
             "00000000-0000-4000-8000-000000000001"
@@ -157,7 +159,8 @@ mod tests {
 
     #[test]
     fn test_secret_ref_includes_service_and_account_key() {
-        let id = Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap();
+        let id =
+            AccountId::from(uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000002").unwrap());
         let store = KeyringSecretStore::new("postblox-test");
         assert_eq!(
             store.secret_ref(id),
@@ -199,9 +202,9 @@ mod tests {
             return;
         }
 
-        let service = format!("postblox-test-{}", Uuid::new_v4());
+        let service = format!("postblox-test-{}", uuid::Uuid::new_v4());
         let store = KeyringSecretStore::new(service);
-        let id = Uuid::new_v4();
+        let id = AccountId::new();
 
         store.put(id, Zeroizing::new("v1".into())).await.unwrap();
         assert_eq!(store.get(id).await.unwrap().unwrap().as_str(), "v1");

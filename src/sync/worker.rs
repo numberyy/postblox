@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use crate::auth::MailCredential;
 use crate::imap::{IdleOutcome, IdleRequest, ImapError, ImapIdle, ImapSync};
 use crate::ipc::Hub;
+use crate::models::AccountId;
 
 use super::state::{publish_sync_state, SyncState, SyncStateEvent};
 use super::{reconcile_folder, SyncError};
@@ -19,11 +19,11 @@ use super::{reconcile_folder, SyncError};
 /// rate-limiting if they care.
 struct StateReporter {
     hub: Arc<Hub>,
-    account_id: Uuid,
+    account_id: AccountId,
 }
 
 impl StateReporter {
-    fn new(hub: Arc<Hub>, account_id: Uuid) -> Self {
+    fn new(hub: Arc<Hub>, account_id: AccountId) -> Self {
         Self { hub, account_id }
     }
 
@@ -57,14 +57,14 @@ impl Default for WorkerConfig {
 
 #[async_trait::async_trait]
 pub trait WorkerCredentialResolver: Send + Sync {
-    async fn resolve(&self, account_id: Uuid) -> Result<MailCredential, SyncError>;
+    async fn resolve(&self, account_id: AccountId) -> Result<MailCredential, SyncError>;
 }
 
 #[derive(Clone)]
 pub(crate) enum WorkerCredentialSource {
     Static(MailCredential),
     Dynamic {
-        account_id: Uuid,
+        account_id: AccountId,
         resolver: Arc<dyn WorkerCredentialResolver>,
     },
 }
@@ -74,7 +74,10 @@ impl WorkerCredentialSource {
         Self::Static(credential)
     }
 
-    pub(crate) fn dynamic(account_id: Uuid, resolver: Arc<dyn WorkerCredentialResolver>) -> Self {
+    pub(crate) fn dynamic(
+        account_id: AccountId,
+        resolver: Arc<dyn WorkerCredentialResolver>,
+    ) -> Self {
         Self::Dynamic {
             account_id,
             resolver,
@@ -97,7 +100,7 @@ pub(crate) struct SyncWorker {
     pub(crate) hub: Arc<Hub>,
     pub(crate) imap: Arc<dyn ImapSync>,
     pub(crate) idle: Option<Arc<dyn ImapIdle>>,
-    pub(crate) account_id: Uuid,
+    pub(crate) account_id: AccountId,
     pub(crate) folder_name: String,
     pub(crate) credential: WorkerCredentialSource,
     pub(crate) cancel: CancellationToken,
@@ -108,7 +111,7 @@ pub(crate) struct PollingWorker {
     pub(crate) pool: SqlitePool,
     pub(crate) hub: Arc<Hub>,
     pub(crate) imap: Arc<dyn ImapSync>,
-    pub(crate) account_id: Uuid,
+    pub(crate) account_id: AccountId,
     pub(crate) folder_name: String,
     pub(crate) credential: WorkerCredentialSource,
     pub(crate) cancel: CancellationToken,
@@ -438,7 +441,7 @@ enum CredentialCycle {
 #[allow(clippy::too_many_arguments)]
 async fn credential_for_cycle(
     source: &WorkerCredentialSource,
-    account_id: Uuid,
+    account_id: AccountId,
     folder_name: &str,
     cancel: &CancellationToken,
     config: WorkerConfig,
@@ -635,7 +638,7 @@ mod tests {
         }
     }
 
-    async fn seed_account_folder(pool: &SqlitePool) -> Uuid {
+    async fn seed_account_folder(pool: &SqlitePool) -> AccountId {
         let account = accounts::create(
             pool,
             &accounts::NewAccount {
@@ -671,7 +674,7 @@ mod tests {
     fn spawn_test_worker(
         pool: SqlitePool,
         sync: Arc<ScriptedSync>,
-        account_id: Uuid,
+        account_id: AccountId,
         config: WorkerConfig,
     ) -> (CancellationToken, JoinHandle<()>) {
         spawn_test_worker_with_hub(pool, sync, account_id, config, Arc::new(Hub::new()))
@@ -680,7 +683,7 @@ mod tests {
     fn spawn_test_worker_with_hub(
         pool: SqlitePool,
         sync: Arc<ScriptedSync>,
-        account_id: Uuid,
+        account_id: AccountId,
         config: WorkerConfig,
         hub: Arc<Hub>,
     ) -> (CancellationToken, JoinHandle<()>) {
@@ -705,7 +708,7 @@ mod tests {
         pool: SqlitePool,
         sync: Arc<ScriptedSync>,
         idle: Arc<ScriptedIdle>,
-        account_id: Uuid,
+        account_id: AccountId,
         config: WorkerConfig,
     ) -> (CancellationToken, JoinHandle<()>) {
         let cancel = CancellationToken::new();
