@@ -4,7 +4,6 @@
 //! show. RFC 5322 §3.6.4 controls `In-Reply-To` / `References`.
 
 use chrono::{DateTime, Utc};
-use serde_json::Value;
 use uuid::Uuid;
 
 /// Maximum number of message-ids retained when chaining `References`.
@@ -25,8 +24,8 @@ pub struct MessageView<'a> {
     pub subject: Option<&'a str>,
     pub message_id_header: Option<&'a str>,
     pub references_header: Option<&'a str>,
-    pub to_addrs: &'a serde_json::Value,
-    pub cc_addrs: &'a serde_json::Value,
+    pub to_addrs: &'a [String],
+    pub cc_addrs: &'a [String],
     pub text_body: Option<&'a str>,
     pub html_body: Option<&'a str>,
     pub internal_date: chrono::DateTime<chrono::Utc>,
@@ -88,16 +87,14 @@ pub fn reply_draft(message: MessageView<'_>, account_email: &str, reply_all: boo
     let mut cc: Vec<String> = Vec::new();
 
     if reply_all {
-        let to_addrs = json_array_of_strings(message.to_addrs);
-        let cc_addrs = json_array_of_strings(message.cc_addrs);
         let mut seen_lower: Vec<String> = Vec::new();
         for addr in to.iter().chain([account_email.to_string()].iter()) {
             push_lower(&mut seen_lower, addr);
         }
-        for addr in to_addrs.into_iter().chain(cc_addrs.into_iter()) {
-            if !addr.trim().is_empty() && !contains_lower(&seen_lower, &addr) {
+        for addr in message.to_addrs.iter().chain(message.cc_addrs.iter()) {
+            if !addr.trim().is_empty() && !contains_lower(&seen_lower, addr) {
                 seen_lower.push(addr.to_ascii_lowercase());
-                cc.push(addr);
+                cc.push(addr.clone());
             }
         }
         if to.is_empty() {
@@ -235,17 +232,6 @@ fn angle_wrap(value: impl Into<String>) -> String {
     }
 }
 
-fn json_array_of_strings(value: &Value) -> Vec<String> {
-    value
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn push_lower(seen: &mut Vec<String>, addr: &str) {
     let lower = addr.trim().to_ascii_lowercase();
     if !lower.is_empty() && !seen.iter().any(|s| s == &lower) {
@@ -275,7 +261,7 @@ fn quote_body(message: MessageView<'_>) -> String {
 /// Forward body skeleton: a divider, the original headers, and the
 /// original body (or a placeholder when only HTML was present).
 fn forward_body(message: MessageView<'_>) -> String {
-    let to_line = json_array_of_strings(message.to_addrs).join(", ");
+    let to_line = message.to_addrs.join(", ");
     let subject = message.subject.unwrap_or("");
     let mut out = String::new();
     out.push_str("---------- Forwarded message ----------\r\n");
@@ -326,7 +312,6 @@ fn format_rfc2822(dt: DateTime<Utc>) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use serde_json::json;
 
     struct TestMessage {
         id: Uuid,
@@ -335,8 +320,8 @@ mod tests {
         subject: Option<String>,
         message_id_header: Option<String>,
         references_header: Option<String>,
-        to_addrs: Value,
-        cc_addrs: Value,
+        to_addrs: Vec<String>,
+        cc_addrs: Vec<String>,
         text_body: Option<String>,
         html_body: Option<String>,
         internal_date: DateTime<Utc>,
@@ -366,8 +351,8 @@ mod tests {
             message_id_header: Some("orig@example.com".into()),
             references_header: None,
             from_addr: from.into(),
-            to_addrs: json!([]),
-            cc_addrs: json!([]),
+            to_addrs: Vec::new(),
+            cc_addrs: Vec::new(),
             reply_to: None,
             subject: subject.map(str::to_string),
             text_body: Some("Original line 1\nOriginal line 2".into()),
@@ -450,8 +435,8 @@ mod tests {
     #[test]
     fn test_reply_all_dedups_self_and_carries_others_to_cc() {
         let mut msg = sample(Some("Hi"), "alice@x.com");
-        msg.to_addrs = json!(["a@x.com", "b@x.com", "Me@x.com"]);
-        msg.cc_addrs = json!(["c@x.com"]);
+        msg.to_addrs = vec!["a@x.com".into(), "b@x.com".into(), "Me@x.com".into()];
+        msg.cc_addrs = vec!["c@x.com".into()];
         let draft = reply_draft(msg.view(), "me@x.com", true);
         assert_eq!(draft.to, vec!["alice@x.com".to_string()]);
         // me@x.com is dropped (case-insensitive). Original From and
@@ -472,7 +457,7 @@ mod tests {
         // Self-reply: From == account_email. The reply should still go
         // to the original From per common convention; document that.
         let mut msg = sample(Some("Hi"), "a@x.com");
-        msg.to_addrs = json!(["b@x.com"]);
+        msg.to_addrs = vec!["b@x.com".into()];
         let draft = reply_draft(msg.view(), "a@x.com", true);
         assert_eq!(draft.to, vec!["a@x.com".to_string()]);
         assert_eq!(draft.cc, vec!["b@x.com".to_string()]);
@@ -481,8 +466,8 @@ mod tests {
     #[test]
     fn test_reply_all_dedup_is_case_insensitive() {
         let mut msg = sample(Some("Hi"), "alice@x.com");
-        msg.to_addrs = json!(["B@X.COM", "alice@x.com"]);
-        msg.cc_addrs = json!(["b@x.com"]);
+        msg.to_addrs = vec!["B@X.COM".into(), "alice@x.com".into()];
+        msg.cc_addrs = vec!["b@x.com".into()];
         let draft = reply_draft(msg.view(), "me@x.com", true);
         assert_eq!(draft.to, vec!["alice@x.com".to_string()]);
         assert_eq!(draft.cc, vec!["B@X.COM".to_string()]);

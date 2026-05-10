@@ -268,6 +268,130 @@ text_enum! {
 }
 
 // -----------------------------------------------------------------------------
+// Typed wrappers for SQLite JSON array columns
+// -----------------------------------------------------------------------------
+
+macro_rules! json_string_array {
+    (
+        $(#[$meta:meta])*
+        $name:ident
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+        #[serde(transparent)]
+        #[repr(transparent)]
+        pub struct $name(Vec<String>);
+
+        impl $name {
+            #[inline]
+            pub fn as_slice(&self) -> &[String] {
+                &self.0
+            }
+
+            #[inline]
+            pub fn to_vec(&self) -> Vec<String> {
+                self.0.clone()
+            }
+
+            #[inline]
+            pub fn into_vec(self) -> Vec<String> {
+                self.0
+            }
+        }
+
+        impl From<Vec<String>> for $name {
+            #[inline]
+            fn from(value: Vec<String>) -> Self {
+                Self(value)
+            }
+        }
+
+        impl<'a> From<Vec<&'a str>> for $name {
+            fn from(value: Vec<&'a str>) -> Self {
+                Self(value.into_iter().map(str::to_string).collect())
+            }
+        }
+
+        impl<const N: usize> From<[&str; N]> for $name {
+            fn from(value: [&str; N]) -> Self {
+                Self(value.into_iter().map(str::to_string).collect())
+            }
+        }
+
+        impl From<$name> for Vec<String> {
+            #[inline]
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl From<$name> for serde_json::Value {
+            fn from(value: $name) -> Self {
+                serde_json::Value::Array(
+                    value.0.into_iter().map(serde_json::Value::String).collect(),
+                )
+            }
+        }
+
+        impl TryFrom<serde_json::Value> for $name {
+            type Error = serde_json::Error;
+
+            fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+                serde_json::from_value::<Vec<String>>(value).map(Self)
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = serde_json::Error;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                serde_json::from_str::<Vec<String>>(s).map(Self)
+            }
+        }
+
+        impl sqlx::Type<sqlx::Sqlite> for $name {
+            fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+                <String as sqlx::Type<sqlx::Sqlite>>::type_info()
+            }
+
+            fn compatible(ty: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+                <String as sqlx::Type<sqlx::Sqlite>>::compatible(ty)
+            }
+        }
+
+        impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for $name {
+            fn decode(
+                value: sqlx::sqlite::SqliteValueRef<'r>,
+            ) -> Result<Self, sqlx::error::BoxDynError> {
+                let raw = <String as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
+                raw.parse::<Self>()
+                    .map_err(|e| -> sqlx::error::BoxDynError { e.into() })
+            }
+        }
+
+        impl<'q> sqlx::Encode<'q, sqlx::Sqlite> for $name {
+            fn encode_by_ref(
+                &self,
+                buf: &mut <sqlx::Sqlite as sqlx::Database>::ArgumentBuffer<'q>,
+            ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+                let raw = serde_json::to_string(&self.0)?;
+                <String as sqlx::Encode<sqlx::Sqlite>>::encode(raw, buf)
+            }
+        }
+    };
+}
+
+json_string_array!(
+    /// JSON array of address strings stored in message and draft address columns.
+    AddressList
+);
+
+json_string_array!(
+    /// JSON array of IMAP flag strings stored in the message flags column.
+    MessageFlags
+);
+
+// -----------------------------------------------------------------------------
 // Row types
 // -----------------------------------------------------------------------------
 
@@ -328,16 +452,16 @@ pub struct Message {
     pub in_reply_to: Option<String>,
     pub references_header: Option<String>,
     pub from_addr: String,
-    pub to_addrs: serde_json::Value,
-    pub cc_addrs: serde_json::Value,
-    pub bcc_addrs: serde_json::Value,
+    pub to_addrs: AddressList,
+    pub cc_addrs: AddressList,
+    pub bcc_addrs: AddressList,
     pub reply_to: Option<String>,
     pub subject: Option<String>,
     pub snippet: Option<String>,
     pub text_body: Option<String>,
     pub html_body: Option<String>,
     pub raw_size: i64,
-    pub flags: serde_json::Value,
+    pub flags: MessageFlags,
     pub internal_date: DateTime<Utc>,
     pub sent_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -354,14 +478,14 @@ pub struct MessageSummary {
     pub in_reply_to: Option<String>,
     pub references_header: Option<String>,
     pub from_addr: String,
-    pub to_addrs: serde_json::Value,
-    pub cc_addrs: serde_json::Value,
-    pub bcc_addrs: serde_json::Value,
+    pub to_addrs: AddressList,
+    pub cc_addrs: AddressList,
+    pub bcc_addrs: AddressList,
     pub reply_to: Option<String>,
     pub subject: Option<String>,
     pub snippet: Option<String>,
     pub raw_size: i64,
-    pub flags: serde_json::Value,
+    pub flags: MessageFlags,
     pub internal_date: DateTime<Utc>,
     pub sent_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -388,9 +512,9 @@ pub struct Draft {
     pub id: DraftId,
     pub account_id: AccountId,
     pub in_reply_to_msg: Option<MessageId>,
-    pub to_addrs: serde_json::Value,
-    pub cc_addrs: serde_json::Value,
-    pub bcc_addrs: serde_json::Value,
+    pub to_addrs: AddressList,
+    pub cc_addrs: AddressList,
+    pub bcc_addrs: AddressList,
     pub subject: Option<String>,
     pub text_body: Option<String>,
     pub html_body: Option<String>,
@@ -452,6 +576,7 @@ pub struct AuditEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_auth_kind_round_trip() {
@@ -558,6 +683,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn test_address_list_serde_preserves_json_array_wire_shape() {
+        let addresses = AddressList::from(vec!["alice@example.com", "bob@example.com"]);
+        let value = serde_json::to_value(&addresses).unwrap();
+        assert_eq!(value, json!(["alice@example.com", "bob@example.com"]));
+
+        let decoded: AddressList = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, addresses);
+    }
+
+    #[test]
+    fn test_message_flags_serde_preserves_json_array_wire_shape() {
+        let flags = MessageFlags::from(vec!["\\Seen", "\\Flagged"]);
+        let value = serde_json::to_value(&flags).unwrap();
+        assert_eq!(value, json!(["\\Seen", "\\Flagged"]));
+
+        let decoded: MessageFlags = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, flags);
+    }
+
+    #[tokio::test]
+    async fn test_json_string_wrappers_sqlx_round_trip() {
+        let pool = crate::db::test_pool().await;
+        let addresses = AddressList::from(vec!["alice@example.com", "bob@example.com"]);
+        let decoded_addresses: AddressList = sqlx::query_scalar("SELECT ?")
+            .bind(&addresses)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(decoded_addresses, addresses);
+
+        let flags = MessageFlags::from(vec!["\\Seen", "\\Flagged"]);
+        let decoded_flags: MessageFlags = sqlx::query_scalar("SELECT ?")
+            .bind(&flags)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(decoded_flags, flags);
+    }
+
+    #[tokio::test]
+    async fn test_json_string_wrapper_decode_rejects_malformed_json_column() {
+        let pool = crate::db::test_pool().await;
+        let err = sqlx::query_scalar::<_, AddressList>(r#"SELECT '["ok", 7]'"#)
+            .fetch_one(&pool)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("error occurred while decoding"));
+
+        let err = sqlx::query_scalar::<_, MessageFlags>(r#"SELECT '{"flag":"\\Seen"}'"#)
+            .fetch_one(&pool)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("error occurred while decoding"));
     }
 
     #[test]

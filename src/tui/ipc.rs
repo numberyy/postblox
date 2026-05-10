@@ -575,8 +575,7 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
 
-    use crate::models::Message;
-    use crate::models::ThreadId;
+    use crate::models::{AddressList, Message, MessageFlags, ThreadId};
 
     use super::*;
 
@@ -594,16 +593,16 @@ mod tests {
             in_reply_to: None,
             references_header: None,
             from_addr: "alice@example.com".into(),
-            to_addrs: json!(["bob@example.com"]),
-            cc_addrs: json!([]),
-            bcc_addrs: json!([]),
+            to_addrs: AddressList::from(vec!["bob@example.com"]),
+            cc_addrs: AddressList::default(),
+            bcc_addrs: AddressList::default(),
             reply_to: None,
             subject: Some("Hello".into()),
             snippet: Some("short preview".into()),
             text_body: Some("full body".into()),
             html_body: None,
             raw_size: 128,
-            flags: json!(["\\Seen"]),
+            flags: MessageFlags::from(vec!["\\Seen"]),
             internal_date: Utc::now(),
             sent_at: None,
             created_at: Utc::now(),

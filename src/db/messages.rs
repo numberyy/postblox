@@ -3,8 +3,8 @@
 //! Holds the canonical row for every IMAP message the daemon has
 //! seen: headers, snippet, body parts, flags JSON, and the IMAP UID
 //! that lets the sync layer reconcile remote state. Address lists and
-//! flags are stored as `serde_json::Value` columns so the daemon can
-//! round-trip MIME shapes without a sidecar table. The shared
+//! flags use typed wrappers over JSON arrays so malformed rows fail at
+//! decode time without changing the SQLite storage shape. The shared
 //! projection macros keep full and summary `SELECT` lists in one place;
 //! all access is via the daemon's [`SqlitePool`].
 
@@ -12,7 +12,9 @@ use chrono::{DateTime, Utc};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
 use crate::db::DbError;
-use crate::models::{AccountId, FolderId, Message, MessageId, MessageSummary, ThreadId};
+use crate::models::{
+    AccountId, AddressList, FolderId, Message, MessageFlags, MessageId, MessageSummary, ThreadId,
+};
 
 #[derive(Debug, Clone)]
 pub struct NewMessage {
@@ -24,16 +26,16 @@ pub struct NewMessage {
     pub in_reply_to: Option<String>,
     pub references_header: Option<String>,
     pub from_addr: String,
-    pub to_addrs: serde_json::Value,
-    pub cc_addrs: serde_json::Value,
-    pub bcc_addrs: serde_json::Value,
+    pub to_addrs: AddressList,
+    pub cc_addrs: AddressList,
+    pub bcc_addrs: AddressList,
     pub reply_to: Option<String>,
     pub subject: Option<String>,
     pub snippet: Option<String>,
     pub text_body: Option<String>,
     pub html_body: Option<String>,
     pub raw_size: i64,
-    pub flags: serde_json::Value,
+    pub flags: MessageFlags,
     pub internal_date: DateTime<Utc>,
     pub sent_at: Option<DateTime<Utc>>,
 }
@@ -409,7 +411,7 @@ pub async fn set_thread(
 pub async fn set_flags(
     pool: &SqlitePool,
     id: MessageId,
-    flags: &serde_json::Value,
+    flags: &MessageFlags,
 ) -> Result<SetFlagsOutcome, DbError> {
     let r = sqlx::query(SET_FLAGS_QUERY)
         .bind(flags)
@@ -509,7 +511,6 @@ pub async fn delete_all_in_folder(pool: &SqlitePool, folder_id: FolderId) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use uuid::Uuid;
 
     struct Ctx {
@@ -571,16 +572,16 @@ mod tests {
             in_reply_to: None,
             references_header: None,
             from_addr: "alice@x.com".into(),
-            to_addrs: json!(["bob@x.com"]),
-            cc_addrs: json!([]),
-            bcc_addrs: json!([]),
+            to_addrs: AddressList::from(vec!["bob@x.com"]),
+            cc_addrs: AddressList::default(),
+            bcc_addrs: AddressList::default(),
             reply_to: None,
             subject: Some(format!("subject {uid}")),
             snippet: Some("hi".into()),
             text_body: Some("body".into()),
             html_body: None,
             raw_size: 1234,
-            flags: json!(["\\Seen"]),
+            flags: MessageFlags::from(vec!["\\Seen"]),
             internal_date: Utc::now(),
             sent_at: None,
         }
@@ -592,7 +593,7 @@ mod tests {
         let m = create(&c.pool, &sample(&c, 1)).await.unwrap();
         assert_eq!(m.uid, 1);
         assert_eq!(m.from_addr, "alice@x.com");
-        assert_eq!(m.flags, json!(["\\Seen"]));
+        assert_eq!(m.flags, MessageFlags::from(vec!["\\Seen"]));
         let got = get(&c.pool, m.id).await.unwrap().unwrap();
         assert_eq!(got, m);
     }
@@ -657,11 +658,11 @@ mod tests {
         assert_eq!(listed[0].uid, 42);
         assert_eq!(listed[0].message_id_header.as_deref(), Some("<42@x>"));
         assert_eq!(listed[0].from_addr, "alice@x.com");
-        assert_eq!(listed[0].to_addrs, json!(["bob@x.com"]));
+        assert_eq!(listed[0].to_addrs, AddressList::from(vec!["bob@x.com"]));
         assert_eq!(listed[0].subject.as_deref(), Some("subject 42"));
         assert_eq!(listed[0].snippet.as_deref(), Some("hi"));
         assert_eq!(listed[0].raw_size, 1234);
-        assert_eq!(listed[0].flags, json!(["\\Seen"]));
+        assert_eq!(listed[0].flags, MessageFlags::from(vec!["\\Seen"]));
         assert_eq!(listed[0].internal_date, created.internal_date);
         assert_eq!(listed[0].created_at, created.created_at);
     }
@@ -785,9 +786,13 @@ mod tests {
         let got = get(&c.pool, m.id).await.unwrap().unwrap();
         assert_eq!(got.thread_id, Some(other.id));
 
-        let outcome = set_flags(&c.pool, m.id, &json!(["\\Seen", "\\Flagged"]))
-            .await
-            .unwrap();
+        let outcome = set_flags(
+            &c.pool,
+            m.id,
+            &MessageFlags::from(vec!["\\Seen", "\\Flagged"]),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             outcome,
             SetFlagsOutcome {
@@ -796,14 +801,14 @@ mod tests {
             }
         );
         let got = get(&c.pool, m.id).await.unwrap().unwrap();
-        assert_eq!(got.flags, json!(["\\Seen", "\\Flagged"]));
+        assert_eq!(got.flags, MessageFlags::from(vec!["\\Seen", "\\Flagged"]));
     }
 
     #[tokio::test]
     async fn test_set_flags_repeated_same_value_reports_unchanged() {
         let c = ctx().await;
         let m = create(&c.pool, &sample(&c, 1)).await.unwrap();
-        let flags = json!(["\\Seen", "\\Flagged"]);
+        let flags = MessageFlags::from(vec!["\\Seen", "\\Flagged"]);
 
         let changed = set_flags(&c.pool, m.id, &flags).await.unwrap();
         assert_eq!(

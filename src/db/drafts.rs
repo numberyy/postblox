@@ -12,15 +12,15 @@ use serde::Deserialize;
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::db::DbError;
-use crate::models::{AccountId, Draft, DraftId, FolderId, MessageId};
+use crate::models::{AccountId, AddressList, Draft, DraftId, FolderId, MessageId};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewDraft {
     pub account_id: AccountId,
     pub in_reply_to_msg: Option<MessageId>,
-    pub to_addrs: serde_json::Value,
-    pub cc_addrs: serde_json::Value,
-    pub bcc_addrs: serde_json::Value,
+    pub to_addrs: AddressList,
+    pub cc_addrs: AddressList,
+    pub bcc_addrs: AddressList,
     pub subject: Option<String>,
     pub text_body: Option<String>,
     pub html_body: Option<String>,
@@ -68,9 +68,9 @@ pub async fn create(pool: &SqlitePool, new: &NewDraft) -> Result<Draft, DbError>
 
 #[derive(Debug, Clone)]
 pub struct DraftPatch<'a> {
-    pub to_addrs: &'a serde_json::Value,
-    pub cc_addrs: &'a serde_json::Value,
-    pub bcc_addrs: &'a serde_json::Value,
+    pub to_addrs: &'a AddressList,
+    pub cc_addrs: &'a AddressList,
+    pub bcc_addrs: &'a AddressList,
     pub subject: Option<&'a str>,
     pub text_body: Option<&'a str>,
     pub html_body: Option<&'a str>,
@@ -198,7 +198,6 @@ pub async fn delete(pool: &SqlitePool, id: DraftId) -> Result<bool, DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use uuid::Uuid;
 
     async fn account(pool: &SqlitePool) -> AccountId {
@@ -226,9 +225,9 @@ mod tests {
         NewDraft {
             account_id,
             in_reply_to_msg: None,
-            to_addrs: json!(["bob@x.com"]),
-            cc_addrs: json!([]),
-            bcc_addrs: json!([]),
+            to_addrs: AddressList::from(vec!["bob@x.com"]),
+            cc_addrs: AddressList::default(),
+            bcc_addrs: AddressList::default(),
             subject: Some("Hi".into()),
             text_body: Some("Hello".into()),
             html_body: None,
@@ -254,9 +253,9 @@ mod tests {
         let a = account(&pool).await;
         let d = create(&pool, &sample(a)).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let to = json!(["c@x.com"]);
-        let cc = json!([]);
-        let bcc = json!([]);
+        let to = AddressList::from(vec!["c@x.com"]);
+        let cc = AddressList::default();
+        let bcc = AddressList::default();
         let updated = update(
             &pool,
             d.id,
@@ -273,14 +272,14 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(updated.subject.as_deref(), Some("New subject"));
-        assert_eq!(updated.to_addrs, json!(["c@x.com"]));
+        assert_eq!(updated.to_addrs, AddressList::from(vec!["c@x.com"]));
         assert!(updated.updated_at >= d.updated_at);
     }
 
     #[tokio::test]
     async fn test_update_unknown_returns_none() {
         let pool = crate::db::test_pool().await;
-        let empty = json!([]);
+        let empty = AddressList::default();
         let res = update(
             &pool,
             DraftId::new(),

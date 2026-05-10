@@ -281,9 +281,8 @@ fn is_text_like(content_type: &str) -> bool {
 mod tests {
     use super::*;
     use crate::db::{accounts, folders, messages, test_pool};
-    use crate::models::{AuthKind, FolderRole};
+    use crate::models::{AddressList, AuthKind, FolderRole, MessageFlags};
     use chrono::Utc;
-    use serde_json::json;
     use uuid::Uuid;
 
     async fn message_id_for_test(pool: &SqlitePool) -> MessageId {
@@ -327,16 +326,16 @@ mod tests {
                 in_reply_to: None,
                 references_header: None,
                 from_addr: "alice@example.com".into(),
-                to_addrs: json!(["bob@example.com"]),
-                cc_addrs: json!([]),
-                bcc_addrs: json!([]),
+                to_addrs: AddressList::from(vec!["bob@example.com"]),
+                cc_addrs: AddressList::default(),
+                bcc_addrs: AddressList::default(),
                 reply_to: None,
                 subject: Some("attached".into()),
                 snippet: None,
                 text_body: Some("body".into()),
                 html_body: None,
                 raw_size: 1,
-                flags: json!([]),
+                flags: MessageFlags::default(),
                 internal_date: Utc::now(),
                 sent_at: None,
             },

@@ -17,8 +17,8 @@ use crate::db;
 use crate::imap::{self, ImapAuth, ImapError, ImapIdle, ImapSync};
 use crate::ipc::{Dispatcher, Hub, RpcError, Topic};
 use crate::models::{
-    Account, AccountId, ApprovalState, AttachmentId, AuthKind, DraftId, FolderId, FolderRole,
-    GateAction, MessageId, ThreadId,
+    Account, AccountId, AddressList, ApprovalState, AttachmentId, AuthKind, DraftId, FolderId,
+    FolderRole, GateAction, MessageFlags, MessageId, ThreadId,
 };
 use crate::oauth::google::{
     self, GoogleOAuth, GoogleOAuthConfig, GoogleOAuthError, GoogleOAuthHttpClient,
@@ -825,10 +825,11 @@ async fn op_message_set_flags(
 ) -> Result<Value, RpcError> {
     let actor = actor_from_args(&args);
     let id = parse_id::<MessageId>(&args, "id")?;
-    let flags = args
+    let flags: MessageFlags = args
         .get("flags")
         .cloned()
-        .ok_or_else(|| RpcError::bad_args("missing 'flags'"))?;
+        .ok_or_else(|| RpcError::bad_args("missing 'flags'"))
+        .and_then(parse_message_flags)?;
     let outcome = db::messages::set_flags(pool, id, &flags)
         .await
         .map_err(|e| RpcError::internal(format!("messages::set_flags: {e}")))?;
@@ -1002,22 +1003,18 @@ async fn op_draft_create(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
 #[derive(Deserialize)]
 struct DraftUpdate {
     id: DraftId,
-    #[serde(default = "default_addrs")]
-    to_addrs: Value,
-    #[serde(default = "default_addrs")]
-    cc_addrs: Value,
-    #[serde(default = "default_addrs")]
-    bcc_addrs: Value,
+    #[serde(default)]
+    to_addrs: AddressList,
+    #[serde(default)]
+    cc_addrs: AddressList,
+    #[serde(default)]
+    bcc_addrs: AddressList,
     #[serde(default)]
     subject: Option<String>,
     #[serde(default)]
     text_body: Option<String>,
     #[serde(default)]
     html_body: Option<String>,
-}
-
-fn default_addrs() -> Value {
-    json!([])
 }
 
 async fn op_draft_update(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
@@ -1350,8 +1347,8 @@ fn message_view(message: &crate::models::Message) -> crate::mail::reply::Message
         subject: message.subject.as_deref(),
         message_id_header: message.message_id_header.as_deref(),
         references_header: message.references_header.as_deref(),
-        to_addrs: &message.to_addrs,
-        cc_addrs: &message.cc_addrs,
+        to_addrs: message.to_addrs.as_slice(),
+        cc_addrs: message.cc_addrs.as_slice(),
         text_body: message.text_body.as_deref(),
         html_body: message.html_body.as_deref(),
         internal_date: message.internal_date,
@@ -1728,15 +1725,14 @@ async fn load_draft_mime_attachments(
     Ok(out)
 }
 
-fn parse_addr_array(value: &Value, field: &str) -> Result<Vec<String>, RpcError> {
-    let values = value
-        .as_array()
-        .ok_or_else(|| RpcError::bad_args(format!("{field} must be an array")))?;
-    let mut out = Vec::with_capacity(values.len());
-    for value in values {
-        let addr = value
-            .as_str()
-            .ok_or_else(|| RpcError::bad_args(format!("{field} must contain strings")))?;
+fn parse_message_flags(value: Value) -> Result<MessageFlags, RpcError> {
+    MessageFlags::try_from(value)
+        .map_err(|_| RpcError::bad_args("flags must be an array of strings"))
+}
+
+fn parse_addr_array(value: &AddressList, field: &str) -> Result<Vec<String>, RpcError> {
+    let mut out = Vec::with_capacity(value.as_slice().len());
+    for addr in value.as_slice() {
         let addr = addr.trim();
         if addr.is_empty() {
             return Err(RpcError::bad_args(format!(
@@ -2512,22 +2508,23 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_addr_array_non_array_returns_bad_args() {
-        let err = parse_addr_array(&json!("a@b.com"), "to_addrs").unwrap_err();
+    fn test_parse_message_flags_non_array_returns_bad_args() {
+        let err = parse_message_flags(json!("\\Seen")).unwrap_err();
         assert_eq!(err.code, "bad_args");
-        assert!(err.message.contains("must be an array"));
+        assert_eq!(err.message, "flags must be an array of strings");
     }
 
     #[test]
     fn test_parse_addr_array_blank_entry_returns_bad_args() {
-        let err = parse_addr_array(&json!(["  "]), "to_addrs").unwrap_err();
+        let err = parse_addr_array(&AddressList::from(vec!["  "]), "to_addrs").unwrap_err();
         assert_eq!(err.code, "bad_args");
         assert!(err.message.contains("must not contain empty addresses"));
     }
 
     #[test]
     fn test_parse_addr_array_trims_and_returns_strings() {
-        let parsed = parse_addr_array(&json!([" a@x.com ", "b@y.com"]), "to_addrs").unwrap();
+        let parsed =
+            parse_addr_array(&AddressList::from(vec![" a@x.com ", "b@y.com"]), "to_addrs").unwrap();
         assert_eq!(parsed, vec!["a@x.com".to_string(), "b@y.com".to_string()]);
     }
 

@@ -92,9 +92,8 @@ pub async fn get(pool: &SqlitePool, id: AttachmentId) -> Result<Option<Attachmen
 mod tests {
     use super::*;
     use crate::db::{accounts, folders, messages, test_pool};
-    use crate::models::{AuthKind, FolderRole};
+    use crate::models::{AddressList, AuthKind, FolderRole, MessageFlags};
     use chrono::Utc;
-    use serde_json::json;
     use uuid::Uuid;
 
     async fn message_id_for_test(pool: &SqlitePool) -> MessageId {
@@ -138,16 +137,16 @@ mod tests {
                 in_reply_to: None,
                 references_header: None,
                 from_addr: "alice@x".into(),
-                to_addrs: json!([]),
-                cc_addrs: json!([]),
-                bcc_addrs: json!([]),
+                to_addrs: AddressList::default(),
+                cc_addrs: AddressList::default(),
+                bcc_addrs: AddressList::default(),
                 reply_to: None,
                 subject: None,
                 snippet: None,
                 text_body: None,
                 html_body: None,
                 raw_size: 0,
-                flags: json!([]),
+                flags: MessageFlags::default(),
                 internal_date: Utc::now(),
                 sent_at: None,
             },

@@ -174,7 +174,7 @@ pub async fn delete_all_for_draft_tx(
 mod tests {
     use super::*;
     use crate::db::{drafts, test_pool};
-    use serde_json::json;
+    use crate::models::AddressList;
 
     async fn account_and_draft(pool: &SqlitePool) -> DraftId {
         let account = crate::db::accounts::create(
@@ -199,9 +199,9 @@ mod tests {
             &drafts::NewDraft {
                 account_id: account.id,
                 in_reply_to_msg: None,
-                to_addrs: json!(["bob@x.com"]),
-                cc_addrs: json!([]),
-                bcc_addrs: json!([]),
+                to_addrs: AddressList::from(vec!["bob@x.com"]),
+                cc_addrs: AddressList::default(),
+                bcc_addrs: AddressList::default(),
                 subject: Some("hi".into()),
                 text_body: Some("body".into()),
                 html_body: None,

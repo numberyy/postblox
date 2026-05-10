@@ -9,7 +9,10 @@ use uuid::Uuid;
 
 use postblox::db::connect;
 use postblox::db::{accounts, attachments, audit, drafts, folders, mcp, messages, search, threads};
-use postblox::models::{ApprovalState, AttachmentDisposition, AuthKind, FolderRole, GateAction};
+use postblox::models::{
+    AddressList, ApprovalState, AttachmentDisposition, AuthKind, FolderRole, GateAction,
+    MessageFlags,
+};
 
 #[tokio::test]
 async fn end_to_end_account_lifecycle() {
@@ -65,16 +68,16 @@ async fn end_to_end_account_lifecycle() {
             in_reply_to: None,
             references_header: None,
             from_addr: "bob@example.com".into(),
-            to_addrs: json!(["alice@example.com"]),
-            cc_addrs: json!([]),
-            bcc_addrs: json!([]),
+            to_addrs: AddressList::from(vec!["alice@example.com"]),
+            cc_addrs: AddressList::default(),
+            bcc_addrs: AddressList::default(),
             reply_to: None,
             subject: Some("Quarterly invoice".into()),
             snippet: Some("please review".into()),
             text_body: Some("please review attached invoice".into()),
             html_body: None,
             raw_size: 4096,
-            flags: json!([]),
+            flags: MessageFlags::default(),
             internal_date: Utc::now(),
             sent_at: None,
         },
@@ -104,9 +107,9 @@ async fn end_to_end_account_lifecycle() {
         &drafts::NewDraft {
             account_id: acc.id,
             in_reply_to_msg: Some(msg.id),
-            to_addrs: json!(["bob@example.com"]),
-            cc_addrs: json!([]),
-            bcc_addrs: json!([]),
+            to_addrs: AddressList::from(vec!["bob@example.com"]),
+            cc_addrs: AddressList::default(),
+            bcc_addrs: AddressList::default(),
             subject: Some("Re: Quarterly invoice".into()),
             text_body: Some("got it, thanks".into()),
             html_body: None,

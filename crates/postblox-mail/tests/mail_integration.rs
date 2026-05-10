@@ -8,7 +8,6 @@
 //! See rust-skills audit finding F-L2 in `plans/rust-skills-review.md`.
 
 use chrono::{TimeZone, Utc};
-use serde_json::json;
 use uuid::Uuid;
 
 use postblox_mail::builder::{build_mime_full, MimeAttachment, MimeBuildOptions, ReplyHeaders};
@@ -67,8 +66,8 @@ struct TestMessage {
     subject: Option<String>,
     message_id_header: Option<String>,
     references_header: Option<String>,
-    to_addrs: serde_json::Value,
-    cc_addrs: serde_json::Value,
+    to_addrs: Vec<String>,
+    cc_addrs: Vec<String>,
     text_body: Option<String>,
     html_body: Option<String>,
     internal_date: chrono::DateTime<Utc>,
@@ -98,8 +97,8 @@ fn sample_message_for_reply() -> TestMessage {
         message_id_header: Some("orig@example.com".into()),
         references_header: Some("<root@example.com>".into()),
         from_addr: "alice@example.com".into(),
-        to_addrs: json!(["bob@example.com"]),
-        cc_addrs: json!([]),
+        to_addrs: vec!["bob@example.com".into()],
+        cc_addrs: Vec::new(),
         reply_to: None,
         subject: Some("Quarterly report".into()),
         text_body: Some("Original body line 1\nOriginal body line 2".into()),

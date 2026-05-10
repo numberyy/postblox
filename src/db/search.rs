@@ -219,7 +219,6 @@ fn like_pattern(needle: &str) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use serde_json::json;
     async fn seed() -> (SqlitePool, AccountId, FolderId) {
         let pool = crate::db::test_pool().await;
         let acc = crate::db::accounts::create(
@@ -271,16 +270,16 @@ mod tests {
             in_reply_to: None,
             references_header: None,
             from_addr: from.into(),
-            to_addrs: json!([]),
-            cc_addrs: json!([]),
-            bcc_addrs: json!([]),
+            to_addrs: crate::models::AddressList::default(),
+            cc_addrs: crate::models::AddressList::default(),
+            bcc_addrs: crate::models::AddressList::default(),
             reply_to: None,
             subject: Some(subject.into()),
             snippet: Some(body.chars().take(80).collect()),
             text_body: Some(body.into()),
             html_body: None,
             raw_size: 0,
-            flags: json!([]),
+            flags: crate::models::MessageFlags::default(),
             internal_date: Utc::now(),
             sent_at: None,
         }
@@ -389,9 +388,13 @@ mod tests {
                 .await
                 .unwrap();
         // Re-index by updating flags (triggers AFTER UPDATE → reindex).
-        crate::db::messages::set_flags(&pool, m.id, &json!(["\\Flagged"]))
-            .await
-            .unwrap();
+        crate::db::messages::set_flags(
+            &pool,
+            m.id,
+            &crate::models::MessageFlags::from(vec!["\\Flagged"]),
+        )
+        .await
+        .unwrap();
         let hits = search(&pool, &quote_term("Old"), 50, 0).await.unwrap();
         assert_eq!(hits.len(), 1);
     }
@@ -717,9 +720,13 @@ mod tests {
             crate::db::messages::create(&pool, &msg(a, f, 1, "tag", "already read", "x@x.com"))
                 .await
                 .unwrap();
-        crate::db::messages::set_flags(&pool, read.id, &json!(["\\Seen"]))
-            .await
-            .unwrap();
+        crate::db::messages::set_flags(
+            &pool,
+            read.id,
+            &crate::models::MessageFlags::from(vec!["\\Seen"]),
+        )
+        .await
+        .unwrap();
         let _unread = crate::db::messages::create(&pool, &msg(a, f, 2, "tag", "fresh", "y@x.com"))
             .await
             .unwrap();
@@ -798,9 +805,9 @@ mod tests {
     async fn test_search_filtered_by_to_addr_substring_returns_matching_recipients() {
         let (pool, a, f) = seed().await;
         let mut to_acme = msg(a, f, 1, "memo", "body", "x@x.com");
-        to_acme.to_addrs = json!(["bob@acme.com"]);
+        to_acme.to_addrs = crate::models::AddressList::from(vec!["bob@acme.com"]);
         let mut to_other = msg(a, f, 2, "memo", "body", "x@x.com");
-        to_other.to_addrs = json!(["bob@other.com"]);
+        to_other.to_addrs = crate::models::AddressList::from(vec!["bob@other.com"]);
         crate::db::messages::create(&pool, &to_acme).await.unwrap();
         crate::db::messages::create(&pool, &to_other).await.unwrap();
 

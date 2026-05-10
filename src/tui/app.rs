@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::models::{
-    Account, AccountId, Attachment, AttachmentId, Draft, DraftId, Folder, FolderId, Message,
-    MessageId, MessageSummary, ThreadId,
+    Account, AccountId, AddressList, Attachment, AttachmentId, Draft, DraftId, Folder, FolderId,
+    Message, MessageFlags, MessageId, MessageSummary, ThreadId,
 };
 
 use super::theme::ThemeName;
@@ -2937,13 +2937,11 @@ fn text_or_default(value: Option<&str>, default: &str) -> String {
 /// Render a JSON address array as a comma-joined label for a Drafts
 /// row. Empty / non-array inputs map to the literal "(no recipient)"
 /// so Drafts without a To: still surface in the list.
-fn addrs_label(value: &serde_json::Value) -> String {
-    let Some(items) = value.as_array() else {
-        return "(no recipient)".into();
-    };
-    let collected: Vec<&str> = items
+fn addrs_label(value: &AddressList) -> String {
+    let collected: Vec<&str> = value
+        .as_slice()
         .iter()
-        .filter_map(|v| v.as_str())
+        .map(String::as_str)
         .filter(|s| !s.trim().is_empty())
         .collect();
     if collected.is_empty() {
@@ -3102,13 +3100,8 @@ fn clamp_isize(value: isize, min: isize, max: isize) -> isize {
     value.max(min).min(max.max(min))
 }
 
-pub fn flags_from_value(value: &serde_json::Value) -> Vec<String> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|flag| flag.as_str().map(str::to_string))
-        .collect()
+pub fn flags_from_value(value: &MessageFlags) -> Vec<String> {
+    value.to_vec()
 }
 
 pub fn has_flag(flags: &[String], flag: &str) -> bool {
@@ -3675,8 +3668,8 @@ mod tests {
     }
 
     #[test]
-    fn test_flags_from_value_keeps_only_string_flags() {
-        let flags = flags_from_value(&serde_json::json!(["\\Seen", 7, "\\Flagged"]));
+    fn test_flags_from_value_clones_typed_flags() {
+        let flags = flags_from_value(&MessageFlags::from(vec!["\\Seen", "\\Flagged"]));
 
         assert_eq!(flags, vec!["\\Seen", "\\Flagged"]);
     }

@@ -18,7 +18,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::json;
 use sqlx::SqlitePool;
 
 use crate::auth::MailCredential;
@@ -27,7 +27,7 @@ use crate::imap::ImapSync;
 use crate::ipc::{Hub, Topic};
 use crate::mail::parser::{parse_with_options, ParseOptions, ParsedEmail};
 use crate::mail::threading::{assign_thread, ThreadMatch, ThreadRef};
-use crate::models::{AccountId, Folder, FolderId, Message, ThreadId};
+use crate::models::{AccountId, AddressList, Folder, FolderId, Message, MessageFlags, ThreadId};
 
 use super::error::SyncError;
 
@@ -275,16 +275,16 @@ fn build_message_row(
         in_reply_to: parsed.in_reply_to,
         references_header,
         from_addr: parsed.from,
-        to_addrs: Value::Array(parsed.to.into_iter().map(Value::String).collect()),
-        cc_addrs: Value::Array(parsed.cc.into_iter().map(Value::String).collect()),
-        bcc_addrs: Value::Array(vec![]),
+        to_addrs: AddressList::from(parsed.to),
+        cc_addrs: AddressList::from(parsed.cc),
+        bcc_addrs: AddressList::default(),
         reply_to: None,
         subject: parsed.subject,
         snippet,
         text_body: parsed.text_body,
         html_body: parsed.html_body,
         raw_size: fetched.raw.len() as i64,
-        flags: Value::Array(fetched.flags.iter().cloned().map(Value::String).collect()),
+        flags: MessageFlags::from(fetched.flags.clone()),
         internal_date: fetched.internal_date.unwrap_or_else(Utc::now),
         sent_at: None,
     }

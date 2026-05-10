@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::ipc::Topic;
-use crate::models::{AccountId, AttachmentId, DraftId, FolderId, MessageId};
+use crate::models::{AccountId, AddressList, AttachmentId, DraftId, FolderId, MessageId};
 use app::{ActivePane, AppState, InputMode, SyncStateUi, FLAGGED_FLAG, SEEN_FLAG};
 use command::{parse_command, Command};
 use ipc::MailboxClient;
@@ -864,9 +864,9 @@ async fn materialise_draft_attachment(
     })
 }
 
-/// Build a `ComposerDraft` from a `DraftSummary`. The address arrays
-/// are decoded from the JSON columns; attachments are written to temp
-/// files so the existing `draft.update` flow can re-upload them.
+/// Build a `ComposerDraft` from a `DraftSummary`. Attachments are
+/// written to temp files so the existing `draft.update` flow can
+/// re-upload them.
 async fn composer_draft_from_summary(
     summary: &app::DraftSummary,
 ) -> Result<app::ComposerDraft, std::io::Error> {
@@ -889,16 +889,8 @@ async fn composer_draft_from_summary(
     })
 }
 
-fn addr_array_to_strings(value: &serde_json::Value) -> Vec<String> {
-    value
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+fn addr_array_to_strings(value: &AddressList) -> Vec<String> {
+    value.to_vec()
 }
 
 fn non_empty_string(value: &str) -> Option<String> {
@@ -4985,9 +4977,9 @@ mod tests {
                 id: draft_id,
                 account_id,
                 in_reply_to_msg: None,
-                to_addrs: json!(["bob@x.com"]),
-                cc_addrs: json!([]),
-                bcc_addrs: json!([]),
+                to_addrs: AddressList::from(vec!["bob@x.com"]),
+                cc_addrs: AddressList::default(),
+                bcc_addrs: AddressList::default(),
                 subject: Some("Resume".into()),
                 text_body: Some("partial body".into()),
                 html_body: None,
