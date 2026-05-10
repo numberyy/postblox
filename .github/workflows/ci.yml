@@ -19,7 +19,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --check
+      - run: cargo fmt --all --check
 
   clippy:
     name: clippy
@@ -30,7 +30,22 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  mail-layer:
+    name: postblox-mail layer check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: postblox-mail layer check
+        run: |
+          cargo tree -p postblox-mail --edges normal > /tmp/postblox-mail-tree.txt
+          if grep -E '\b(tokio|sqlx|reqwest|ratatui|lettre) v' /tmp/postblox-mail-tree.txt; then
+            cat /tmp/postblox-mail-tree.txt
+            exit 1
+          fi
 
   test:
     name: test (${{ matrix.os }})
@@ -43,8 +58,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-targets --locked
-      - run: cargo test --doc --locked
+      - run: cargo test --workspace --all-targets --locked
+      - run: cargo test --workspace --doc --locked
 
   msrv:
     name: msrv (1.80)
@@ -53,7 +68,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.80.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked --all-targets
+      - run: cargo build --workspace --locked --all-targets
 
   deny:
     name: cargo-deny
@@ -80,7 +95,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --no-deps --locked
+      - run: cargo doc --workspace --no-deps --locked
 
   coverage:
     name: coverage
