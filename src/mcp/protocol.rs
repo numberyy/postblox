@@ -1,34 +1,50 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+/// JSON-RPC 2.0 protocol version string.
 pub const JSONRPC_VERSION: &str = "2.0";
+/// MCP protocol revision implemented by the bridge.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// A parsed JSON-RPC frame received from a client.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Incoming {
+    /// JSON-RPC request awaiting a paired response.
     Request {
+        /// JSON-RPC request id echoed back in the response.
         id: Value,
+        /// Method name being invoked.
         method: String,
+        /// Raw `params` value, defaulted to JSON `null` when absent.
         params: Value,
     },
+    /// JSON-RPC notification — no response is expected.
     Notification {
+        /// Method name being notified.
         method: String,
+        /// Raw `params` value, defaulted to JSON `null` when absent.
         params: Value,
     },
+    /// JSON-RPC response from a peer (treated as a no-op by the bridge).
     Response,
 }
 
+/// JSON-RPC 2.0 error object as carried in responses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct JsonRpcError {
+    /// JSON-RPC numeric error code.
     pub code: i64,
+    /// Short human-readable error message.
     pub message: String,
+    /// Optional structured error payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
 }
 
 impl JsonRpcError {
+    /// Build a `-32700` parse-error response carrying `message`.
     #[cold]
     pub fn parse_error(message: impl Into<String>) -> Self {
         Self {
@@ -38,6 +54,7 @@ impl JsonRpcError {
         }
     }
 
+    /// Build a `-32600` invalid-request error carrying `message`.
     #[cold]
     pub fn invalid_request(message: impl Into<String>) -> Self {
         Self {
@@ -47,6 +64,7 @@ impl JsonRpcError {
         }
     }
 
+    /// Build a `-32601` method-not-found error naming the missing method.
     #[cold]
     pub fn method_not_found(method: &str) -> Self {
         Self {
@@ -56,6 +74,7 @@ impl JsonRpcError {
         }
     }
 
+    /// Build a `-32602` invalid-params error carrying `message`.
     #[cold]
     pub fn invalid_params(message: impl Into<String>) -> Self {
         Self {
@@ -65,6 +84,7 @@ impl JsonRpcError {
         }
     }
 
+    /// Build a `-32603` internal-error response carrying `message`.
     #[cold]
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
@@ -74,6 +94,8 @@ impl JsonRpcError {
         }
     }
 
+    /// Build a generic `-32000` server-defined error tagged with `code` in
+    /// the `data` payload.
     #[cold]
     pub fn server(code: impl Into<String>, message: impl Into<String>) -> Self {
         let code = code.into();
@@ -162,6 +184,7 @@ pub fn parse_value(value: Value) -> Result<Incoming, (Option<Value>, JsonRpcErro
     }
 }
 
+/// Build a JSON-RPC success response carrying `result`.
 pub fn success_response(id: Value, result: Value) -> Value {
     json!({
         "jsonrpc": JSONRPC_VERSION,
@@ -170,6 +193,7 @@ pub fn success_response(id: Value, result: Value) -> Value {
     })
 }
 
+/// Build a JSON-RPC error response carrying `error` for the supplied id.
 pub fn error_response(id: Value, error: JsonRpcError) -> Value {
     json!({
         "jsonrpc": JSONRPC_VERSION,
@@ -178,6 +202,7 @@ pub fn error_response(id: Value, error: JsonRpcError) -> Value {
     })
 }
 
+/// Build a JSON-RPC notification frame for `method` and `params`.
 pub fn notification(method: &str, params: Value) -> Value {
     json!({
         "jsonrpc": JSONRPC_VERSION,
@@ -186,6 +211,8 @@ pub fn notification(method: &str, params: Value) -> Value {
     })
 }
 
+/// Build the MCP `initialize` response, echoing the client-requested
+/// protocol version when present.
 pub fn initialize_result(client_protocol: Option<&str>) -> Value {
     json!({
         "protocolVersion": client_protocol.unwrap_or(MCP_PROTOCOL_VERSION),

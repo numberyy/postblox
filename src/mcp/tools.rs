@@ -1,3 +1,5 @@
+//! Built-in MCP tool catalogue and JSON-schema validation.
+
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
@@ -6,11 +8,16 @@ use crate::db::sql_query::MAX_ROWS;
 
 const SEARCH_MAX_ROWS: i64 = 200;
 
+/// Static description of one MCP tool exposed by the bridge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolSpec {
+    /// Public tool name advertised over JSON-RPC.
     pub name: &'static str,
+    /// Daemon [`Op`] invoked when the tool is called.
     pub op: Op,
+    /// Human-readable description surfaced in `tools/list`.
     pub description: &'static str,
+    /// Whether the tool mutates state and therefore goes through gates.
     pub dangerous: bool,
     required: &'static [&'static str],
 }
@@ -27,6 +34,7 @@ enum FieldKind {
     Integer { minimum: i64, maximum: i64 },
 }
 
+/// Catalogue of every MCP tool the bridge currently exposes.
 pub const TOOLS: [ToolSpec; 14] = [
     ToolSpec {
         name: "postblox_account_list",
@@ -140,10 +148,12 @@ pub const TOOLS: [ToolSpec; 14] = [
     },
 ];
 
+/// Locate a tool by its public name.
 pub fn find_tool(name: &str) -> Option<&'static ToolSpec> {
     TOOLS.iter().find(|tool| tool.name == name)
 }
 
+/// Return the JSON-RPC `tools/list` payload describing every tool.
 pub fn list_tools() -> Value {
     json!({
         "tools": TOOLS.iter().map(tool_json).collect::<Vec<_>>(),

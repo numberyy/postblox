@@ -11,13 +11,18 @@ use crate::models::AccountId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SyncState {
+    /// No sync activity is in progress for the account.
     Idle,
+    /// IDLE worker is waiting on the server for a change notification.
     Polling,
+    /// Reconciler is pulling new messages right now.
     Syncing,
+    /// Last sync attempt failed; details are in [`SyncStateEvent::last_error`].
     Error,
 }
 
 impl SyncState {
+    /// Return the lowercase wire string for this state.
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Idle => "idle",
@@ -32,13 +37,17 @@ impl SyncState {
 /// `state == SyncState::Error`; otherwise `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncStateEvent {
+    /// Account whose sync state changed.
     pub account_id: AccountId,
+    /// New sync state.
     pub state: SyncState,
+    /// Most recent error message when `state == SyncState::Error`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }
 
 impl SyncStateEvent {
+    /// Build a new `sync.state` event payload.
     pub fn new(account_id: AccountId, state: SyncState, last_error: Option<String>) -> Self {
         Self {
             account_id,

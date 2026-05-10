@@ -28,6 +28,8 @@ use crate::secrets::SecretStore;
 use crate::smtp::{self, SmtpError, SmtpServer, SmtpSubmitRequest, SmtpSubmitter};
 use crate::sync;
 
+/// Bundle of pluggable services the dispatcher hands to the worker
+/// manager and the `oauth.google.*` ops.
 #[derive(Clone)]
 pub struct DaemonServices {
     smtp: Arc<dyn SmtpSubmitter>,
@@ -116,6 +118,8 @@ pub fn worker_manager_with_idle_config(
     )
 }
 
+/// IPC [`Dispatcher`] that maps wire op names to `db::*` calls,
+/// IMAP/SMTP/OAuth operations, and event publication on the [`Hub`].
 #[derive(Clone)]
 pub struct DaemonDispatcher {
     pool: SqlitePool,
@@ -139,6 +143,9 @@ pub struct DaemonDispatcher {
 /// system trust store) from a logic bug.
 #[derive(Debug, Error)]
 pub enum DispatcherInitError {
+    /// Default IMAP transport (auth, sync, or idle) failed to initialise
+    /// — usually a broken system trust store for the rustls platform
+    /// verifier.
     #[error("imap transport init failed: {0}")]
     Imap(#[from] ImapError),
 }
@@ -195,6 +202,8 @@ impl DaemonDispatcher {
         Self::with_imap_and_smtp(pool, hub, imap, imap_sync, secrets, smtp)
     }
 
+    /// Test/customisation constructor: bring your own IMAP impls and
+    /// SMTP submitter.
     pub fn with_imap_and_smtp(
         pool: SqlitePool,
         hub: Arc<Hub>,
@@ -226,6 +235,8 @@ impl DaemonDispatcher {
         )
     }
 
+    /// Test/customisation constructor: custom IMAP impls plus a tuned
+    /// [`sync::WorkerConfig`].
     pub fn with_imap_and_sync_config(
         pool: SqlitePool,
         hub: Arc<Hub>,
@@ -238,6 +249,8 @@ impl DaemonDispatcher {
         Self::with_imap_sync_smtp_config(pool, hub, imap, imap_sync, secrets, smtp, worker_config)
     }
 
+    /// Test/customisation constructor: custom IMAP impls, custom SMTP
+    /// submitter, and a tuned [`sync::WorkerConfig`].
     pub fn with_imap_sync_smtp_config(
         pool: SqlitePool,
         hub: Arc<Hub>,
@@ -270,6 +283,9 @@ impl DaemonDispatcher {
         )
     }
 
+    /// Test/customisation constructor: custom IMAP impls, a custom
+    /// [`DaemonServices`] bundle (SMTP + OAuth), and a tuned
+    /// [`sync::WorkerConfig`].
     pub fn with_imap_sync_smtp_oauth_config(
         pool: SqlitePool,
         hub: Arc<Hub>,
@@ -301,6 +317,8 @@ impl DaemonDispatcher {
         )
     }
 
+    /// Test/customisation constructor: bring your own IMAP impls and
+    /// pre-built [`sync::WorkerManager`].
     pub fn with_imap_and_manager(
         pool: SqlitePool,
         hub: Arc<Hub>,
@@ -313,6 +331,8 @@ impl DaemonDispatcher {
         Self::with_imap_smtp_and_manager(pool, hub, imap, imap_sync, secrets, smtp, worker_manager)
     }
 
+    /// Test/customisation constructor: bring your own IMAP impls,
+    /// SMTP submitter, and pre-built [`sync::WorkerManager`].
     pub fn with_imap_smtp_and_manager(
         pool: SqlitePool,
         hub: Arc<Hub>,
@@ -336,6 +356,9 @@ impl DaemonDispatcher {
         )
     }
 
+    /// Maximal-control constructor: every collaborator is supplied
+    /// explicitly. Used by tests and by the daemon binary after it
+    /// opens a separate read-only [`SqlitePool`].
     #[allow(clippy::too_many_arguments)]
     pub fn with_imap_smtp_oauth_and_manager(
         pool: SqlitePool,
@@ -360,6 +383,7 @@ impl DaemonDispatcher {
         }
     }
 
+    /// Read-write [`SqlitePool`] handle backing this dispatcher.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }

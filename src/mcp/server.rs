@@ -27,16 +27,27 @@ const SUBSCRIPTION_MAILBOX: usize = 256;
 const _: () = assert!(SUBSCRIPTION_MAILBOX == 256);
 const STDIO_MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
+/// Error returned by the MCP bridge while talking to the daemon or stdio.
 #[derive(Debug, Error)]
 pub enum BridgeError {
+    /// Underlying stdio or socket IO failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// JSON encoding or decoding failed for an outbound or inbound frame.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    /// IPC transport-level failure (connect, framing, subscription).
     #[error("ipc: {0}")]
     Ipc(String),
+    /// Daemon answered with a structured `{ ok: false, error }` payload.
     #[error("daemon returned error: {code}: {message}")]
-    Daemon { code: String, message: String },
+    Daemon {
+        /// Daemon-side error code echoed back to the caller.
+        code: String,
+        /// Human-readable error message from the daemon.
+        message: String,
+    },
+    /// Daemon returned a syntactically valid but structurally unexpected payload.
     #[error("bad daemon response: {0}")]
     BadDaemonResponse(String),
 }
@@ -62,6 +73,8 @@ impl From<ClientError> for BridgeError {
     }
 }
 
+/// Daemon transport abstraction used by [`McpBridge`] for IPC requests and
+/// broadcast subscriptions.
 #[async_trait::async_trait]
 pub trait DaemonBridge: Send + Sync + 'static {
     /// Send an IPC request `op` with the given JSON `args` and return the
@@ -88,6 +101,8 @@ pub trait DaemonBridge: Send + Sync + 'static {
     async fn subscribe(&self, topic: Topic) -> Result<mpsc::Receiver<Event>, BridgeError>;
 }
 
+/// Production [`DaemonBridge`] backed by a Unix-socket [`Client`] to
+/// `postbloxd`.
 pub struct IpcDaemon {
     socket_path: PathBuf,
     client: Mutex<Client>,
@@ -144,8 +159,11 @@ impl DaemonBridge for IpcDaemon {
     }
 }
 
+/// Tunable bridge behaviour.
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
+    /// How long to wait for a pending MCP approval decision before
+    /// auto-expiring it.
     pub approval_timeout: Duration,
 }
 
@@ -157,6 +175,8 @@ impl Default for BridgeConfig {
     }
 }
 
+/// MCP bridge: maps tool calls to daemon ops and forwards daemon events as
+/// JSON-RPC notifications.
 #[derive(Clone)]
 pub struct McpBridge {
     daemon: Arc<dyn DaemonBridge>,
@@ -164,10 +184,13 @@ pub struct McpBridge {
 }
 
 impl McpBridge {
+    /// Construct an [`McpBridge`] over a [`DaemonBridge`] transport.
     pub fn new(daemon: Arc<dyn DaemonBridge>, config: BridgeConfig) -> Self {
         Self { daemon, config }
     }
 
+    /// Parse a single newline-delimited JSON-RPC frame and produce the
+    /// optional response value (notifications return `None`).
     pub async fn handle_line(&self, line: &str) -> Option<Value> {
         match protocol::parse_line(line) {
             Ok(incoming) => self.handle_incoming(incoming).await,
@@ -175,6 +198,8 @@ impl McpBridge {
         }
     }
 
+    /// Dispatch an already-parsed JSON-RPC frame and produce the
+    /// optional response value.
     pub async fn handle_incoming(&self, incoming: Incoming) -> Option<Value> {
         match incoming {
             Incoming::Request { id, method, params } => {
@@ -184,6 +209,8 @@ impl McpBridge {
         }
     }
 
+    /// Spawn one task per notification topic that forwards daemon events
+    /// to `out_tx` as JSON-RPC notifications.
     pub async fn start_notifications(&self, out_tx: mpsc::Sender<Value>) -> Vec<JoinHandle<()>> {
         let mut handles = Vec::new();
         for topic in notification_topics() {

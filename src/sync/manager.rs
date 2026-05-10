@@ -20,6 +20,8 @@ use super::worker::{
 
 type WorkerKey = (AccountId, String);
 
+/// Owns the per-(account, folder) sync workers and orchestrates their
+/// lifecycle.
 pub struct WorkerManager {
     pool: SqlitePool,
     hub: Arc<Hub>,
@@ -36,10 +38,12 @@ struct WorkerHandle {
 }
 
 impl WorkerManager {
+    /// Build a manager with the default [`WorkerConfig`].
     pub fn new(pool: SqlitePool, hub: Arc<Hub>, imap: Arc<dyn ImapSync>) -> Self {
         Self::with_config(pool, hub, imap, WorkerConfig::default())
     }
 
+    /// Build a manager with a custom [`WorkerConfig`].
     pub fn with_config(
         pool: SqlitePool,
         hub: Arc<Hub>,
@@ -49,6 +53,8 @@ impl WorkerManager {
         Self::with_idle_config(pool, hub, imap, None, config)
     }
 
+    /// Build a manager with an optional [`ImapIdle`] backend in addition
+    /// to the regular [`ImapSync`] reconciliation path.
     pub fn with_idle_config(
         pool: SqlitePool,
         hub: Arc<Hub>,
@@ -59,6 +65,8 @@ impl WorkerManager {
         Self::with_optional_credential_resolver(pool, hub, imap, idle, config, None)
     }
 
+    /// Build a manager with a [`WorkerCredentialResolver`] for OAuth2
+    /// re-authentication between poll cycles.
     pub fn with_config_and_credential_resolver(
         pool: SqlitePool,
         hub: Arc<Hub>,
@@ -76,6 +84,8 @@ impl WorkerManager {
         )
     }
 
+    /// Build a manager with both an [`ImapIdle`] backend and a
+    /// [`WorkerCredentialResolver`] for OAuth2 re-authentication.
     pub fn with_idle_config_and_credential_resolver(
         pool: SqlitePool,
         hub: Arc<Hub>,
@@ -113,6 +123,8 @@ impl WorkerManager {
         }
     }
 
+    /// Spawn a sync worker for `(account_id, folder_name)`. Returns
+    /// `false` if a worker is already running for that key.
     pub async fn start(
         &self,
         account_id: AccountId,
@@ -168,6 +180,8 @@ impl WorkerManager {
         WorkerCredentialSource::static_credential(credential)
     }
 
+    /// Cancel and join the worker for `(account_id, folder_name)`. Returns
+    /// `false` if no worker was registered for that key.
     pub async fn stop(&self, account_id: AccountId, folder_name: &str) -> bool {
         let key = (account_id, folder_name.to_string());
         let handle = self.workers.lock().await.remove(&key);
@@ -180,6 +194,7 @@ impl WorkerManager {
         }
     }
 
+    /// Cancel and join every running worker, leaving the manager empty.
     pub async fn stop_all(&self) {
         let handles = {
             let mut workers = self.workers.lock().await;

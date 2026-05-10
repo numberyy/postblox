@@ -36,11 +36,16 @@ impl StateReporter {
     }
 }
 
+/// Tunable parameters for a single sync worker's polling + backoff loop.
 #[derive(Debug, Clone, Copy)]
 pub struct WorkerConfig {
+    /// Delay between successful poll cycles in non-IDLE mode.
     pub poll_interval: Duration,
+    /// Maximum time a single IMAP IDLE wait may take before reconnecting.
     pub idle_timeout: Duration,
+    /// Backoff applied after the first failed cycle.
     pub initial_backoff: Duration,
+    /// Upper bound on the exponential backoff between failed cycles.
     pub max_backoff: Duration,
 }
 
@@ -55,6 +60,8 @@ impl Default for WorkerConfig {
     }
 }
 
+/// Refreshes [`MailCredential`]s mid-flight so a long-running sync
+/// worker keeps a valid OAuth bearer between poll cycles.
 #[async_trait::async_trait]
 pub trait WorkerCredentialResolver: Send + Sync {
     /// Return a fresh [`MailCredential`] for `account_id`, refreshing

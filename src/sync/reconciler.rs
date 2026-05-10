@@ -36,11 +36,17 @@ use super::error::SyncError;
 /// to refetch from scratch.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReconcileReport {
+    /// Folder that was reconciled.
     pub folder_id: FolderId,
+    /// Number of messages newly inserted into the local store.
     pub inserted: u64,
+    /// Number of messages wiped because `UIDVALIDITY` changed.
     pub wiped: u64,
+    /// Server-reported `UIDVALIDITY` after reconciliation, if any.
     pub uid_validity: Option<i64>,
+    /// Server-reported `UIDNEXT` after reconciliation, if any.
     pub uid_next: Option<i64>,
+    /// Highest UID the worker has now ingested for the folder, if any.
     pub last_seen_uid: Option<i64>,
 }
 

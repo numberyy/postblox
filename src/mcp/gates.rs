@@ -1,16 +1,33 @@
+//! Gate evaluation for MCP tool calls.
+
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::models::{GateAction, McpGate};
 
+/// Outcome of evaluating the configured gates against a tool call's args.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GateDecision {
-    AutoAllow { gate_id: Option<Uuid> },
-    Deny { gate_id: Option<Uuid> },
-    Require { gate_id: Option<Uuid> },
+    /// A matching `AutoAllow` gate fired (its id is reported for audit).
+    AutoAllow {
+        /// Identifier of the gate that produced the decision, if any.
+        gate_id: Option<Uuid>,
+    },
+    /// A matching `Deny` gate fired and the call must be rejected.
+    Deny {
+        /// Identifier of the gate that produced the decision, if any.
+        gate_id: Option<Uuid>,
+    },
+    /// Human approval is required before the tool call may proceed.
+    Require {
+        /// Identifier of the gate that produced the decision, if any.
+        gate_id: Option<Uuid>,
+    },
 }
 
+/// Walk `gates` in order and return the first matching gate's decision,
+/// defaulting to [`GateDecision::Require`] when nothing matches.
 pub fn decide(gates: &[McpGate], args: &Value) -> GateDecision {
     for gate in gates {
         if gate_matches(gate, args) {
@@ -30,6 +47,7 @@ pub fn decide(gates: &[McpGate], args: &Value) -> GateDecision {
     GateDecision::Require { gate_id: None }
 }
 
+/// Whether `gate`'s argument pattern matches `args`.
 pub fn gate_matches(gate: &McpGate, args: &Value) -> bool {
     let Some(pattern) = &gate.arg_pattern else {
         return true;

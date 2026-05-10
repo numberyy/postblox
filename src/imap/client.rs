@@ -218,8 +218,11 @@ where
 /// Minimal projection of an IMAP folder listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderInfo {
+    /// Mailbox name as reported by the server.
     pub name: String,
+    /// Hierarchy delimiter (defaults to `/` when the server omits it).
     pub delimiter: String,
+    /// Whether the mailbox can be `SELECT`ed (i.e. lacks `\\NoSelect`).
     pub selectable: bool,
 }
 
@@ -228,9 +231,13 @@ pub struct FolderInfo {
 /// [`FolderSync::messages`] for the actual inserts.
 #[derive(Debug, Clone)]
 pub struct FolderSync {
+    /// `UIDVALIDITY` reported by the `SELECT` response, if any.
     pub uid_validity: Option<u32>,
+    /// `UIDNEXT` reported by the `SELECT` response, if any.
     pub uid_next: Option<u32>,
+    /// `EXISTS` count reported by the `SELECT` response.
     pub exists: u32,
+    /// Messages returned by the `UID FETCH` of the requested range.
     pub messages: Vec<FetchedMessage>,
 }
 
@@ -239,27 +246,42 @@ pub struct FolderSync {
 /// received it).
 #[derive(Debug, Clone)]
 pub struct FetchedMessage {
+    /// IMAP UID of the message within its folder.
     pub uid: u32,
+    /// IMAP flags reported on the message (wire form, e.g. `\\Seen`).
     pub flags: Vec<String>,
+    /// `INTERNALDATE` reported by the server, when present.
     pub internal_date: Option<chrono::DateTime<chrono::Utc>>,
+    /// RFC822 source bytes of the message.
     pub raw: Vec<u8>,
 }
 
 /// Why one IDLE wait ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdleOutcome {
+    /// IDLE returned with at least one untagged update — sync now.
     NewData,
+    /// IDLE expired without any server-side change.
     Timeout,
+    /// The cancellation token fired and the wait was aborted.
     Interrupted,
 }
 
+/// Inputs for one bounded IMAP IDLE wait.
 pub struct IdleRequest<'a> {
+    /// IMAP server hostname.
     pub host: &'a str,
+    /// IMAP server port.
     pub port: u16,
+    /// Username to authenticate with.
     pub username: &'a str,
+    /// Credential used for the chosen auth mechanism.
     pub credential: &'a MailCredential,
+    /// Folder to `SELECT` and IDLE on.
     pub folder: &'a str,
+    /// Maximum time to wait for an IDLE response.
     pub timeout: Duration,
+    /// Cancellation token used to abort the wait early.
     pub cancel: CancellationToken,
 }
 

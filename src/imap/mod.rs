@@ -102,6 +102,8 @@ pub struct ConnectorAuth<C: Connector> {
 }
 
 impl<C: Connector> ConnectorAuth<C> {
+    /// Wrap a [`Connector`] so it can serve as [`ImapAuth`] / [`ImapSync`]
+    /// / [`ImapIdle`].
     pub fn new(connector: C) -> Self {
         Self { connector }
     }

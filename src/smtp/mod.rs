@@ -19,41 +19,60 @@ use thiserror::Error;
 
 use crate::auth::{CredentialKind, MailCredential};
 
+/// SMTP server endpoint plus transport-security flags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmtpServer {
+    /// Submission server hostname.
     pub host: String,
+    /// Submission server port.
     pub port: u16,
+    /// Use implicit TLS on connect (mutually exclusive with `starttls`).
     pub use_tls: bool,
+    /// Upgrade an unencrypted connection via `STARTTLS`.
     pub starttls: bool,
 }
 
+/// All inputs for a single SMTP message submission.
 pub struct SmtpSubmitRequest {
+    /// SMTP server endpoint and transport security.
     pub server: SmtpServer,
+    /// SASL username used to authenticate.
     pub username: String,
+    /// Credential to authenticate with (password or OAuth2 bearer).
     pub credential: MailCredential,
+    /// `MAIL FROM` envelope sender.
     pub from: String,
+    /// `RCPT TO` envelope recipients.
     pub recipients: Vec<String>,
+    /// Raw RFC 5322 message bytes (DATA payload).
     pub mime: Vec<u8>,
 }
 
+/// Error returned by [`SmtpSubmitter`] implementations.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SmtpError {
+    /// Server rejected the SASL credentials.
     #[error("auth failed: {0}")]
     Auth(String),
 
+    /// Caller-supplied addresses or envelope were invalid.
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 
+    /// Server config was contradictory (e.g. both implicit TLS and STARTTLS).
     #[error("invalid config: {0}")]
     InvalidConfig(String),
 
+    /// Retryable transport failure (timeout, 4xx, network blip).
     #[error("transient: {0}")]
     Transient(String),
 
+    /// Any other lettre / SMTP failure not covered by the variants above.
     #[error("internal: {0}")]
     Internal(String),
 }
 
+/// Async SMTP submission trait used by the daemon.
 #[async_trait::async_trait]
 pub trait SmtpSubmitter: Send + Sync {
     /// Submit a single message via SMTP using the credentials and
@@ -75,10 +94,12 @@ pub trait SmtpSubmitter: Send + Sync {
     async fn submit(&self, request: SmtpSubmitRequest) -> Result<(), SmtpError>;
 }
 
+/// Production [`SmtpSubmitter`] backed by `lettre`'s async transport.
 #[derive(Debug, Default)]
 pub struct LettreSmtpSubmitter;
 
 impl LettreSmtpSubmitter {
+    /// Construct a new lettre-backed submitter.
     pub fn new() -> Self {
         Self
     }

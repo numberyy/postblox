@@ -31,15 +31,22 @@ use crate::secrets::{SecretError, SecretStore};
 
 const AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
+/// OAuth scope string required for Gmail IMAP and SMTP access.
 pub const GMAIL_SCOPE: &str = "https://mail.google.com/";
+/// Default HTTP request timeout used when talking to the Google token endpoint.
 pub const DEFAULT_REQUEST_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 const REFRESH_SKEW_SECONDS: i64 = 60;
 
+/// OAuth2 client configuration for the Gmail flow.
 #[derive(Clone, PartialEq, Eq)]
 pub struct GoogleOAuthConfig {
+    /// OAuth2 client identifier issued by Google.
     pub client_id: String,
+    /// OAuth2 client secret issued by Google.
     pub client_secret: String,
+    /// Redirect URI registered with the OAuth2 client.
     pub redirect_uri: String,
+    /// Requested OAuth2 scopes (locked to a single Gmail scope today).
     pub scopes: Vec<String>,
 }
 
@@ -55,6 +62,7 @@ impl std::fmt::Debug for GoogleOAuthConfig {
 }
 
 impl GoogleOAuthConfig {
+    /// Build a Gmail-scoped OAuth2 config from the supplied client credentials.
     pub fn gmail(
         client_id: impl Into<String>,
         client_secret: impl Into<String>,
@@ -92,12 +100,18 @@ impl GoogleOAuthConfig {
     }
 }
 
+/// OAuth2 access/refresh token pair returned by Google's token endpoint.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoogleOAuthToken {
+    /// Short-lived bearer token used to authenticate IMAP/SMTP sessions.
     pub access_token: String,
+    /// Long-lived refresh token used to mint new access tokens.
     pub refresh_token: String,
+    /// UTC instant at which the access token expires.
     pub expires_at: DateTime<Utc>,
+    /// OAuth2 token type as reported by Google (typically `Bearer`).
     pub token_type: String,
+    /// Granted scope string echoed by the token endpoint, if any.
     pub scope: Option<String>,
 }
 
@@ -114,17 +128,25 @@ impl std::fmt::Debug for GoogleOAuthToken {
 }
 
 impl GoogleOAuthToken {
+    /// Whether the token should be refreshed before use given the current
+    /// instant (applies a 60-second skew to absorb clock drift).
     pub fn needs_refresh(&self, now: DateTime<Utc>) -> bool {
         self.expires_at <= now + Duration::seconds(REFRESH_SKEW_SECONDS)
     }
 }
 
+/// Persisted OAuth2 bundle: the client config plus the latest token pair.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredGoogleOAuth {
+    /// OAuth2 client identifier.
     pub client_id: String,
+    /// OAuth2 client secret.
     pub client_secret: String,
+    /// Redirect URI registered for the client.
     pub redirect_uri: String,
+    /// Granted OAuth2 scopes.
     pub scopes: Vec<String>,
+    /// Most recently obtained access/refresh token pair.
     pub token: GoogleOAuthToken,
 }
 
@@ -141,6 +163,7 @@ impl std::fmt::Debug for StoredGoogleOAuth {
 }
 
 impl StoredGoogleOAuth {
+    /// Assemble a stored bundle from a config + token.
     pub fn new(config: GoogleOAuthConfig, token: GoogleOAuthToken) -> Self {
         Self {
             client_id: config.client_id,
@@ -151,6 +174,7 @@ impl StoredGoogleOAuth {
         }
     }
 
+    /// Reconstruct the [`GoogleOAuthConfig`] embedded in this stored bundle.
     pub fn config(&self) -> GoogleOAuthConfig {
         GoogleOAuthConfig {
             client_id: self.client_id.clone(),
@@ -161,27 +185,35 @@ impl StoredGoogleOAuth {
     }
 }
 
+/// Error returned by the Google OAuth helpers and the [`GoogleOAuth`] trait.
 #[derive(Debug, Error)]
 pub enum GoogleOAuthError {
+    /// Caller-supplied input failed validation (missing field, bad scope, etc.).
     #[error("invalid input: {0}")]
     InvalidInput(String),
 
+    /// Token endpoint omitted a refresh token and no prior value was available.
     #[error("oauth response did not include refresh token")]
     MissingRefreshToken,
 
+    /// Token endpoint responded with a non-2xx HTTP status.
     #[error("oauth token endpoint returned status {0}")]
     HttpStatus(u16),
 
+    /// Lower-level HTTP transport error (network, TLS, timeout, JSON decode).
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
 
+    /// Underlying [`SecretStore`] returned an error while loading or storing.
     #[error("secret store: {0}")]
     Secret(#[from] SecretError),
 
+    /// Stored payload failed to decode from JSON.
     #[error("decode: {0}")]
     Decode(String),
 }
 
+/// Asynchronous Gmail OAuth2 client used to obtain and refresh tokens.
 #[async_trait::async_trait]
 pub trait GoogleOAuth: Send + Sync {
     /// Exchange an authorization `code` for a fresh access/refresh token pair.
@@ -228,6 +260,7 @@ pub trait GoogleOAuth: Send + Sync {
     ) -> Result<GoogleOAuthToken, GoogleOAuthError>;
 }
 
+/// Production [`GoogleOAuth`] implementation backed by `reqwest`.
 #[derive(Clone)]
 pub struct GoogleOAuthHttpClient {
     http: reqwest::Client,
@@ -436,6 +469,8 @@ pub fn authorization_url(
     Ok(format!("{AUTH_ENDPOINT}?{query}"))
 }
 
+/// Format the SASL XOAUTH2 client response expected by Gmail's IMAP/SMTP
+/// endpoints.
 pub fn xoauth2_sasl_string(username: &str, access_token: &str) -> String {
     format!("user={username}\x01auth=Bearer {access_token}\x01\x01")
 }
