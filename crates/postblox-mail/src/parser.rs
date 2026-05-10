@@ -74,10 +74,34 @@ impl Default for ParseOptions {
     }
 }
 
+/// Parse an RFC 5322 message with raw headers included.
+///
+/// # Errors
+///
+/// Returns [`MailError::Parse`] when the message is completely
+/// unparseable.
+///
+/// # Examples
+///
+/// ```
+/// let parsed = postblox_mail::parser::parse(
+///     b"From: alice@example.com\r\nTo: bob@example.com\r\nSubject: Hi\r\n\r\nHello",
+/// )?;
+///
+/// assert_eq!(parsed.from, "alice@example.com");
+/// assert_eq!(parsed.subject.as_deref(), Some("Hi"));
+/// # Ok::<(), postblox_mail::error::MailError>(())
+/// ```
 pub fn parse(raw: &[u8]) -> Result<ParsedEmail, MailError> {
     parse_with_options(raw, ParseOptions::default())
 }
 
+/// Parse an RFC 5322 message using the provided [`ParseOptions`].
+///
+/// # Errors
+///
+/// Returns [`MailError::Parse`] when the message is completely
+/// unparseable.
 pub fn parse_with_options(raw: &[u8], options: ParseOptions) -> Result<ParsedEmail, MailError> {
     let message = MessageParser::default()
         .parse(raw)

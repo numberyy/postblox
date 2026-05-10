@@ -79,6 +79,13 @@ pub fn assign_thread(message: &ParsedEmail, existing_threads: &[ThreadRef]) -> T
 /// Trim, strip `Re:` / `Fwd:` / `Fw:` prefixes, and lowercase. Returns
 /// `Cow::Borrowed` when the input is already in normal form, otherwise
 /// allocates once into `Cow::Owned`.
+///
+/// # Examples
+///
+/// ```
+/// let normalized = postblox_mail::threading::normalize_subject(" Re: Fwd: Quarterly Update ");
+/// assert_eq!(normalized, "quarterly update");
+/// ```
 pub fn normalize_subject(subject: &str) -> Cow<'_, str> {
     let trimmed = subject.trim();
     let mut s = trimmed;

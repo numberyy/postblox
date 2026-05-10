@@ -12,6 +12,14 @@
 //! free, used by both the TUI and the MCP bridge to summarise a reply
 //! without the original conversation.
 
+/// Return only the newly written portion of a reply body.
+///
+/// # Examples
+///
+/// ```
+/// let reply = "Sounds good.\n\nOn Mon, Alice wrote:\n> Original";
+/// assert_eq!(postblox_mail::reply_extract::extract_reply(reply), "Sounds good.");
+/// ```
 pub fn extract_reply(text: &str) -> String {
     let text = text.replace("\r\n", "\n");
     let lines: Vec<&str> = text.split('\n').collect();
