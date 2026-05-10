@@ -7,6 +7,7 @@
 use chrono::{DateTime, Utc};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
+use crate::db::messages::message_cols;
 use crate::db::DbError;
 use crate::models::{AccountId, FolderId, Message, ThreadId};
 
@@ -39,24 +40,12 @@ pub async fn search(
     search_scoped(pool, fts_query, None, limit, offset).await
 }
 
-// Column list aliased by `m.` so the FTS join projects the underlying
-// `messages` row. Hoisted out of `search_scoped` so the two query
-// strings can `concat!` it at compile time.
-macro_rules! search_cols {
-    () => {
-        "m.id, m.account_id, m.folder_id, m.thread_id, m.uid, m.message_id_header, \
-         m.in_reply_to, m.references_header, m.from_addr, m.to_addrs, m.cc_addrs, \
-         m.bcc_addrs, m.reply_to, m.subject, m.snippet, m.text_body, m.html_body, \
-         m.raw_size, m.flags, m.internal_date, m.sent_at, m.created_at"
-    };
-}
-
 #[cfg(test)]
-const SEARCH_COLS: &str = search_cols!();
+const SEARCH_COLS: &str = message_cols!("m.");
 
 const SEARCH_BY_ACCOUNT_QUERY: &str = concat!(
     "SELECT ",
-    search_cols!(),
+    message_cols!("m."),
     " FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
      WHERE messages_fts MATCH ? AND m.account_id = ? \
      ORDER BY rank LIMIT ? OFFSET ?"
@@ -64,7 +53,7 @@ const SEARCH_BY_ACCOUNT_QUERY: &str = concat!(
 
 const SEARCH_ALL_QUERY: &str = concat!(
     "SELECT ",
-    search_cols!(),
+    message_cols!("m."),
     " FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
      WHERE messages_fts MATCH ? \
      ORDER BY rank LIMIT ? OFFSET ?"
@@ -143,7 +132,7 @@ pub async fn search_filtered(
     let offset = offset.max(0);
 
     let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT ");
-    qb.push(search_cols!());
+    qb.push(message_cols!("m."));
     qb.push(
         " FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
          WHERE messages_fts MATCH ",

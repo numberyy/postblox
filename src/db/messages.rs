@@ -46,18 +46,57 @@ pub struct SetFlagsOutcome {
 
 // Column list shared by every `SELECT` against `messages`. Defined as a
 // `macro_rules!` so each query string can `concat!` it at compile time
-// instead of `format!`-ing the same prefix on every call.
+// instead of `format!`-ing the same prefix on every call. The optional
+// prefix arm lets joined queries project `m.id, m.account_id, ...`
+// without maintaining a second column list.
 macro_rules! message_cols {
+    (@columns $mode:ident $($prefix:literal)?) => {
+        message_cols!(
+            @$mode
+            $($prefix,)?
+            id,
+            account_id,
+            folder_id,
+            thread_id,
+            uid,
+            message_id_header,
+            in_reply_to,
+            references_header,
+            from_addr,
+            to_addrs,
+            cc_addrs,
+            bcc_addrs,
+            reply_to,
+            subject,
+            snippet,
+            text_body,
+            html_body,
+            raw_size,
+            flags,
+            internal_date,
+            sent_at,
+            created_at,
+        )
+    };
+    (@unaliased $first:ident $(, $rest:ident)* $(,)?) => {
+        concat!(stringify!($first) $(, ", ", stringify!($rest))*)
+    };
+    (@aliased $prefix:literal, $first:ident $(, $rest:ident)* $(,)?) => {
+        concat!($prefix, stringify!($first) $(, ", ", $prefix, stringify!($rest))*)
+    };
     () => {
-        "id, account_id, folder_id, thread_id, uid, message_id_header, in_reply_to, \
-         references_header, from_addr, to_addrs, cc_addrs, bcc_addrs, reply_to, \
-         subject, snippet, text_body, html_body, raw_size, flags, internal_date, \
-         sent_at, created_at"
+        message_cols!(@columns unaliased)
+    };
+    ($prefix:literal) => {
+        message_cols!(@columns aliased $prefix)
     };
 }
+pub(crate) use message_cols;
 
 #[cfg(test)]
 const MESSAGE_COLS: &str = message_cols!();
+#[cfg(test)]
+const MESSAGE_COLS_ALIASED_M: &str = message_cols!("m.");
 
 const INSERT_RETURNING_QUERY: &str = concat!(
     "INSERT INTO messages \
@@ -89,7 +128,7 @@ const LIST_BY_THREAD_QUERY: &str = concat!(
     " FROM messages WHERE thread_id = ? ORDER BY internal_date"
 );
 
-const FIND_BY_MSGID_HEADER_QUERY: &str = concat!(
+const GET_BY_MESSAGE_ID_HEADER_QUERY: &str = concat!(
     "SELECT ",
     message_cols!(),
     " FROM messages \
@@ -236,19 +275,19 @@ pub async fn message_ids_by_threads(
         .await?)
 }
 
-/// Find a message by its RFC822 Message-ID header within an account. Used
+/// Look up a message by its RFC822 Message-ID header within an account. Used
 /// by the threading matcher to walk In-Reply-To / References chains.
 ///
 /// # Errors
 ///
 /// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
 /// header / unknown account is reported as `Ok(None)`, not an error.
-pub async fn find_by_msgid_header(
+pub async fn get_by_message_id_header(
     pool: &SqlitePool,
     account_id: AccountId,
     message_id_header: &str,
 ) -> Result<Option<Message>, DbError> {
-    Ok(sqlx::query_as(FIND_BY_MSGID_HEADER_QUERY)
+    Ok(sqlx::query_as(GET_BY_MESSAGE_ID_HEADER_QUERY)
         .bind(account_id)
         .bind(message_id_header)
         .fetch_optional(pool)
@@ -624,15 +663,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_find_by_msgid_header() {
+    async fn test_get_by_message_id_header() {
         let c = ctx().await;
         create(&c.pool, &sample(&c, 9)).await.unwrap();
-        let got = find_by_msgid_header(&c.pool, c.account_id, "<9@x>")
+        let got = get_by_message_id_header(&c.pool, c.account_id, "<9@x>")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(got.uid, 9);
-        assert!(find_by_msgid_header(&c.pool, c.account_id, "<missing>")
+        assert!(get_by_message_id_header(&c.pool, c.account_id, "<missing>")
             .await
             .unwrap()
             .is_none());
@@ -769,7 +808,7 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
-        assert!(find_by_msgid_header(&c.pool, c.account_id, "<missing>")
+        assert!(get_by_message_id_header(&c.pool, c.account_id, "<missing>")
             .await
             .unwrap()
             .is_none());
@@ -805,6 +844,41 @@ mod tests {
                 "internal_date",
                 "sent_at",
                 "created_at",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_message_cols_const_lists_every_column_aliased() {
+        let cols: Vec<&str> = MESSAGE_COLS_ALIASED_M
+            .split(',')
+            .map(|s| s.trim())
+            .collect();
+        assert_eq!(
+            cols,
+            vec![
+                "m.id",
+                "m.account_id",
+                "m.folder_id",
+                "m.thread_id",
+                "m.uid",
+                "m.message_id_header",
+                "m.in_reply_to",
+                "m.references_header",
+                "m.from_addr",
+                "m.to_addrs",
+                "m.cc_addrs",
+                "m.bcc_addrs",
+                "m.reply_to",
+                "m.subject",
+                "m.snippet",
+                "m.text_body",
+                "m.html_body",
+                "m.raw_size",
+                "m.flags",
+                "m.internal_date",
+                "m.sent_at",
+                "m.created_at",
             ]
         );
     }
