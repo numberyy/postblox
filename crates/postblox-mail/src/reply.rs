@@ -18,16 +18,27 @@ const REFERENCES_MESSAGE_ID_CAP: usize = 100;
 /// mail drafts.
 #[derive(Debug, Clone, Copy)]
 pub struct MessageView<'a> {
+    /// Stable identifier of the message being replied to or forwarded.
     pub id: Uuid,
+    /// Address that appears in the original `From` header.
     pub from_addr: &'a str,
+    /// Optional `Reply-To` override.
     pub reply_to: Option<&'a str>,
+    /// Original subject, used to derive the draft subject.
     pub subject: Option<&'a str>,
+    /// Original `Message-ID` header, used for `In-Reply-To`.
     pub message_id_header: Option<&'a str>,
+    /// Original `References` header, extended for the draft.
     pub references_header: Option<&'a str>,
+    /// Original `To` recipients, used for reply-all carry-over.
     pub to_addrs: &'a [String],
+    /// Original `Cc` recipients, used for reply-all carry-over.
     pub cc_addrs: &'a [String],
+    /// Plain-text body of the original, used to build the quoted block.
     pub text_body: Option<&'a str>,
+    /// HTML body of the original, used only to detect HTML-only content.
     pub html_body: Option<&'a str>,
+    /// Timestamp of the original, rendered into the quote attribution.
     pub internal_date: chrono::DateTime<chrono::Utc>,
 }
 
@@ -35,11 +46,17 @@ pub struct MessageView<'a> {
 /// replying.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyDraft {
+    /// Pre-filled recipients (the original sender, deduped).
     pub to: Vec<String>,
+    /// Pre-filled `Cc` list when reply-all was requested.
     pub cc: Vec<String>,
+    /// Subject line with a `Re: ` prefix added if absent.
     pub subject: String,
+    /// Value to emit as the `In-Reply-To` header.
     pub in_reply_to: String,
+    /// Value to emit as the `References` header.
     pub references: String,
+    /// `> `-prefixed quote of the original plus attribution line.
     pub quoted_body: String,
 }
 
@@ -50,18 +67,28 @@ pub struct ReplyDraft {
 /// `attachment.fetch_for_forward`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardDraft {
+    /// Recipients — always empty; the user must pick one.
     pub to: Vec<String>,
+    /// Subject line with a `Fwd: ` prefix added if absent.
     pub subject: String,
+    /// Forward block: divider, original headers, and original body.
     pub forwarded_body: String,
+    /// References to the attachments carried over from the original.
     pub forwarded_attachments: Vec<ForwardAttachmentRef>,
 }
 
+/// Reference to one attachment on the message being forwarded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardAttachmentRef {
+    /// Identifier of the source message.
     pub message_id: Uuid,
+    /// Identifier of the source attachment row.
     pub attachment_id: Uuid,
+    /// Original filename of the attachment.
     pub filename: String,
+    /// MIME type of the attachment as `type/subtype`.
     pub content_type: String,
+    /// Stored size of the attachment in bytes.
     pub size_bytes: i64,
 }
 

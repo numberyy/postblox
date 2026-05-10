@@ -26,6 +26,10 @@ fn sanitize_header(value: &str) -> String {
     value.replace(['\r', '\n'], "")
 }
 
+/// Render a simple text + optional HTML message and return its bytes.
+///
+/// Convenience wrapper over [`build_mime_full`] for the common no-
+/// attachments, no-threading case.
 pub fn build_mime(
     from: &str,
     to: &[String],
@@ -48,10 +52,16 @@ pub fn build_mime(
     })
 }
 
+/// Attachment to include in an outgoing MIME message.
 pub struct MimeAttachment {
+    /// Filename emitted in the `Content-Disposition` header.
     pub filename: String,
+    /// MIME type as `type/subtype` emitted in `Content-Type`.
     pub content_type: String,
+    /// Raw bytes of the attachment; the builder base64-encodes them.
     pub data: Vec<u8>,
+    /// Optional `Content-ID` value (without angle brackets) for inline
+    /// references such as `cid:logo@example.com`.
     pub content_id: Option<String>,
 }
 
@@ -60,7 +70,9 @@ pub struct MimeAttachment {
 /// path serves new-thread sends.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ReplyHeaders<'a> {
+    /// Value rendered into the `In-Reply-To` header.
     pub in_reply_to: Option<&'a str>,
+    /// Value rendered into the `References` header.
     pub references: Option<&'a str>,
 }
 
@@ -70,17 +82,31 @@ pub struct ReplyHeaders<'a> {
 /// once attachments and reply-threading headers are involved.
 #[derive(Clone, Copy)]
 pub struct MimeBuildOptions<'a> {
+    /// Address rendered into the `From` header.
     pub from: &'a str,
+    /// Addresses joined into the `To` header.
     pub to: &'a [String],
+    /// Addresses joined into the `Cc` header (omitted when empty).
     pub cc: &'a [String],
+    /// Subject line.
     pub subject: &'a str,
+    /// Optional plain-text body part.
     pub text_body: Option<&'a str>,
+    /// Optional HTML body part; combined with `text_body` as
+    /// `multipart/alternative` when both are present.
     pub html_body: Option<&'a str>,
+    /// Value emitted in the `Message-ID` header.
     pub message_id: &'a str,
+    /// Attachments to include as `multipart/mixed` parts.
     pub attachments: &'a [MimeAttachment],
+    /// RFC 5322 §3.6.4 threading headers, if the message is a reply.
     pub reply: ReplyHeaders<'a>,
 }
 
+/// Render a message with attachments using positional arguments.
+///
+/// Deprecated compatibility shim — new callers should use
+/// [`build_mime_full`] with [`MimeBuildOptions`].
 #[deprecated(note = "use build_mime_full(MimeBuildOptions { .. })")]
 #[allow(clippy::too_many_arguments)]
 pub fn build_mime_with_attachments(

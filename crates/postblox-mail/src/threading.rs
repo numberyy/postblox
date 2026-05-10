@@ -23,18 +23,30 @@ use uuid::Uuid;
 
 use crate::parser::ParsedEmail;
 
+/// Lightweight view of an existing thread used by [`assign_thread`].
 pub struct ThreadRef {
+    /// Identifier of the thread row.
     pub thread_id: Uuid,
+    /// Known `Message-ID` values for messages already in the thread.
     pub message_ids: Vec<String>,
+    /// Subject of the thread, used by the subject-match fallback.
     pub subject: String,
+    /// Timestamp of the most recent message in the thread.
     pub last_message_at: DateTime<Utc>,
 }
 
+/// Outcome of attempting to assign a parsed message to a thread.
 pub enum ThreadMatch {
+    /// Message belongs to the existing thread with the given ID.
     Existing(Uuid),
+    /// No match — caller should start a new thread.
     New,
 }
 
+/// Assign `message` to an existing [`ThreadRef`] or signal that a new
+/// thread should be created.
+///
+/// See the module-level docs for the priority rules used to match.
 pub fn assign_thread(message: &ParsedEmail, existing_threads: &[ThreadRef]) -> ThreadMatch {
     if let Some(ref reply_to) = message.in_reply_to {
         for thread in existing_threads {

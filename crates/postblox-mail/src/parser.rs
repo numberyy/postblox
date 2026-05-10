@@ -18,49 +18,76 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::MailError;
 
+/// How a MIME part is meant to appear to the reader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Disposition {
+    /// Rendered inside the message body (e.g. an embedded image).
     Inline,
+    /// Listed as a downloadable attachment.
     Attachment,
 }
 
+/// A single decoded attachment extracted from a parsed message.
 #[derive(Debug, Clone)]
 pub struct ParsedAttachment {
+    /// Filename advertised by the part, or a generated `attachment_N.<ext>`.
     pub filename: String,
+    /// MIME type as `type/subtype` (defaults to `application/octet-stream`).
     pub content_type: String,
+    /// Raw decoded bytes of the part.
     pub data: Vec<u8>,
+    /// Whether the part is inline or a true attachment.
     pub disposition: Disposition,
+    /// `Content-ID` value with surrounding angle brackets stripped, if present.
     pub content_id: Option<String>,
 }
 
+/// Parsed representation of a single RFC 5322 / MIME message.
 #[derive(Debug, Clone)]
 pub struct ParsedEmail {
+    /// `Message-ID` header value with angle brackets stripped.
     pub message_id: Option<String>,
+    /// First entry of the `In-Reply-To` header with angle brackets stripped.
     pub in_reply_to: Option<String>,
+    /// `References` header values with angle brackets stripped, in order.
     pub references: Vec<String>,
+    /// Address that appears in the `From` header.
     pub from: String,
+    /// Addresses parsed out of the `To` header.
     pub to: Vec<String>,
+    /// Addresses parsed out of the `Cc` header.
     pub cc: Vec<String>,
+    /// Decoded `Subject` header.
     pub subject: Option<String>,
+    /// First non-empty `text/plain` body part, if any.
     pub text_body: Option<String>,
+    /// First non-empty `text/html` body part, if any.
     pub html_body: Option<String>,
+    /// All headers as a JSON object, or [`serde_json::Value::Null`] when
+    /// [`ParseOptions::include_raw_headers`] is `false`.
     pub raw_headers: serde_json::Value,
+    /// Decoded attachments, both inline and traditional.
     pub attachments: Vec<ParsedAttachment>,
 }
 
+/// Tunables that control what [`parse_with_options`] keeps from the
+/// raw message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseOptions {
+    /// Whether to populate [`ParsedEmail::raw_headers`] with every header.
     pub include_raw_headers: bool,
 }
 
 impl ParseOptions {
+    /// Options that include the full `raw_headers` JSON map.
     pub const fn with_raw_headers() -> Self {
         Self {
             include_raw_headers: true,
         }
     }
 
+    /// Options that skip the `raw_headers` JSON map for hot paths.
     pub const fn without_raw_headers() -> Self {
         Self {
             include_raw_headers: false,
