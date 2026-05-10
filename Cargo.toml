@@ -22,6 +22,25 @@ include = [
     "CHANGELOG.md",
 ]
 
+[workspace]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/numbery/postblox"
+homepage = "https://github.com/numbery/postblox"
+documentation = "https://docs.rs/postblox"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+mail-parser = "0.9"
+thiserror = "2"
+
 [[bin]]
 name = "postblox"
 path = "src/main.rs"
@@ -39,12 +58,12 @@ name = "postblox-bench"
 path = "src/bin/postblox-bench.rs"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-mail-parser = "0.9"
-thiserror = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+mail-parser = { workspace = true }
+thiserror = { workspace = true }
 anyhow = "1"
 base64 = "0.22"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
