@@ -31,6 +31,8 @@
 //!   socket.
 //! - [`oauth`] — Google OAuth2 auth-URL / code-exchange / refresh and
 //!   XOAUTH2 helpers.
+//! - [`prelude`] — small re-export module of the most-used IDs, error
+//!   types, and IPC surface (`use postblox::prelude::*;`).
 //! - [`secrets`] — `SecretStore` trait with OS-keyring (default) and
 //!   AES-GCM file backends.
 //! - [`imap`] / [`smtp`] — IMAP client and SMTP submission.
@@ -59,6 +61,7 @@ pub use postblox_mail as mail;
 pub mod mcp;
 pub mod models;
 pub mod oauth;
+pub mod prelude;
 pub mod secrets;
 pub mod smtp;
 pub mod sync;
