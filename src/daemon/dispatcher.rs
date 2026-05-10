@@ -525,9 +525,16 @@ async fn op_search(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
     if q.trim().is_empty() {
         return Err(RpcError::bad_args("'q' must not be empty"));
     }
-    let account_id = match args.get("account_id") {
-        Some(Value::Null) | None => None,
-        Some(_) => Some(parse_uuid(&args, "account_id")?),
+    let filters = db::search::SearchFilters {
+        account_id: optional_uuid(&args, "account_id")?,
+        folder_id: optional_uuid(&args, "folder_id")?,
+        thread_id: optional_uuid(&args, "thread_id")?,
+        date_from: optional_rfc3339(&args, "date_from")?,
+        date_to: optional_rfc3339(&args, "date_to")?,
+        from_addr: optional_nonempty_string(&args, "from_addr")?,
+        to_addr: optional_nonempty_string(&args, "to_addr")?,
+        has_attachments: optional_bool(&args, "has_attachments")?,
+        unread: optional_bool(&args, "unread")?,
     };
     // Soft cap so a TUI search can't accidentally pull thousands of rows
     // over the IPC socket.
@@ -538,7 +545,7 @@ async fn op_search(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
         .clamp(1, 200);
     let offset = args.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
     encode(
-        db::search::search_scoped(pool, &db::search::quote_term(q), account_id, limit, offset)
+        db::search::search_filtered(pool, &db::search::quote_term(q), &filters, limit, offset)
             .await,
         "search",
     )
@@ -2074,6 +2081,43 @@ fn optional_str<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, RpcEr
         Some(Value::String(s)) => Ok(Some(s.as_str())),
         Some(_) => Err(RpcError::bad_args(format!("'{key}' must be a string"))),
     }
+}
+
+fn optional_uuid(args: &Value, key: &str) -> Result<Option<uuid::Uuid>, RpcError> {
+    match args.get(key) {
+        Some(Value::Null) | None => Ok(None),
+        Some(_) => Ok(Some(parse_uuid(args, key)?)),
+    }
+}
+
+fn optional_bool(args: &Value, key: &str) -> Result<Option<bool>, RpcError> {
+    match args.get(key) {
+        Some(Value::Null) | None => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(RpcError::bad_args(format!("'{key}' must be a boolean"))),
+    }
+}
+
+fn optional_rfc3339(
+    args: &Value,
+    key: &str,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, RpcError> {
+    let Some(s) = optional_str(args, key)? else {
+        return Ok(None);
+    };
+    let parsed = chrono::DateTime::parse_from_rfc3339(s)
+        .map_err(|e| RpcError::bad_args(format!("'{key}' must be rfc3339: {e}")))?;
+    Ok(Some(parsed.with_timezone(&chrono::Utc)))
+}
+
+fn optional_nonempty_string(args: &Value, key: &str) -> Result<Option<String>, RpcError> {
+    let Some(s) = optional_str(args, key)? else {
+        return Ok(None);
+    };
+    if s.is_empty() {
+        return Err(RpcError::bad_args(format!("'{key}' must not be empty")));
+    }
+    Ok(Some(s.to_string()))
 }
 
 fn actor_from_args(args: &Value) -> String {

@@ -4,11 +4,16 @@
 //! can pass user-typed strings without worrying about FTS reserved
 //! tokens.
 
-use sqlx::SqlitePool;
+use chrono::{DateTime, Utc};
+use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 use uuid::Uuid;
 
 use crate::db::DbError;
 use crate::models::Message;
+
+/// `\Seen` marks a message as read; absence means unread. Stored as a
+/// JSON-array entry in `messages.flags`.
+const SEEN_FLAG: &str = "\\Seen";
 
 /// Quote a user-supplied search term so FTS5 treats it as a phrase and
 /// won't choke on punctuation like `@`, `:`, or `-`.
@@ -97,6 +102,126 @@ pub async fn search_scoped(
             .fetch_all(pool)
             .await?),
     }
+}
+
+/// Optional filters layered on top of the FTS5 MATCH. Every field
+/// defaults to `None` (no filter); construct with `..Default::default()`
+/// to keep call sites brief.
+#[derive(Default, Debug, Clone)]
+pub struct SearchFilters {
+    pub account_id: Option<Uuid>,
+    pub folder_id: Option<Uuid>,
+    pub thread_id: Option<Uuid>,
+    pub date_from: Option<DateTime<Utc>>,
+    pub date_to: Option<DateTime<Utc>>,
+    /// Substring match against `messages.from_addr` (case-insensitive
+    /// via SQLite default `LIKE` semantics).
+    pub from_addr: Option<String>,
+    /// Substring match against `messages.to_addrs` JSON text.
+    pub to_addr: Option<String>,
+    /// `Some(true)` → only messages with at least one attachment;
+    /// `Some(false)` → only messages with no attachments.
+    pub has_attachments: Option<bool>,
+    /// `Some(true)` → only unread (no `\Seen` flag); `Some(false)` →
+    /// only read (has `\Seen`).
+    pub unread: Option<bool>,
+}
+
+/// Run a filtered FTS search. With an empty `SearchFilters` this is
+/// equivalent to [`search`].
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the query or row decode fails.
+pub async fn search_filtered(
+    pool: &SqlitePool,
+    fts_query: &str,
+    filters: &SearchFilters,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Message>, DbError> {
+    let limit = limit.clamp(1, 500);
+    let offset = offset.max(0);
+
+    let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT ");
+    qb.push(search_cols!());
+    qb.push(
+        " FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
+         WHERE messages_fts MATCH ",
+    );
+    qb.push_bind(fts_query.to_string());
+
+    if let Some(account_id) = filters.account_id {
+        qb.push(" AND m.account_id = ");
+        qb.push_bind(account_id);
+    }
+    if let Some(folder_id) = filters.folder_id {
+        qb.push(" AND m.folder_id = ");
+        qb.push_bind(folder_id);
+    }
+    if let Some(thread_id) = filters.thread_id {
+        qb.push(" AND m.thread_id = ");
+        qb.push_bind(thread_id);
+    }
+    if let Some(date_from) = filters.date_from {
+        qb.push(" AND m.internal_date >= ");
+        qb.push_bind(date_from);
+    }
+    if let Some(date_to) = filters.date_to {
+        qb.push(" AND m.internal_date <= ");
+        qb.push_bind(date_to);
+    }
+    if let Some(from_addr) = filters.from_addr.as_deref() {
+        qb.push(" AND m.from_addr LIKE ");
+        qb.push_bind(like_pattern(from_addr));
+        qb.push(" ESCAPE '\\'");
+    }
+    if let Some(to_addr) = filters.to_addr.as_deref() {
+        qb.push(" AND m.to_addrs LIKE ");
+        qb.push_bind(like_pattern(to_addr));
+        qb.push(" ESCAPE '\\'");
+    }
+    if let Some(has_attachments) = filters.has_attachments {
+        if has_attachments {
+            qb.push(" AND EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)");
+        } else {
+            qb.push(" AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id)");
+        }
+    }
+    if let Some(unread) = filters.unread {
+        // `messages.flags` is a JSON array of IMAP flag strings. A
+        // message is "seen" iff `\Seen` appears in that array.
+        if unread {
+            qb.push(" AND NOT EXISTS (SELECT 1 FROM json_each(m.flags) WHERE json_each.value = ");
+        } else {
+            qb.push(" AND EXISTS (SELECT 1 FROM json_each(m.flags) WHERE json_each.value = ");
+        }
+        qb.push_bind(SEEN_FLAG);
+        qb.push(")");
+    }
+
+    qb.push(" ORDER BY rank LIMIT ");
+    qb.push_bind(limit);
+    qb.push(" OFFSET ");
+    qb.push_bind(offset);
+
+    Ok(qb.build_query_as::<Message>().fetch_all(pool).await?)
+}
+
+/// Wrap a user-supplied substring as a SQL `LIKE` pattern, escaping the
+/// literal wildcards `%` and `_` (and the escape char `\` itself) so
+/// callers can't sneak them through via the API.
+fn like_pattern(needle: &str) -> String {
+    let mut out = String::with_capacity(needle.len() + 2);
+    out.push('%');
+    for ch in needle.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('%');
+    out
 }
 
 #[cfg(test)]
@@ -401,5 +526,277 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
+    }
+
+    // ---- search_filtered ---------------------------------------------------
+
+    #[tokio::test]
+    async fn test_search_filtered_with_no_filters_matches_search_scoped() {
+        // Backward-compat regression: empty filters must produce the same
+        // hits as the legacy `search_scoped(account_id=Some(_))` path.
+        let (pool, a, f) = seed().await;
+        crate::db::messages::create(&pool, &msg(a, f, 1, "regress", "alpha", "x@x.com"))
+            .await
+            .unwrap();
+        crate::db::messages::create(&pool, &msg(a, f, 2, "regress", "beta", "y@x.com"))
+            .await
+            .unwrap();
+        let scoped = search_scoped(&pool, &quote_term("regress"), Some(a), 50, 0)
+            .await
+            .unwrap();
+        let filters = SearchFilters {
+            account_id: Some(a),
+            ..Default::default()
+        };
+        let filtered = search_filtered(&pool, &quote_term("regress"), &filters, 50, 0)
+            .await
+            .unwrap();
+        let scoped_ids: Vec<_> = scoped.iter().map(|m| m.id).collect();
+        let filtered_ids: Vec<_> = filtered.iter().map(|m| m.id).collect();
+        assert_eq!(scoped_ids, filtered_ids);
+    }
+
+    #[tokio::test]
+    async fn test_search_filtered_by_folder_id_returns_only_that_folder() {
+        let (pool, a, f) = seed().await;
+        let other_folder = crate::db::folders::create(
+            &pool,
+            &crate::db::folders::NewFolder {
+                account_id: a,
+                name: "Archive".into(),
+                delimiter: "/".into(),
+                role: crate::models::FolderRole::Archive,
+                selectable: true,
+            },
+        )
+        .await
+        .unwrap();
+        crate::db::messages::create(&pool, &msg(a, f, 1, "shared", "in inbox", "x@x.com"))
+            .await
+            .unwrap();
+        crate::db::messages::create(
+            &pool,
+            &msg(a, other_folder.id, 1, "shared", "in archive", "y@x.com"),
+        )
+        .await
+        .unwrap();
+
+        let filters = SearchFilters {
+            folder_id: Some(other_folder.id),
+            ..Default::default()
+        };
+        let hits = search_filtered(&pool, &quote_term("shared"), &filters, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].folder_id, other_folder.id);
+    }
+
+    #[tokio::test]
+    async fn test_search_filtered_by_thread_id_returns_only_that_thread() {
+        let (pool, a, f) = seed().await;
+        let thread_a = crate::db::threads::create(&pool, a, None, None)
+            .await
+            .unwrap();
+        let thread_b = crate::db::threads::create(&pool, a, None, None)
+            .await
+            .unwrap();
+        let mut m_a = msg(a, f, 1, "needle", "in A", "x@x.com");
+        m_a.thread_id = Some(thread_a.id);
+        let mut m_b = msg(a, f, 2, "needle", "in B", "y@x.com");
+        m_b.thread_id = Some(thread_b.id);
+        crate::db::messages::create(&pool, &m_a).await.unwrap();
+        crate::db::messages::create(&pool, &m_b).await.unwrap();
+
+        let filters = SearchFilters {
+            thread_id: Some(thread_a.id),
+            ..Default::default()
+        };
+        let hits = search_filtered(&pool, &quote_term("needle"), &filters, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].thread_id, Some(thread_a.id));
+    }
+
+    #[tokio::test]
+    async fn test_search_filtered_by_date_range_returns_only_messages_in_range() {
+        let (pool, a, f) = seed().await;
+        let now = Utc::now();
+        let mut old = msg(a, f, 1, "report", "old", "x@x.com");
+        old.internal_date = now - chrono::Duration::days(10);
+        let mut mid = msg(a, f, 2, "report", "mid", "y@x.com");
+        mid.internal_date = now - chrono::Duration::days(5);
+        let mut fresh = msg(a, f, 3, "report", "fresh", "z@x.com");
+        fresh.internal_date = now;
+        crate::db::messages::create(&pool, &old).await.unwrap();
+        crate::db::messages::create(&pool, &mid).await.unwrap();
+        crate::db::messages::create(&pool, &fresh).await.unwrap();
+
+        let filters = SearchFilters {
+            date_from: Some(now - chrono::Duration::days(7)),
+            date_to: Some(now - chrono::Duration::days(1)),
+            ..Default::default()
+        };
+        let hits = search_filtered(&pool, &quote_term("report"), &filters, 50, 0)
+            .await
+            .unwrap();
+        let uids: Vec<_> = hits.iter().map(|m| m.uid).collect();
+        assert_eq!(uids, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn test_search_filtered_by_from_addr_substring_returns_matching_senders() {
+        let (pool, a, f) = seed().await;
+        crate::db::messages::create(&pool, &msg(a, f, 1, "ping", "body", "alice@acme.com"))
+            .await
+            .unwrap();
+        crate::db::messages::create(&pool, &msg(a, f, 2, "ping", "body", "bob@other.com"))
+            .await
+            .unwrap();
+        crate::db::messages::create(&pool, &msg(a, f, 3, "ping", "body", "carol@acme.com"))
+            .await
+            .unwrap();
+
+        let filters = SearchFilters {
+            from_addr: Some("acme".into()),
+            ..Default::default()
+        };
+        let hits = search_filtered(&pool, &quote_term("ping"), &filters, 50, 0)
+            .await
+            .unwrap();
+        let mut uids: Vec<_> = hits.iter().map(|m| m.uid).collect();
+        uids.sort();
+        assert_eq!(uids, vec![1, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_search_filtered_by_from_addr_escapes_like_wildcards() {
+        // A user-supplied `%` must NOT act as a wildcard.
+        let (pool, a, f) = seed().await;
+        crate::db::messages::create(&pool, &msg(a, f, 1, "ping", "body", "alice@acme.com"))
+            .await
+            .unwrap();
+        let filters = SearchFilters {
+            from_addr: Some("%acme%".into()),
+            ..Default::default()
+        };
+        let hits = search_filtered(&pool, &quote_term("ping"), &filters, 50, 0)
+            .await
+            .unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_filtered_by_unread_returns_only_unread() {
+        let (pool, a, f) = seed().await;
+        let read =
+            crate::db::messages::create(&pool, &msg(a, f, 1, "tag", "already read", "x@x.com"))
+                .await
+                .unwrap();
+        crate::db::messages::set_flags(&pool, read.id, &json!(["\\Seen"]))
+            .await
+            .unwrap();
+        let _unread = crate::db::messages::create(&pool, &msg(a, f, 2, "tag", "fresh", "y@x.com"))
+            .await
+            .unwrap();
+
+        let filters = SearchFilters {
+            unread: Some(true),
+            ..Default::default()
+        };
+        let hits = search_filtered(&pool, &quote_term("tag"), &filters, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].uid, 2);
+
+        let filters = SearchFilters {
+            unread: Some(false),
+            ..Default::default()
+        };
+        let hits = search_filtered(&pool, &quote_term("tag"), &filters, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].uid, 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_filtered_by_has_attachments_true_returns_only_with_attachments() {
+        let (pool, a, f) = seed().await;
+        let with = crate::db::messages::create(
+            &pool,
+            &msg(a, f, 1, "report", "with attachment", "x@x.com"),
+        )
+        .await
+        .unwrap();
+        let _without =
+            crate::db::messages::create(&pool, &msg(a, f, 2, "report", "no attachment", "y@x.com"))
+                .await
+                .unwrap();
+        crate::db::attachments::create(
+            &pool,
+            &crate::db::attachments::NewAttachment {
+                message_id: with.id,
+                filename: "doc.pdf".into(),
+                content_type: "application/pdf".into(),
+                content_id: None,
+                size_bytes: 42,
+                disposition: crate::models::AttachmentDisposition::Attachment,
+                storage_path: "/tmp/doc.pdf".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let filters = SearchFilters {
+            has_attachments: Some(true),
+            ..Default::default()
+        };
+        let hits = search_filtered(&pool, &quote_term("report"), &filters, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].uid, 1);
+
+        let filters = SearchFilters {
+            has_attachments: Some(false),
+            ..Default::default()
+        };
+        let hits = search_filtered(&pool, &quote_term("report"), &filters, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].uid, 2);
+    }
+
+    #[tokio::test]
+    async fn test_search_filtered_by_to_addr_substring_returns_matching_recipients() {
+        let (pool, a, f) = seed().await;
+        let mut to_acme = msg(a, f, 1, "memo", "body", "x@x.com");
+        to_acme.to_addrs = json!(["bob@acme.com"]);
+        let mut to_other = msg(a, f, 2, "memo", "body", "x@x.com");
+        to_other.to_addrs = json!(["bob@other.com"]);
+        crate::db::messages::create(&pool, &to_acme).await.unwrap();
+        crate::db::messages::create(&pool, &to_other).await.unwrap();
+
+        let filters = SearchFilters {
+            to_addr: Some("acme".into()),
+            ..Default::default()
+        };
+        let hits = search_filtered(&pool, &quote_term("memo"), &filters, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].uid, 1);
+    }
+
+    #[test]
+    fn test_like_pattern_escapes_special_chars() {
+        assert_eq!(like_pattern("plain"), "%plain%");
+        assert_eq!(like_pattern("50%"), "%50\\%%");
+        assert_eq!(like_pattern("a_b"), "%a\\_b%");
+        assert_eq!(like_pattern("c\\d"), "%c\\\\d%");
     }
 }

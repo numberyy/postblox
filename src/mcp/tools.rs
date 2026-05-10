@@ -15,7 +15,9 @@ enum FieldKind {
     NullableString,
     UuidString,
     NullableUuidString,
+    NullableRfc3339,
     StringArray,
+    Boolean,
     Integer { minimum: i64, maximum: i64 },
 }
 
@@ -65,7 +67,7 @@ pub const TOOLS: [ToolSpec; 12] = [
     ToolSpec {
         name: "postblox_search",
         op: "search",
-        description: "Search local indexed email.",
+        description: "Search local indexed email with optional account/folder/thread/date/sender/flag filters.",
         dangerous: false,
         required: &["q"],
     },
@@ -161,6 +163,18 @@ fn field_kind(tool: &ToolSpec, field: &str) -> Option<FieldKind> {
         | ("postblox_message_send", "draft_id") => Some(FieldKind::UuidString),
         ("postblox_draft_create", "in_reply_to_msg") => Some(FieldKind::NullableUuidString),
         ("postblox_search", "q") => Some(FieldKind::String),
+        ("postblox_search", "account_id")
+        | ("postblox_search", "folder_id")
+        | ("postblox_search", "thread_id") => Some(FieldKind::NullableUuidString),
+        ("postblox_search", "date_from") | ("postblox_search", "date_to") => {
+            Some(FieldKind::NullableRfc3339)
+        }
+        ("postblox_search", "from_addr") | ("postblox_search", "to_addr") => {
+            Some(FieldKind::NullableString)
+        }
+        ("postblox_search", "has_attachments") | ("postblox_search", "unread") => {
+            Some(FieldKind::Boolean)
+        }
         ("postblox_draft_create", "to_addrs")
         | ("postblox_draft_create", "cc_addrs")
         | ("postblox_draft_create", "bcc_addrs")
@@ -206,6 +220,17 @@ fn validate_field(field: &str, value: &Value, kind: FieldKind) -> Result<(), Str
                 Err(format!("{field} must be a string or null"))
             }
         }
+        FieldKind::NullableRfc3339 => {
+            if value.is_null() {
+                return Ok(());
+            }
+            let s = value
+                .as_str()
+                .ok_or_else(|| format!("{field} must be an rfc3339 string or null"))?;
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|_| ())
+                .map_err(|_| format!("{field} must be an rfc3339 string or null"))
+        }
         FieldKind::StringArray => {
             let values = value
                 .as_array()
@@ -214,6 +239,13 @@ fn validate_field(field: &str, value: &Value, kind: FieldKind) -> Result<(), Str
                 Ok(())
             } else {
                 Err(format!("{field} must be an array of strings"))
+            }
+        }
+        FieldKind::Boolean => {
+            if value.is_boolean() {
+                Ok(())
+            } else {
+                Err(format!("{field} must be a boolean"))
             }
         }
         FieldKind::Integer { minimum, maximum } => {
@@ -255,6 +287,15 @@ fn input_schema(tool: &ToolSpec) -> Value {
         "postblox_message_get" => fields(&[uuid("id", "Message id.")]),
         "postblox_search" => fields(&[
             string("q", "Search query."),
+            nullable_uuid("account_id", "Restrict to one account."),
+            nullable_uuid("folder_id", "Restrict to one folder."),
+            nullable_uuid("thread_id", "Restrict to one thread."),
+            nullable_rfc3339("date_from", "Earliest internal date (inclusive)."),
+            nullable_rfc3339("date_to", "Latest internal date (inclusive)."),
+            nullable_string("from_addr", "Substring match against the sender."),
+            nullable_string("to_addr", "Substring match against the recipients."),
+            boolean("has_attachments", "Filter by presence of attachments."),
+            boolean("unread", "Filter by read state (true = unread)."),
             integer("limit", 1, 500, "Maximum rows to return."),
             integer("offset", 0, i64::MAX, "Rows to skip."),
         ]),
@@ -329,6 +370,20 @@ fn nullable_uuid(name: &'static str, description: &'static str) -> (&'static str
     (
         name,
         json!({ "type": ["string", "null"], "format": "uuid", "description": description }),
+    )
+}
+
+fn nullable_rfc3339(name: &'static str, description: &'static str) -> (&'static str, Value) {
+    (
+        name,
+        json!({ "type": ["string", "null"], "format": "date-time", "description": description }),
+    )
+}
+
+fn boolean(name: &'static str, description: &'static str) -> (&'static str, Value) {
+    (
+        name,
+        json!({ "type": "boolean", "description": description }),
     )
 }
 
