@@ -35,10 +35,16 @@ pub struct DaemonServices {
 }
 
 impl DaemonServices {
+    /// Bundle a custom SMTP submitter and Google OAuth implementation
+    /// for the dispatcher to share with the worker manager and the
+    /// `oauth.google.*` ops.
     pub fn new(smtp: Arc<dyn SmtpSubmitter>, oauth: Arc<dyn GoogleOAuth>) -> Self {
         Self { smtp, oauth }
     }
 
+    /// Bundle a custom SMTP submitter with the default
+    /// [`GoogleOAuthHttpClient`] OAuth backend (a `OnceLock`-cached
+    /// `reqwest::Client` for token refresh).
     pub fn with_smtp(smtp: Arc<dyn SmtpSubmitter>) -> Self {
         Self::new(smtp, Arc::new(GoogleOAuthHttpClient::new()))
     }
@@ -86,6 +92,8 @@ fn daemon_credential_resolver(
     })
 }
 
+/// Build a [`sync::WorkerManager`] wired with the daemon's credential
+/// resolver, optionally including an IDLE backend.
 pub fn worker_manager_with_idle_config(
     pool: &SqlitePool,
     hub: &Arc<Hub>,
@@ -137,6 +145,12 @@ pub enum DispatcherInitError {
 
 impl DaemonDispatcher {
     /// Production constructor: TLS-backed IMAP via rustls.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DispatcherInitError::Imap`] if the platform rustls
+    /// verifier fails to construct any of the default IMAP transports
+    /// (auth, sync, or idle) — usually a broken system trust store.
     pub fn new(
         pool: SqlitePool,
         read_pool: SqlitePool,

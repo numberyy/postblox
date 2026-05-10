@@ -2792,6 +2792,20 @@ impl AppState {
     /// attachment. Returns `Ok(filename)` on success; `Err(AttachError)`
     /// otherwise. On success the input is cleared and we return to
     /// `Compose` mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`AttachError::Io`] with an empty path if there is no active
+    ///   composer.
+    /// - [`AttachError::NotFound`] if the input is empty or the path
+    ///   does not exist.
+    /// - [`AttachError::NotAFile`] if the path is not a regular file.
+    /// - [`AttachError::TooLarge`] if the single attachment exceeds the
+    ///   per-file limit.
+    /// - [`AttachError::AggregateTooLarge`] if the cumulative size
+    ///   would exceed the composer's aggregate cap.
+    /// - [`AttachError::Io`] for any other IO failure on stat.
     pub async fn confirm_compose_attach(&mut self) -> Result<String, AttachError> {
         let Some(composer) = &mut self.composer else {
             return Err(AttachError::Io {
@@ -3149,6 +3163,17 @@ pub fn human_size(bytes: u64) -> String {
 
 /// Probe a candidate attachment path: returns metadata + content-type
 /// or a structured error suitable for toast surfacing.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`AttachError::NotFound`] if the path does not exist.
+/// - [`AttachError::NotAFile`] if the path is not a regular file
+///   (e.g. directory, symlink to a directory).
+/// - [`AttachError::TooLarge`] if the file exceeds the per-attachment
+///   size cap.
+/// - [`AttachError::Io`] for any other `tokio::fs::metadata` failure
+///   (permissions, IO error).
 pub async fn probe_attachment(path: &Path) -> Result<ComposerAttachment, AttachError> {
     let metadata = tokio::fs::metadata(path)
         .await

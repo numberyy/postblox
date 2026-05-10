@@ -79,6 +79,12 @@ pub struct ForwardAttachmentBytes {
 }
 
 impl ForwardAttachmentBytes {
+    /// Decode `content_base64` into raw attachment bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`base64::DecodeError`] if the daemon-supplied base64
+    /// payload is malformed.
     pub fn decoded_bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.decode(&self.content_base64)
@@ -124,6 +130,12 @@ pub struct DraftAttachmentPayload {
 }
 
 impl DraftAttachmentPayload {
+    /// Decode `content_base64` into raw attachment bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`base64::DecodeError`] if the daemon-supplied base64
+    /// payload is malformed.
     pub fn decoded_bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.decode(&self.content_base64)
@@ -159,6 +171,13 @@ pub struct MailboxClient {
 }
 
 impl MailboxClient {
+    /// Connect to the daemon Unix socket at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailboxError::Connect`] if the underlying socket
+    /// connection or handshake fails (missing socket, permission
+    /// denied, daemon not running, codec mismatch).
     pub async fn connect(path: &Path) -> Result<Self, MailboxError> {
         Client::connect(path)
             .await
@@ -166,12 +185,30 @@ impl MailboxClient {
             .map_err(MailboxError::Connect)
     }
 
+    /// Fetch the configured accounts in display order.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as `Vec<Account>`.
     pub async fn list_accounts(&mut self) -> Result<Vec<AccountItem>, MailboxError> {
         let response = self.request("account.list", json!({})).await?;
         let accounts: Vec<Account> = decode_response("account.list", response)?;
         Ok(accounts.into_iter().map(AccountItem::from).collect())
     }
 
+    /// List folders for `account_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as `Vec<Folder>`.
     pub async fn list_folders(
         &mut self,
         account_id: AccountId,
@@ -183,6 +220,16 @@ impl MailboxClient {
         Ok(folders.into_iter().map(FolderItem::from).collect())
     }
 
+    /// List the first 100 messages in `folder_id` ordered by the
+    /// daemon's default sort.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as `Vec<MessageSummary>`.
     pub async fn list_messages(
         &mut self,
         folder_id: FolderId,
@@ -197,6 +244,15 @@ impl MailboxClient {
         Ok(messages.into_iter().map(MessageItem::from).collect())
     }
 
+    /// Fetch a single message by id; `Ok(None)` if not present.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as `Option<Message>`.
     pub async fn get_message(
         &mut self,
         message_id: MessageId,
@@ -208,6 +264,16 @@ impl MailboxClient {
         Ok(message.map(MessageDetail::from))
     }
 
+    /// One-shot sync of `folder_name` against the upstream IMAP server.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`
+    ///   (e.g. unknown account, IMAP failure).
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded.
     pub async fn sync_folder(
         &mut self,
         account_id: AccountId,
@@ -222,6 +288,16 @@ impl MailboxClient {
         decode_response("account.sync_folder", response)
     }
 
+    /// Start the IMAP IDLE worker for `folder_name` on `account_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`
+    ///   (e.g. unknown account, worker spawn failure).
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded.
     pub async fn start_sync(
         &mut self,
         account_id: AccountId,
@@ -236,6 +312,15 @@ impl MailboxClient {
         decode_response("account.start_sync", response)
     }
 
+    /// Stop the IMAP IDLE worker for `folder_name` on `account_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded.
     pub async fn stop_sync(
         &mut self,
         account_id: AccountId,
@@ -250,6 +335,15 @@ impl MailboxClient {
         decode_response("account.stop_sync", response)
     }
 
+    /// Replace the IMAP flag set on `message_id` with `flags`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded.
     pub async fn set_flags(
         &mut self,
         message_id: MessageId,
@@ -262,6 +356,15 @@ impl MailboxClient {
         Ok(())
     }
 
+    /// Move `message_id` into the account's Archive folder.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded.
     pub async fn archive_message(&mut self, message_id: MessageId) -> Result<(), MailboxError> {
         let response = self
             .request("message.archive", json!({ "id": message_id }))
@@ -270,6 +373,15 @@ impl MailboxClient {
         Ok(())
     }
 
+    /// Move `message_id` into the account's Trash folder.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded.
     pub async fn delete_message(&mut self, message_id: MessageId) -> Result<(), MailboxError> {
         let response = self
             .request("message.delete", json!({ "id": message_id }))
@@ -278,6 +390,17 @@ impl MailboxClient {
         Ok(())
     }
 
+    /// Move `message_id` into `folder_name` (resolved by name on the
+    /// daemon side).
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`
+    ///   (e.g. unknown folder name).
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded.
     pub async fn move_message(
         &mut self,
         message_id: MessageId,
@@ -293,6 +416,15 @@ impl MailboxClient {
         Ok(())
     }
 
+    /// List attachments for `message_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as `Vec<Attachment>`.
     pub async fn list_attachments(
         &mut self,
         message_id: MessageId,
@@ -304,6 +436,16 @@ impl MailboxClient {
         Ok(attachments.into_iter().map(AttachmentItem::from).collect())
     }
 
+    /// Fetch a preview blob for `attachment_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`
+    ///   (e.g. attachment too large to preview).
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as [`crate::attachments::AttachmentPreview`].
     pub async fn preview_attachment(
         &mut self,
         attachment_id: AttachmentId,
@@ -316,6 +458,16 @@ impl MailboxClient {
         Ok(AttachmentPreviewItem::from(preview))
     }
 
+    /// Persist `attachment_id` to `destination_path` on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`
+    ///   (e.g. unknown attachment, IO failure on the daemon side).
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as [`AttachmentExportResult`].
     pub async fn export_attachment(
         &mut self,
         attachment_id: AttachmentId,
@@ -330,6 +482,15 @@ impl MailboxClient {
         decode_response("attachment.export", response)
     }
 
+    /// Persist a new draft and return its assigned id.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as [`Draft`].
     pub async fn create_draft(&mut self, draft: &ComposerDraft) -> Result<DraftId, MailboxError> {
         let response = self
             .request("draft.create", draft_create_args(draft))
@@ -338,6 +499,17 @@ impl MailboxClient {
         Ok(draft.id)
     }
 
+    /// Replace draft `draft_id` with the contents of `draft`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`,
+    ///   or the draft was deleted between read and update (synthesised
+    ///   `not_found`).
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as `Option<Draft>`.
     pub async fn update_draft(
         &mut self,
         draft_id: DraftId,
@@ -356,6 +528,17 @@ impl MailboxClient {
             })
     }
 
+    /// Submit `draft_id` via SMTP for `account_id` and return the
+    /// resulting RFC 5322 `Message-Id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`
+    ///   (SMTP submission failed, draft missing, etc.).
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded.
     pub async fn send_draft(
         &mut self,
         account_id: AccountId,
@@ -368,6 +551,15 @@ impl MailboxClient {
         Ok(sent.message_id)
     }
 
+    /// List all drafts for `account_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as `Vec<Draft>`.
     pub async fn list_drafts(
         &mut self,
         account_id: AccountId,
@@ -379,6 +571,16 @@ impl MailboxClient {
         Ok(drafts.into_iter().map(DraftItem::from).collect())
     }
 
+    /// Fetch a single draft (with attachment payloads) by id;
+    /// `Ok(None)` if not present.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as `Option<DraftGetResult>`.
     pub async fn get_draft(
         &mut self,
         draft_id: DraftId,
@@ -388,6 +590,15 @@ impl MailboxClient {
         Ok(payload.map(DraftSummary::from))
     }
 
+    /// Permanently delete `draft_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded.
     pub async fn delete_draft(&mut self, draft_id: DraftId) -> Result<(), MailboxError> {
         let response = self
             .request("draft.delete", json!({ "id": draft_id }))
@@ -396,6 +607,16 @@ impl MailboxClient {
         Ok(())
     }
 
+    /// Run a FTS5 search across messages, optionally scoped to a
+    /// single account.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as `Vec<MessageSummary>`.
     pub async fn search(
         &mut self,
         query: &str,
@@ -408,6 +629,18 @@ impl MailboxClient {
         Ok(hits.into_iter().map(SearchHit::from).collect())
     }
 
+    /// Build a reply skeleton (subject, recipients, headers, quoted
+    /// body) for `message_id`. `reply_all` controls whether the
+    /// original `Cc` recipients are included.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`
+    ///   (e.g. unknown message).
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as [`ReplyPrepared`].
     pub async fn prepare_reply(
         &mut self,
         message_id: MessageId,
@@ -422,6 +655,17 @@ impl MailboxClient {
         decode_response("message.prepare_reply", response)
     }
 
+    /// Build a forward skeleton (subject, body, attachment metadata)
+    /// for `message_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`
+    ///   (e.g. unknown message).
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as [`ForwardPrepared`].
     pub async fn prepare_forward(
         &mut self,
         message_id: MessageId,
@@ -435,6 +679,17 @@ impl MailboxClient {
         decode_response("message.prepare_forward", response)
     }
 
+    /// Fetch the raw bytes (base64) for a single attachment when
+    /// preparing a forward.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`
+    ///   (e.g. unknown attachment, disk IO failure).
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as [`ForwardAttachmentBytes`].
     pub async fn fetch_attachment_for_forward(
         &mut self,
         attachment_id: AttachmentId,
@@ -448,6 +703,16 @@ impl MailboxClient {
         decode_response("attachment.fetch_for_forward", response)
     }
 
+    /// Fetch raw bytes for a batch of attachments in one request.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as [`ForwardAttachmentBatch`]. Per-attachment failures
+    ///   surface inside the decoded payload, not as errors.
     pub async fn fetch_attachments_for_forward(
         &mut self,
         message_id: MessageId,
@@ -464,6 +729,12 @@ impl MailboxClient {
 
     /// Subscribe to a daemon event topic. Returns the daemon-allocated
     /// `sub_id` so callers can later unsubscribe if needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailboxError::Request`] if the IPC subscribe request
+    /// fails (e.g. the socket dropped or the per-connection
+    /// subscription cap was hit).
     pub async fn subscribe(&mut self, topic: Topic) -> Result<u64, MailboxError> {
         self.client
             .subscribe(topic)
@@ -475,6 +746,11 @@ impl MailboxClient {
     }
 
     /// Pull the next inbound event off the client's event queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MailboxError::Request`] if the underlying IPC stream
+    /// closed or returned a transport error.
     pub async fn next_event(&mut self) -> Result<Event, MailboxError> {
         self.client
             .next_event()

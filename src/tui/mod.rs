@@ -357,6 +357,16 @@ impl Mailbox for MailboxClient {
     }
 }
 
+/// Run the TUI against the daemon listening on `socket_path` using
+/// the type-default theme.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`TuiError::Connect`] if the initial connect to the daemon socket
+///   fails.
+/// - [`TuiError::Terminal`] if entering the alternate screen, drawing,
+///   or restoring the terminal fails.
 pub async fn run(socket_path: PathBuf) -> Result<(), TuiError> {
     run_with_theme(socket_path, None).await
 }
@@ -364,6 +374,14 @@ pub async fn run(socket_path: PathBuf) -> Result<(), TuiError> {
 /// Same as [`run`], but lets the caller pre-select the initial theme
 /// (e.g. from `postblox.toml [tui] theme = "..."`). `None` keeps the
 /// type-default.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`TuiError::Connect`] if the initial connect to the daemon socket
+///   fails.
+/// - [`TuiError::Terminal`] if entering the alternate screen, drawing,
+///   or restoring the terminal fails.
 pub async fn run_with_theme(
     socket_path: PathBuf,
     initial_theme: Option<ThemeName>,

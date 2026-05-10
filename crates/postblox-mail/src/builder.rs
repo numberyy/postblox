@@ -106,6 +106,13 @@ pub fn build_mime_with_attachments(
     })
 }
 
+/// Render `options` as an RFC 5322 message and return its bytes.
+///
+/// Always produces valid UTF-8 output: header values are CRLF-stripped
+/// up front, and attachment bodies are base64-encoded so each line is
+/// pure ASCII. The internal `from_utf8_unchecked` call on the base64
+/// output is sound because base64 Standard alphabet is a subset of
+/// ASCII (see `// SAFETY:` comment at the call site).
 pub fn build_mime_full(options: MimeBuildOptions<'_>) -> Vec<u8> {
     let MimeBuildOptions {
         from,

@@ -75,6 +75,17 @@ pub enum CommandError {
     Usage(&'static str),
 }
 
+/// Parse a `:`-mode command line into a [`Command`].
+///
+/// # Errors
+///
+/// Returns:
+/// - [`CommandError::Empty`] if `input` is empty after trimming.
+/// - [`CommandError::Unknown`] if the leading token is not a known
+///   command name.
+/// - [`CommandError::Usage`] if the arguments don't match the
+///   command's expected shape (missing folder for `move`, extra args
+///   for argless commands, invalid theme name, etc.).
 pub fn parse_command(input: &str) -> Result<Command, CommandError> {
     let mut parts = input.split_whitespace();
     let Some(name) = parts.next() else {

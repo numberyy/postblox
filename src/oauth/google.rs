@@ -241,21 +241,46 @@ impl Default for GoogleOAuthHttpClient {
 }
 
 impl GoogleOAuthHttpClient {
+    /// Production constructor: every caller shares one
+    /// connection-pooled `reqwest::Client` via the module-scoped
+    /// `OnceLock` (E-M1).
+    ///
+    /// # Panics
+    ///
+    /// Panics with a `BUG:` message if `reqwest::ClientBuilder::build`
+    /// fails on the cached default client (programming error: the
+    /// builder accepts the plain timeout config and the platform
+    /// rustls TLS provider must be available). On a healthy production
+    /// system this never fires.
     pub fn new() -> Self {
-        // Production constructor: every caller shares one connection-pooled
-        // `reqwest::Client` via the module-scoped `OnceLock` (E-M1). The
-        // test-only constructors below stay isolated so they can apply
-        // custom timeouts/endpoints without contaminating the cached client.
+        // Test-only constructors below stay isolated so they can apply
+        // custom timeouts/endpoints without contaminating the cached
+        // client.
         Self {
             http: shared_http_client().clone(),
             token_endpoint: TOKEN_ENDPOINT.into(),
         }
     }
 
+    /// Override the token endpoint (test/staging) while keeping the
+    /// default request timeout.
+    ///
+    /// # Panics
+    ///
+    /// Panics with a `BUG:` message if the `reqwest::Client` builder
+    /// fails on the supplied timeout (see [`Self::new`]).
     pub fn with_token_endpoint(token_endpoint: impl Into<String>) -> Self {
         Self::with_token_endpoint_and_timeout(token_endpoint, DEFAULT_REQUEST_TIMEOUT)
     }
 
+    /// Override the token endpoint and request timeout.
+    ///
+    /// # Panics
+    ///
+    /// Panics with a `BUG:` message if `reqwest::ClientBuilder::build`
+    /// fails on the supplied timeout (programming error: the builder
+    /// accepts the plain timeout config and the platform TLS provider
+    /// must be available).
     pub fn with_token_endpoint_and_timeout(
         token_endpoint: impl Into<String>,
         timeout: StdDuration,
