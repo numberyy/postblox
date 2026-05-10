@@ -29,16 +29,19 @@ macro_rules! entity_id {
 
         #[allow(clippy::new_without_default)]
         impl $name {
+            /// Construct a fresh, randomly-generated identifier.
             #[inline]
             pub fn new() -> Self {
                 Self(Uuid::new_v4())
             }
 
+            /// Consume the newtype and return the inner [`Uuid`].
             #[inline]
             pub fn into_inner(self) -> Uuid {
                 self.0
             }
 
+            /// Borrow the inner [`Uuid`] without taking ownership.
             #[inline]
             pub fn as_uuid(&self) -> &Uuid {
                 &self.0
@@ -136,7 +139,9 @@ entity_id!(
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid {kind}: {value}")]
 pub struct ParseEnumError {
+    /// Static name of the enum that rejected the input (e.g. `"AuthKind"`).
     pub kind: &'static str,
+    /// Offending input string that did not match any variant.
     pub value: String,
 }
 
@@ -153,17 +158,18 @@ macro_rules! text_enum {
     (
         $(#[$meta:meta])*
         $vis:vis enum $name:ident {
-            $($variant:ident => $repr:literal),+ $(,)?
+            $($(#[$vmeta:meta])* $variant:ident => $repr:literal),+ $(,)?
         }
     ) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
         #[serde(rename_all = "snake_case")]
         $vis enum $name {
-            $($variant),+
+            $($(#[$vmeta])* $variant),+
         }
 
         impl $name {
+            /// Stable wire string for this variant.
             pub fn as_str(&self) -> &'static str {
                 match self {
                     $(Self::$variant => $repr),+
@@ -215,54 +221,83 @@ macro_rules! text_enum {
 }
 
 text_enum! {
+    /// Authentication mechanism used by an account.
     pub enum AuthKind {
+        /// Username + password (IMAP `LOGIN` / `AUTH PLAIN`, SMTP `AUTH LOGIN`).
         Password     => "password",
-        OAuth2Google => "oauth2_google",
+        /// Google OAuth2 with the `XOAUTH2` SASL mechanism.
+        OAuth2Google => "*************",
     }
 }
 
 text_enum! {
+    /// Lifecycle state of an account's background sync worker.
     pub enum SyncStatus {
+        /// No sync activity in progress; ready to be started.
         Idle    => "idle",
+        /// An IDLE/reconcile worker is currently active.
         Syncing => "syncing",
+        /// The last sync attempt failed; see the account's `sync_error`.
         Error   => "error",
     }
 }
 
 text_enum! {
+    /// Semantic role assigned to a mail folder.
     pub enum FolderRole {
+        /// Primary incoming-mail folder.
         Inbox   => "inbox",
+        /// Sent-items folder.
         Sent    => "sent",
+        /// Local or server-side drafts folder.
         Drafts  => "drafts",
+        /// Archive folder.
         Archive => "archive",
+        /// Trash / deleted-items folder.
         Trash   => "trash",
+        /// Spam / junk folder.
         Spam    => "spam",
+        /// Gmail-style "All Mail" aggregate folder.
         All     => "all",
+        /// Starred / flagged messages virtual folder.
         Starred => "starred",
+        /// User-defined folder with no special semantics.
         Custom  => "custom",
     }
 }
 
 text_enum! {
+    /// MIME `Content-Disposition` for an attachment.
     pub enum AttachmentDisposition {
+        /// Rendered inline within the message body.
         Inline     => "inline",
+        /// Presented as a downloadable attachment.
         Attachment => "attachment",
     }
 }
 
 text_enum! {
+    /// Policy action a configured MCP gate applies to a tool call.
     pub enum GateAction {
+        /// Allow the call without prompting the user.
         AutoAllow => "auto_allow",
+        /// Require an explicit user approval before proceeding.
         Require   => "require",
+        /// Block the call outright.
         Deny      => "deny",
     }
 }
 
 text_enum! {
+    /// Lifecycle state of an MCP approval request.
     pub enum ApprovalState {
+        /// Awaiting a user decision.
         Pending => "pending",
+        /// User approved the call.
         Allowed => "allowed",
+        /// User denied the call.
         Denied  => "denied",
+        /// Decision window elapsed without a response.
         Expired => "expired",
     }
 }
@@ -283,16 +318,19 @@ macro_rules! json_string_array {
         pub struct $name(Vec<String>);
 
         impl $name {
+            /// Borrow the underlying strings as a slice.
             #[inline]
             pub fn as_slice(&self) -> &[String] {
                 &self.0
             }
 
+            /// Clone the underlying strings into a new `Vec`.
             #[inline]
             pub fn to_vec(&self) -> Vec<String> {
                 self.0.clone()
             }
 
+            /// Consume the wrapper and return the inner `Vec`.
             #[inline]
             pub fn into_vec(self) -> Vec<String> {
                 self.0
@@ -395,176 +433,313 @@ json_string_array!(
 // Row types
 // -----------------------------------------------------------------------------
 
+/// SQL row representation of a configured mail account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Account {
+    /// Stable identifier for this account row.
     pub id: AccountId,
+    /// Primary email address used as the account's login identity.
     pub email: String,
+    /// Optional display name (e.g. `"Alice Example"`).
     pub display_name: Option<String>,
+    /// Authentication mechanism used for IMAP and SMTP.
     pub auth_kind: AuthKind,
+    /// IMAP server hostname.
     pub imap_host: String,
+    /// IMAP server port.
     pub imap_port: i64,
+    /// Whether IMAP uses implicit TLS on connect.
     pub imap_use_tls: bool,
+    /// SMTP submission server hostname.
     pub smtp_host: String,
+    /// SMTP submission server port.
     pub smtp_port: i64,
+    /// Whether SMTP uses implicit TLS on connect.
     pub smtp_use_tls: bool,
+    /// Whether SMTP issues `STARTTLS` after connect.
     pub smtp_starttls: bool,
+    /// Backend-specific reference to the [`crate::secrets::SecretStore`] entry.
     pub secret_ref: Option<String>,
+    /// Timestamp of the most recent successful sync, if any.
     pub last_synced_at: Option<DateTime<Utc>>,
+    /// Current lifecycle state of the sync worker.
     pub sync_status: SyncStatus,
+    /// Human-readable error message from the last failed sync, if any.
     pub sync_error: Option<String>,
+    /// Timestamp this row was created.
     pub created_at: DateTime<Utc>,
+    /// Timestamp this row was last modified.
     pub updated_at: DateTime<Utc>,
 }
 
+/// SQL row representation of an IMAP mailbox folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Folder {
+    /// Stable identifier for this folder row.
     pub id: FolderId,
+    /// Account this folder belongs to.
     pub account_id: AccountId,
+    /// Server-reported folder name (e.g. `"INBOX"` or `"[Gmail]/All Mail"`).
     pub name: String,
+    /// IMAP hierarchy delimiter reported by the server (often `/` or `.`).
     pub delimiter: String,
+    /// Inferred semantic role for the folder.
     pub role: FolderRole,
+    /// IMAP `UIDVALIDITY` value seen for this folder, if known.
     pub uid_validity: Option<i64>,
+    /// Next UID expected from the server, if known.
     pub uid_next: Option<i64>,
+    /// Highest UID already pulled into the local store, if any.
     pub last_seen_uid: Option<i64>,
+    /// Whether the folder can be `SELECT`ed (versus a container-only node).
     pub selectable: bool,
+    /// Timestamp this row was created.
     pub created_at: DateTime<Utc>,
 }
 
+/// SQL row representation of a conversation thread.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Thread {
+    /// Stable identifier for this thread row.
     pub id: ThreadId,
+    /// Account this thread belongs to.
     pub account_id: AccountId,
+    /// Provider-specific thread id (e.g. Gmail `X-GM-THRID`) when available.
     pub external_id: Option<String>,
+    /// Normalised subject line representative of the thread.
     pub subject: Option<String>,
+    /// Timestamp of the most recent message in the thread.
     pub last_message_at: Option<DateTime<Utc>>,
+    /// Number of messages currently in the thread.
     pub message_count: i64,
+    /// Timestamp this row was created.
     pub created_at: DateTime<Utc>,
 }
 
+/// SQL row representation of a single email message with bodies.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Message {
+    /// Stable identifier for this message row.
     pub id: MessageId,
+    /// Account this message belongs to.
     pub account_id: AccountId,
+    /// Folder containing this message.
     pub folder_id: FolderId,
+    /// Optional thread association.
     pub thread_id: Option<ThreadId>,
+    /// IMAP UID of the message within its folder.
     pub uid: i64,
+    /// `Message-Id` header value, if present.
     pub message_id_header: Option<String>,
+    /// `In-Reply-To` header value, if present.
     pub in_reply_to: Option<String>,
+    /// `References` header value verbatim, if present.
     pub references_header: Option<String>,
+    /// `From` address as a single rendered string.
     pub from_addr: String,
+    /// `To` recipients.
     pub to_addrs: AddressList,
+    /// `Cc` recipients.
     pub cc_addrs: AddressList,
+    /// `Bcc` recipients, if locally retained.
     pub bcc_addrs: AddressList,
+    /// `Reply-To` address, if present.
     pub reply_to: Option<String>,
+    /// `Subject` header value.
     pub subject: Option<String>,
+    /// Short preview snippet derived from the body.
     pub snippet: Option<String>,
+    /// Plain-text body, if available.
     pub text_body: Option<String>,
+    /// HTML body, if available.
     pub html_body: Option<String>,
+    /// Raw RFC 5322 message size in bytes.
     pub raw_size: i64,
+    /// IMAP flags currently set on the message.
     pub flags: MessageFlags,
+    /// Server-assigned `INTERNALDATE`.
     pub internal_date: DateTime<Utc>,
+    /// `Date` header timestamp, if parseable.
     pub sent_at: Option<DateTime<Utc>>,
+    /// Timestamp this row was created.
     pub created_at: DateTime<Utc>,
 }
 
+/// Lightweight projection of a [`Message`] without the heavy body columns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MessageSummary {
+    /// Stable identifier for this message row.
     pub id: MessageId,
+    /// Account this message belongs to.
     pub account_id: AccountId,
+    /// Folder containing this message.
     pub folder_id: FolderId,
+    /// Optional thread association.
     pub thread_id: Option<ThreadId>,
+    /// IMAP UID of the message within its folder.
     pub uid: i64,
+    /// `Message-Id` header value, if present.
     pub message_id_header: Option<String>,
+    /// `In-Reply-To` header value, if present.
     pub in_reply_to: Option<String>,
+    /// `References` header value verbatim, if present.
     pub references_header: Option<String>,
+    /// `From` address as a single rendered string.
     pub from_addr: String,
+    /// `To` recipients.
     pub to_addrs: AddressList,
+    /// `Cc` recipients.
     pub cc_addrs: AddressList,
+    /// `Bcc` recipients, if locally retained.
     pub bcc_addrs: AddressList,
+    /// `Reply-To` address, if present.
     pub reply_to: Option<String>,
+    /// `Subject` header value.
     pub subject: Option<String>,
+    /// Short preview snippet derived from the body.
     pub snippet: Option<String>,
+    /// Raw RFC 5322 message size in bytes.
     pub raw_size: i64,
+    /// IMAP flags currently set on the message.
     pub flags: MessageFlags,
+    /// Server-assigned `INTERNALDATE`.
     pub internal_date: DateTime<Utc>,
+    /// `Date` header timestamp, if parseable.
     pub sent_at: Option<DateTime<Utc>>,
+    /// Timestamp this row was created.
     pub created_at: DateTime<Utc>,
 }
 
 const _: () = assert!(std::mem::size_of::<Message>() <= 640);
 const _: () = assert!(std::mem::size_of::<MessageSummary>() <= 576);
 
+/// SQL row representation of a message attachment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Attachment {
+    /// Stable identifier for this attachment row.
     pub id: AttachmentId,
+    /// Message this attachment is associated with.
     pub message_id: MessageId,
+    /// Original filename reported by the sender.
     pub filename: String,
+    /// MIME `Content-Type` of the attachment.
     pub content_type: String,
+    /// `Content-Id` for inline attachments referenced by HTML bodies.
     pub content_id: Option<String>,
+    /// Size of the attachment payload in bytes.
     pub size_bytes: i64,
+    /// MIME `Content-Disposition` (inline vs attachment).
     pub disposition: AttachmentDisposition,
+    /// Filesystem path where the payload is stored.
     pub storage_path: String,
+    /// Timestamp this row was created.
     pub created_at: DateTime<Utc>,
 }
 
+/// SQL row representation of an outbound message draft.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Draft {
+    /// Stable identifier for this draft row.
     pub id: DraftId,
+    /// Account the draft will be sent from.
     pub account_id: AccountId,
+    /// Local message this draft is a reply to, if any.
     pub in_reply_to_msg: Option<MessageId>,
+    /// `To` recipients.
     pub to_addrs: AddressList,
+    /// `Cc` recipients.
     pub cc_addrs: AddressList,
+    /// `Bcc` recipients.
     pub bcc_addrs: AddressList,
+    /// `Subject` header value.
     pub subject: Option<String>,
+    /// Plain-text body.
     pub text_body: Option<String>,
+    /// HTML body.
     pub html_body: Option<String>,
+    /// `In-Reply-To` header to thread the outgoing message.
     pub in_reply_to: Option<String>,
+    /// `References` header to thread the outgoing message.
     pub references_header: Option<String>,
+    /// Remote folder where the draft was appended, if uploaded to IMAP.
     pub remote_folder_id: Option<FolderId>,
+    /// Remote UID of the appended draft, if known.
     pub remote_uid: Option<i64>,
+    /// Timestamp this row was created.
     pub created_at: DateTime<Utc>,
+    /// Timestamp this row was last modified.
     pub updated_at: DateTime<Utc>,
 }
 
+/// SQL row representation of a file attached to an outbound draft.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct DraftAttachment {
+    /// Stable identifier for this draft attachment row.
     pub id: Uuid,
+    /// Draft this attachment belongs to.
     pub draft_id: DraftId,
+    /// Filename presented to the recipient.
     pub filename: String,
+    /// MIME `Content-Type` of the attachment.
     pub content_type: String,
+    /// Size of the attachment payload in bytes.
     pub size_bytes: i64,
+    /// Timestamp this row was created.
     pub created_at: DateTime<Utc>,
 }
 
+/// SQL row representation of an MCP policy gate matching tool calls.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct McpGate {
+    /// Stable identifier for this gate row.
     pub id: Uuid,
+    /// Name of the MCP tool this gate matches.
     pub tool: String,
+    /// Optional argument pattern that scopes the gate further.
     pub arg_pattern: Option<String>,
+    /// Action to apply when the gate matches.
     pub action: GateAction,
+    /// Free-form note describing why the gate exists.
     pub note: Option<String>,
+    /// Timestamp this row was created.
     pub created_at: DateTime<Utc>,
 }
 
+/// SQL row representation of a pending or decided MCP approval request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct McpApproval {
+    /// Stable identifier for this approval row.
     pub id: Uuid,
+    /// Name of the MCP tool the call targets.
     pub tool: String,
+    /// JSON-encoded arguments captured at request time.
     pub args: serde_json::Value,
+    /// Short human-readable summary shown in approval UIs.
     pub summary: String,
+    /// Current lifecycle state of the request.
     pub state: ApprovalState,
+    /// Timestamp the request was decided, if decided.
     pub decided_at: Option<DateTime<Utc>>,
+    /// Identifier of the actor that decided the request.
     pub decided_by: Option<String>,
+    /// Timestamp this row was created.
     pub created_at: DateTime<Utc>,
 }
 
+/// SQL row representation of a single audit-log entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AuditEntry {
+    /// Stable identifier for this audit entry.
     pub id: Uuid,
+    /// Identifier of the actor that performed the action.
     pub actor: String,
+    /// Logical action name (e.g. `"message.delete"`).
     pub action: String,
+    /// Optional identifier of the entity acted upon.
     pub target: Option<String>,
+    /// JSON-encoded detail payload describing the action.
     pub details: serde_json::Value,
+    /// Timestamp this row was created.
     pub created_at: DateTime<Utc>,
 }
 

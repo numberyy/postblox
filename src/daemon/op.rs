@@ -19,60 +19,105 @@ use std::str::FromStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Op {
     // -- read ops --
+    /// `"account.list"` — list configured accounts.
     AccountList,
+    /// `"folder.list"` — list folders for an account.
     FolderList,
+    /// `"thread.list"` — list threads in a folder.
     ThreadList,
+    /// `"message.list_by_folder"` — list message summaries in a folder.
     MessageListByFolder,
+    /// `"message.list_by_thread"` — list message summaries in a thread.
     MessageListByThread,
+    /// `"message.get"` — fetch a single message with bodies.
     MessageGet,
+    /// `"attachment.list"` — list attachments for a message.
     AttachmentList,
+    /// `"attachment.preview"` — fetch a small preview of an attachment.
     AttachmentPreview,
+    /// `"search"` — run a full-text search.
     Search,
+    /// `"sql.query"` — run a read-only SQL query.
     SqlQuery,
+    /// `"sql.schema"` — return the read-only SQL schema description.
     SqlSchema,
+    /// `"audit.list_recent"` — list recent audit-log entries.
     AuditListRecent,
 
     // -- MCP gate/approval ops --
+    /// `"mcp.gate.list"` — list configured MCP gates.
     McpGateList,
+    /// `"mcp.gate.create"` — create an MCP gate.
     McpGateCreate,
+    /// `"mcp.gate.delete"` — delete an MCP gate.
     McpGateDelete,
+    /// `"mcp.approval.create"` — create a pending MCP approval request.
     McpApprovalCreate,
+    /// `"mcp.approval.list"` — list MCP approval requests.
     McpApprovalList,
+    /// `"mcp.approval.get"` — fetch a single MCP approval by id.
     McpApprovalGet,
+    /// `"mcp.approval.decide"` — decide a pending MCP approval.
     McpApprovalDecide,
 
     // -- write ops --
+    /// `"account.create"` — create a new account.
     AccountCreate,
+    /// `"account.delete"` — delete an account.
     AccountDelete,
+    /// `"folder.upsert"` — insert or update a folder row.
     FolderUpsert,
+    /// `"message.set_flags"` — replace IMAP flags on a message.
     MessageSetFlags,
+    /// `"message.archive"` — archive a message.
     MessageArchive,
+    /// `"message.delete"` — delete a message.
     MessageDelete,
+    /// `"message.move"` — move a message to another folder.
     MessageMove,
+    /// `"draft.create"` — create a new draft.
     DraftCreate,
+    /// `"draft.update"` — update an existing draft.
     DraftUpdate,
+    /// `"draft.delete"` — delete a draft.
     DraftDelete,
+    /// `"draft.list"` — list drafts for an account.
     DraftList,
+    /// `"draft.get"` — fetch a single draft by id.
     DraftGet,
+    /// `"attachment.export"` — write an attachment payload to disk.
     AttachmentExport,
+    /// `"message.prepare_reply"` — prepare a draft seeded from a reply.
     MessagePrepareReply,
+    /// `"message.prepare_forward"` — prepare a draft seeded from a forward.
     MessagePrepareForward,
+    /// `"attachment.fetch_for_forward"` — fetch one attachment for forwarding.
     AttachmentFetchForForward,
+    /// `"attachment.fetch_for_forward_batch"` — fetch multiple attachments for forwarding.
     AttachmentFetchForForwardBatch,
+    /// `"message.send"` — submit a draft via SMTP.
     MessageSend,
 
     // -- network ops --
+    /// `"account.test_login"` — verify credentials against IMAP/SMTP.
     AccountTestLogin,
+    /// `"account.sync_folder"` — synchronously reconcile one folder.
     AccountSyncFolder,
+    /// `"account.start_sync"` — start the background sync worker.
     AccountStartSync,
+    /// `"account.stop_sync"` — stop the background sync worker.
     AccountStopSync,
 
     // -- secret ops --
+    /// `"account.set_secret"` — store the account's password / token.
     AccountSetSecret,
+    /// `"account.delete_secret"` — remove the account's stored secret.
     AccountDeleteSecret,
 
     // -- OAuth ops --
+    /// `"oauth.google.auth_url"` — return the Google OAuth2 auth URL.
     OauthGoogleAuthUrl,
+    /// `"oauth.google.complete"` — complete OAuth2 by exchanging a code.
     OauthGoogleComplete,
 }
 
@@ -135,7 +180,10 @@ impl Op {
 /// `unknown_op` error without re-threading the original string.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unknown op: {0}")]
-pub struct ParseOpError(pub String);
+pub struct ParseOpError(
+    /// Verbatim wire string that did not match any known [`Op`] variant.
+    pub String,
+);
 
 impl fmt::Display for Op {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
