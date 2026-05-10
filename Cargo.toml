@@ -105,3 +105,20 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Opt-in build profile for users running postblox locally and willing to
+# trade portability for raw throughput. Inherits release, but flips
+# opt-level back to "3" for vectorisation-friendly codegen on the parser
+# and IPC hot paths. Pair with `RUSTFLAGS="-C target-cpu=native"` for the
+# full speed-up — the profile alone keeps generic-CPU codegen so CI and
+# distro builds stay reproducible.
+#
+# Build with:
+#   RUSTFLAGS="-C target-cpu=native" cargo build --profile release-native
+#
+# Not used by CI; not yet recommended in README. The C-H1 review item in
+# `plans/rust-skills-review.md` re-evaluates whether the default release
+# profile should switch to opt-level = 3.
+[profile.release-native]
+inherits = "release"
+opt-level = 3
