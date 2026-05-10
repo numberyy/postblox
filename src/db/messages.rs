@@ -9,7 +9,7 @@
 //! all access is via the daemon's [`SqlitePool`].
 
 use chrono::{DateTime, Utc};
-use sqlx::SqlitePool;
+use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
 use crate::db::DbError;
 use crate::models::{AccountId, FolderId, Message, MessageId, ThreadId};
@@ -199,6 +199,39 @@ pub async fn list_by_thread(
 ) -> Result<Vec<Message>, DbError> {
     Ok(sqlx::query_as(LIST_BY_THREAD_QUERY)
         .bind(thread_id)
+        .fetch_all(pool)
+        .await?)
+}
+
+/// Return non-null RFC822 Message-ID headers for the supplied threads.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the dynamic-`IN` query or row decode
+/// fails. An empty `thread_ids` slice short-circuits to `Ok(empty)`
+/// without touching the database.
+pub async fn message_ids_by_threads(
+    pool: &SqlitePool,
+    thread_ids: &[ThreadId],
+) -> Result<Vec<(ThreadId, String)>, DbError> {
+    if thread_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut qb: QueryBuilder<Sqlite> =
+        QueryBuilder::new("SELECT thread_id, message_id_header FROM messages WHERE thread_id IN (");
+    {
+        let mut separated = qb.separated(",");
+        for thread_id in thread_ids {
+            separated.push_bind(*thread_id);
+        }
+        separated.push_unseparated(
+            ") AND message_id_header IS NOT NULL ORDER BY thread_id, internal_date",
+        );
+    }
+
+    Ok(qb
+        .build_query_as::<(ThreadId, String)>()
         .fetch_all(pool)
         .await?)
 }
@@ -536,6 +569,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_message_ids_by_threads_returns_non_null_ids_by_thread() {
+        let c = ctx().await;
+        let other = crate::db::threads::create(&c.pool, c.account_id, None, None)
+            .await
+            .unwrap();
+        let empty = crate::db::threads::create(&c.pool, c.account_id, None, None)
+            .await
+            .unwrap();
+
+        let mut older = sample(&c, 1);
+        older.message_id_header = Some("<older@x>".into());
+        older.internal_date = Utc::now() - chrono::Duration::hours(2);
+        create(&c.pool, &older).await.unwrap();
+
+        let mut without_header = sample(&c, 2);
+        without_header.message_id_header = None;
+        without_header.internal_date = Utc::now() - chrono::Duration::hours(1);
+        create(&c.pool, &without_header).await.unwrap();
+
+        let mut newer = sample(&c, 3);
+        newer.message_id_header = Some("<newer@x>".into());
+        newer.internal_date = Utc::now();
+        create(&c.pool, &newer).await.unwrap();
+
+        let mut other_message = sample(&c, 4);
+        other_message.thread_id = Some(other.id);
+        other_message.message_id_header = Some("<other@x>".into());
+        create(&c.pool, &other_message).await.unwrap();
+
+        let mut grouped = std::collections::HashMap::<ThreadId, Vec<String>>::new();
+        for (thread_id, message_id) in
+            message_ids_by_threads(&c.pool, &[c.thread_id, other.id, empty.id])
+                .await
+                .unwrap()
+        {
+            grouped.entry(thread_id).or_default().push(message_id);
+        }
+
+        assert_eq!(
+            grouped.remove(&c.thread_id).unwrap(),
+            vec!["<older@x>".to_string(), "<newer@x>".to_string()]
+        );
+        assert_eq!(
+            grouped.remove(&other.id).unwrap(),
+            vec!["<other@x>".to_string()]
+        );
+        assert!(!grouped.contains_key(&empty.id));
+        assert!(grouped.is_empty());
+        assert!(message_ids_by_threads(&c.pool, &[])
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn test_find_by_msgid_header() {
         let c = ctx().await;
         create(&c.pool, &sample(&c, 9)).await.unwrap();
@@ -674,6 +762,10 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(list_by_thread(&c.pool, c.thread_id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(message_ids_by_threads(&c.pool, &[c.thread_id])
             .await
             .unwrap()
             .is_empty());

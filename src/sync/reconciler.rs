@@ -15,7 +15,7 @@
 //! that returns canned bytes — we never open a real network connection
 //! during `cargo test`.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -105,16 +105,22 @@ pub async fn reconcile_folder(
     // Pull recent threads once so the thread-matcher has somewhere to
     // look for In-Reply-To / References / subject hits.
     let recent = db::threads::list_recent(pool, account_id, 200, 0).await?;
+    let recent_thread_ids: Vec<ThreadId> = recent.iter().map(|thread| thread.id).collect();
+    let mut message_ids_by_thread: HashMap<ThreadId, Vec<String>> =
+        HashMap::with_capacity(recent_thread_ids.len());
+    for (thread_id, message_id) in
+        db::messages::message_ids_by_threads(pool, &recent_thread_ids).await?
+    {
+        message_ids_by_thread
+            .entry(thread_id)
+            .or_default()
+            .push(message_id);
+    }
     let mut thread_refs: Vec<ThreadRef> = Vec::with_capacity(recent.len());
     for t in &recent {
-        let ids = db::messages::list_by_thread(pool, t.id)
-            .await?
-            .into_iter()
-            .filter_map(|m| m.message_id_header)
-            .collect::<Vec<_>>();
         thread_refs.push(ThreadRef {
             thread_id: t.id.into_inner(),
-            message_ids: ids,
+            message_ids: message_ids_by_thread.remove(&t.id).unwrap_or_default(),
             subject: t.subject.clone().unwrap_or_default(),
             last_message_at: t.last_message_at.unwrap_or_else(Utc::now),
         });
