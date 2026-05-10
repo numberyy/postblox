@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use mockall::mock;
 use serde_json::json;
 use sqlx::SqlitePool;
 use tokio::time::{timeout, Duration};
@@ -25,6 +26,61 @@ use postblox::secrets::{
 use postblox::smtp::{SmtpError, SmtpSubmitRequest, SmtpSubmitter};
 use postblox::sync::WorkerConfig;
 
+mock! {
+    ImapAuthMock {}
+    #[async_trait::async_trait]
+    impl ImapAuth for ImapAuthMock {
+        async fn test_login(
+            &self,
+            host: &str,
+            port: u16,
+            username: &str,
+            credential: &MailCredential,
+        ) -> Result<Vec<FolderInfo>, ImapError>;
+    }
+}
+
+mock! {
+    ImapSyncMock {}
+    #[async_trait::async_trait]
+    impl ImapSync for ImapSyncMock {
+        async fn sync_folder(
+            &self,
+            host: &str,
+            port: u16,
+            username: &str,
+            credential: &MailCredential,
+            folder: &str,
+            from_uid: u32,
+        ) -> Result<FolderSync, ImapError>;
+    }
+}
+
+mock! {
+    GoogleOAuthMock {}
+    #[async_trait::async_trait]
+    impl GoogleOAuth for GoogleOAuthMock {
+        async fn exchange_code(
+            &self,
+            config: &GoogleOAuthConfig,
+            code: &str,
+        ) -> Result<GoogleOAuthToken, GoogleOAuthError>;
+        async fn refresh_token(
+            &self,
+            config: &GoogleOAuthConfig,
+            token: &GoogleOAuthToken,
+        ) -> Result<GoogleOAuthToken, GoogleOAuthError>;
+    }
+}
+
+mock! {
+    SmtpSubmitterMock {}
+    #[async_trait::async_trait]
+    impl SmtpSubmitter for SmtpSubmitterMock {
+        async fn submit(&self, request: SmtpSubmitRequest) -> Result<(), SmtpError>;
+    }
+}
+
 struct Harness {
     _db_dir: tempfile::TempDir,
     _sock_dir: tempfile::TempDir,
@@ -36,15 +92,15 @@ struct Harness {
 }
 
 async fn make_harness() -> Harness {
-    make_harness_with(Arc::new(NoImap), Arc::new(NoSync)).await
+    make_harness_with(no_imap(), no_sync()).await
 }
 
 async fn make_harness_with_imap(imap: Arc<dyn ImapAuth>) -> Harness {
-    make_harness_with(imap, Arc::new(NoSync)).await
+    make_harness_with(imap, no_sync()).await
 }
 
 async fn make_harness_with_sync(sync: Arc<dyn ImapSync>) -> Harness {
-    make_harness_with(Arc::new(NoImap), sync).await
+    make_harness_with(no_imap(), sync).await
 }
 
 async fn make_harness_with(imap: Arc<dyn ImapAuth>, imap_sync: Arc<dyn ImapSync>) -> Harness {
@@ -55,7 +111,7 @@ async fn make_harness_with_sync_config(
     sync: Arc<dyn ImapSync>,
     worker_config: WorkerConfig,
 ) -> Harness {
-    make_harness_with_config(Arc::new(NoImap), sync, worker_config).await
+    make_harness_with_config(no_imap(), sync, worker_config).await
 }
 
 async fn make_harness_with_config(
@@ -73,13 +129,7 @@ async fn make_harness_with_config(
 }
 
 async fn make_harness_with_smtp(smtp: Arc<dyn SmtpSubmitter>) -> Harness {
-    make_harness_with_config_and_smtp(
-        Arc::new(NoImap),
-        Arc::new(NoSync),
-        smtp,
-        WorkerConfig::default(),
-    )
-    .await
+    make_harness_with_config_and_smtp(no_imap(), no_sync(), smtp, WorkerConfig::default()).await
 }
 
 async fn make_harness_with_config_and_smtp(
@@ -92,7 +142,7 @@ async fn make_harness_with_config_and_smtp(
         imap,
         imap_sync,
         smtp,
-        Arc::new(MockGoogleOAuth::default()),
+        Arc::new(MockGoogleOAuthMock::new()),
         worker_config,
     )
     .await
@@ -149,97 +199,62 @@ async fn make_harness_with_config_smtp_oauth(
 /// Refuses every IMAP call. Default for tests that don't exercise the
 /// network path; keeps the production rustls platform-verifier out of
 /// `cargo test`.
-struct NoImap;
-
-#[async_trait::async_trait]
-impl ImapAuth for NoImap {
-    async fn test_login(
-        &self,
-        _: &str,
-        _: u16,
-        _: &str,
-        _: &MailCredential,
-    ) -> Result<Vec<FolderInfo>, ImapError> {
+fn no_imap() -> Arc<dyn ImapAuth> {
+    let mut mock = MockImapAuthMock::new();
+    mock.expect_test_login().returning(|_, _, _, _| {
         Err(ImapError::Protocol(
             "imap not configured for this test".into(),
         ))
-    }
+    });
+    Arc::new(mock)
 }
 
-/// Sync counterpart of `NoImap`.
-struct NoSync;
-
-#[async_trait::async_trait]
-impl ImapSync for NoSync {
-    async fn sync_folder(
-        &self,
-        _: &str,
-        _: u16,
-        _: &str,
-        _: &MailCredential,
-        _: &str,
-        _: u32,
-    ) -> Result<FolderSync, ImapError> {
+/// Sync counterpart of [`no_imap`].
+fn no_sync() -> Arc<dyn ImapSync> {
+    let mut mock = MockImapSyncMock::new();
+    mock.expect_sync_folder().returning(|_, _, _, _, _, _| {
         Err(ImapError::Protocol(
             "imap sync not configured for this test".into(),
         ))
-    }
+    });
+    Arc::new(mock)
 }
 
-#[derive(Default)]
-struct MockGoogleOAuth {
-    exchange: Mutex<VecDeque<Result<GoogleOAuthToken, GoogleOAuthError>>>,
-    refresh: Mutex<VecDeque<Result<GoogleOAuthToken, GoogleOAuthError>>>,
+fn google_oauth_with_exchange(token: GoogleOAuthToken) -> Arc<dyn GoogleOAuth> {
+    google_oauth_with_exchange_and_refreshes(token, vec![])
 }
 
-impl MockGoogleOAuth {
-    fn with_exchange(token: GoogleOAuthToken) -> Self {
-        Self {
-            exchange: Mutex::new(VecDeque::from([Ok(token)])),
-            refresh: Mutex::new(VecDeque::new()),
-        }
-    }
-
-    fn with_exchange_and_refresh(exchange: GoogleOAuthToken, refresh: GoogleOAuthToken) -> Self {
-        Self::with_exchange_and_refreshes(exchange, vec![refresh])
-    }
-
-    fn with_exchange_and_refreshes(
-        exchange: GoogleOAuthToken,
-        refreshes: Vec<GoogleOAuthToken>,
-    ) -> Self {
-        Self {
-            exchange: Mutex::new(VecDeque::from([Ok(exchange)])),
-            refresh: Mutex::new(refreshes.into_iter().map(Ok).collect()),
-        }
-    }
+fn google_oauth_with_exchange_and_refresh(
+    exchange: GoogleOAuthToken,
+    refresh: GoogleOAuthToken,
+) -> Arc<dyn GoogleOAuth> {
+    google_oauth_with_exchange_and_refreshes(exchange, vec![refresh])
 }
 
-#[async_trait::async_trait]
-impl GoogleOAuth for MockGoogleOAuth {
-    async fn exchange_code(
-        &self,
-        _: &GoogleOAuthConfig,
-        _: &str,
-    ) -> Result<GoogleOAuthToken, GoogleOAuthError> {
-        self.exchange
+fn google_oauth_with_exchange_and_refreshes(
+    exchange: GoogleOAuthToken,
+    refreshes: Vec<GoogleOAuthToken>,
+) -> Arc<dyn GoogleOAuth> {
+    let exchange_queue: Arc<Mutex<VecDeque<Result<GoogleOAuthToken, GoogleOAuthError>>>> =
+        Arc::new(Mutex::new(VecDeque::from([Ok(exchange)])));
+    let refresh_queue: Arc<Mutex<VecDeque<Result<GoogleOAuthToken, GoogleOAuthError>>>> =
+        Arc::new(Mutex::new(refreshes.into_iter().map(Ok).collect()));
+    let mut mock = MockGoogleOAuthMock::new();
+    mock.expect_exchange_code().returning(move |_, _| {
+        exchange_queue
             .lock()
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| Err(GoogleOAuthError::InvalidInput("no exchange token".into())))
-    }
-
-    async fn refresh_token(
-        &self,
-        _: &GoogleOAuthConfig,
-        _: &GoogleOAuthToken,
-    ) -> Result<GoogleOAuthToken, GoogleOAuthError> {
-        self.refresh
+    });
+    mock.expect_refresh_token().returning(move |_, _| {
+        refresh_queue
             .lock()
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| Err(GoogleOAuthError::InvalidInput("no refresh token".into())))
-    }
+    });
+    Arc::new(mock)
 }
 
 #[derive(Debug, Clone)]
@@ -256,47 +271,55 @@ struct CapturedSmtp {
     mime: Vec<u8>,
 }
 
+/// Wraps a mockall-driven [`SmtpSubmitter`] together with a shared call
+/// log so tests can assert on the captured requests without losing the
+/// mockall expectation API.
 struct MockSmtp {
-    calls: Mutex<Vec<CapturedSmtp>>,
-    outcomes: Mutex<VecDeque<Result<(), SmtpError>>>,
+    inner: Arc<dyn SmtpSubmitter>,
+    calls: Arc<Mutex<Vec<CapturedSmtp>>>,
 }
 
 impl MockSmtp {
     fn ok() -> Self {
-        Self {
-            calls: Mutex::new(vec![]),
-            outcomes: Mutex::new(VecDeque::new()),
-        }
+        Self::new(VecDeque::new())
     }
 
     fn with_outcome(outcome: Result<(), SmtpError>) -> Self {
+        Self::new(VecDeque::from([outcome]))
+    }
+
+    fn new(outcomes: VecDeque<Result<(), SmtpError>>) -> Self {
+        let calls: Arc<Mutex<Vec<CapturedSmtp>>> = Arc::new(Mutex::new(vec![]));
+        let outcomes: Arc<Mutex<VecDeque<Result<(), SmtpError>>>> = Arc::new(Mutex::new(outcomes));
+        let calls_for_mock = Arc::clone(&calls);
+        let mut mock = MockSmtpSubmitterMock::new();
+        mock.expect_submit().returning(move |request| {
+            calls_for_mock.lock().unwrap().push(CapturedSmtp {
+                host: request.server.host,
+                port: request.server.port,
+                use_tls: request.server.use_tls,
+                starttls: request.server.starttls,
+                username: request.username,
+                credential_kind: request.credential.kind(),
+                secret: request.credential.secret().to_string(),
+                from: request.from,
+                recipients: request.recipients,
+                mime: request.mime,
+            });
+            outcomes.lock().unwrap().pop_front().unwrap_or(Ok(()))
+        });
         Self {
-            calls: Mutex::new(vec![]),
-            outcomes: Mutex::new(VecDeque::from([outcome])),
+            inner: Arc::new(mock),
+            calls,
         }
+    }
+
+    fn submitter(&self) -> Arc<dyn SmtpSubmitter> {
+        Arc::clone(&self.inner)
     }
 
     fn calls(&self) -> Vec<CapturedSmtp> {
         self.calls.lock().unwrap().clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl SmtpSubmitter for MockSmtp {
-    async fn submit(&self, request: SmtpSubmitRequest) -> Result<(), SmtpError> {
-        self.calls.lock().unwrap().push(CapturedSmtp {
-            host: request.server.host,
-            port: request.server.port,
-            use_tls: request.server.use_tls,
-            starttls: request.server.starttls,
-            username: request.username,
-            credential_kind: request.credential.kind(),
-            secret: request.credential.secret().to_string(),
-            from: request.from,
-            recipients: request.recipients,
-            mime: request.mime,
-        });
-        self.outcomes.lock().unwrap().pop_front().unwrap_or(Ok(()))
     }
 }
 
@@ -550,8 +573,8 @@ async fn draft_create_update_delete_round_trip() {
 
 #[tokio::test]
 async fn message_send_with_draft_submits_mime_and_audits() {
-    let smtp = Arc::new(MockSmtp::ok());
-    let h = make_harness_with_smtp(smtp.clone()).await;
+    let smtp = MockSmtp::ok();
+    let h = make_harness_with_smtp(smtp.submitter()).await;
     let account_id = setup_account_with_secret(&h).await;
     let mut c = Client::connect(&h.sock).await.unwrap();
 
@@ -631,8 +654,8 @@ async fn message_send_with_draft_submits_mime_and_audits() {
 
 #[tokio::test]
 async fn message_send_missing_secret_returns_missing_secret() {
-    let smtp = Arc::new(MockSmtp::ok());
-    let h = make_harness_with_smtp(smtp.clone()).await;
+    let smtp = MockSmtp::ok();
+    let h = make_harness_with_smtp(smtp.submitter()).await;
     let account_id = make_account(&h, "u@example.com").await;
     let draft = postblox::db::drafts::create(
         &h.pool,
@@ -670,10 +693,8 @@ async fn message_send_missing_secret_returns_missing_secret() {
 
 #[tokio::test]
 async fn message_send_auth_failure_maps_to_auth_failed() {
-    let smtp = Arc::new(MockSmtp::with_outcome(Err(SmtpError::Auth(
-        "bad credentials".into(),
-    ))));
-    let h = make_harness_with_smtp(smtp.clone()).await;
+    let smtp = MockSmtp::with_outcome(Err(SmtpError::Auth("bad credentials".into())));
+    let h = make_harness_with_smtp(smtp.submitter()).await;
     let account_id = setup_account_with_secret(&h).await;
     let draft = postblox::db::drafts::create(
         &h.pool,
@@ -711,16 +732,12 @@ async fn message_send_auth_failure_maps_to_auth_failed() {
 
 #[tokio::test]
 async fn message_send_oauth_account_uses_bearer_token_for_smtp() {
-    let smtp = Arc::new(MockSmtp::ok());
-    let oauth = Arc::new(MockGoogleOAuth::with_exchange(oauth_token(
-        "smtp-access",
-        "smtp-refresh",
-        3600,
-    )));
+    let smtp = MockSmtp::ok();
+    let oauth = google_oauth_with_exchange(oauth_token("smtp-access", "smtp-refresh", 3600));
     let h = make_harness_with_config_smtp_oauth(
-        Arc::new(NoImap),
-        Arc::new(NoSync),
-        smtp.clone(),
+        no_imap(),
+        no_sync(),
+        smtp.submitter(),
         oauth,
         WorkerConfig::default(),
     )
@@ -779,8 +796,8 @@ async fn message_send_oauth_account_uses_bearer_token_for_smtp() {
 
 #[tokio::test]
 async fn message_send_bad_args_return_bad_args() {
-    let smtp = Arc::new(MockSmtp::ok());
-    let h = make_harness_with_smtp(smtp.clone()).await;
+    let smtp = MockSmtp::ok();
+    let h = make_harness_with_smtp(smtp.submitter()).await;
     let account_id = setup_account_with_secret(&h).await;
     let draft = postblox::db::drafts::create(
         &h.pool,
@@ -1076,25 +1093,17 @@ async fn many_concurrent_clients_all_get_responses() {
 /// `ImapAuth` mock with deterministic behaviour: returns the list of
 /// folders unless the password matches `bad_password`, in which case it
 /// reports an auth failure.
-struct MockImap {
-    folders: Vec<FolderInfo>,
-    bad_password: String,
-}
-
-#[async_trait::async_trait]
-impl ImapAuth for MockImap {
-    async fn test_login(
-        &self,
-        _: &str,
-        _: u16,
-        _: &str,
-        credential: &MailCredential,
-    ) -> Result<Vec<FolderInfo>, ImapError> {
-        if credential.secret() == self.bad_password {
-            return Err(ImapError::Auth("bad creds".into()));
-        }
-        Ok(self.folders.clone())
-    }
+fn imap_auth_with(folders: Vec<FolderInfo>, bad_password: &str) -> Arc<dyn ImapAuth> {
+    let bad_password = bad_password.to_string();
+    let mut mock = MockImapAuthMock::new();
+    mock.expect_test_login()
+        .returning(move |_, _, _, credential| {
+            if credential.secret() == bad_password {
+                return Err(ImapError::Auth("bad creds".into()));
+            }
+            Ok(folders.clone())
+        });
+    Arc::new(mock)
 }
 
 fn fi(name: &str) -> FolderInfo {
@@ -1107,16 +1116,16 @@ fn fi(name: &str) -> FolderInfo {
 
 #[tokio::test]
 async fn account_test_login_seeds_folders_with_role_mapping() {
-    let mock = Arc::new(MockImap {
-        folders: vec![
+    let mock = imap_auth_with(
+        vec![
             fi("INBOX"),
             fi("Sent"),
             fi("Drafts"),
             fi("[Gmail]/All Mail"),
             fi("Notes"),
         ],
-        bad_password: "WRONG".into(),
-    });
+        "WRONG",
+    );
     let h = make_harness_with_imap(mock).await;
 
     let account = accounts::create(
@@ -1160,10 +1169,7 @@ async fn account_test_login_seeds_folders_with_role_mapping() {
 
 #[tokio::test]
 async fn account_test_login_returns_auth_failed_on_bad_password() {
-    let mock = Arc::new(MockImap {
-        folders: vec![fi("INBOX")],
-        bad_password: "WRONG".into(),
-    });
+    let mock = imap_auth_with(vec![fi("INBOX")], "WRONG");
     let h = make_harness_with_imap(mock).await;
 
     let account = accounts::create(
@@ -1378,15 +1384,11 @@ async fn account_delete_secret_is_idempotent() {
 
 #[tokio::test]
 async fn oauth_google_auth_url_and_complete_store_token_without_auditing_secrets() {
-    let oauth = Arc::new(MockGoogleOAuth::with_exchange(oauth_token(
-        "access-token",
-        "refresh-token",
-        3600,
-    )));
+    let oauth = google_oauth_with_exchange(oauth_token("access-token", "refresh-token", 3600));
     let h = make_harness_with_config_smtp_oauth(
-        Arc::new(NoImap),
-        Arc::new(NoSync),
-        Arc::new(MockSmtp::ok()),
+        no_imap(),
+        no_sync(),
+        MockSmtp::ok().submitter(),
         oauth,
         WorkerConfig::default(),
     )
@@ -1501,14 +1503,15 @@ async fn oauth_google_complete_rejects_state_mismatch_and_password_account() {
 
 // ---- account.sync_folder ---------------------------------------------------
 
-/// Fetcher with scripted UID validity / message list. Per-call password
-/// check so we can also exercise the auth-failure path.
+/// Wrapper around a mockall-driven [`ImapSync`] that exposes shared
+/// state (UID validity, UID next, message list) so individual tests can
+/// mutate them between calls. Per-call credential check exercises the
+/// auth-failure path.
 struct ScriptedSync {
-    uid_validity: std::sync::Mutex<u32>,
-    uid_next: std::sync::Mutex<u32>,
-    messages: std::sync::Mutex<Vec<FetchedMessage>>,
-    password: String,
-    expected_kind: CredentialKind,
+    uid_validity: Arc<Mutex<u32>>,
+    uid_next: Arc<Mutex<u32>>,
+    messages: Arc<Mutex<Vec<FetchedMessage>>>,
+    inner: Arc<dyn ImapSync>,
 }
 
 impl ScriptedSync {
@@ -1529,80 +1532,88 @@ impl ScriptedSync {
         expected_kind: CredentialKind,
         secret: &str,
     ) -> Self {
+        let uid_validity = Arc::new(Mutex::new(uid_validity));
+        let uid_next = Arc::new(Mutex::new(uid_next));
+        let messages = Arc::new(Mutex::new(msgs));
+        let password = secret.to_string();
+        let mut mock = MockImapSyncMock::new();
+        {
+            let uid_validity = Arc::clone(&uid_validity);
+            let uid_next = Arc::clone(&uid_next);
+            let messages = Arc::clone(&messages);
+            mock.expect_sync_folder()
+                .returning(move |_, _, _, credential, _, from_uid| {
+                    assert_eq!(credential.kind(), expected_kind);
+                    if credential.secret() != password {
+                        return Err(ImapError::Auth("bad password".into()));
+                    }
+                    let messages: Vec<FetchedMessage> = messages
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|m| m.uid >= from_uid)
+                        .cloned()
+                        .collect();
+                    Ok(FolderSync {
+                        uid_validity: Some(*uid_validity.lock().unwrap()),
+                        uid_next: Some(*uid_next.lock().unwrap()),
+                        exists: messages.len() as u32,
+                        messages,
+                    })
+                });
+        }
         Self {
-            uid_validity: std::sync::Mutex::new(uid_validity),
-            uid_next: std::sync::Mutex::new(uid_next),
-            messages: std::sync::Mutex::new(msgs),
-            password: secret.into(),
-            expected_kind,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl ImapSync for ScriptedSync {
-    async fn sync_folder(
-        &self,
-        _: &str,
-        _: u16,
-        _: &str,
-        credential: &MailCredential,
-        _: &str,
-        from_uid: u32,
-    ) -> Result<FolderSync, ImapError> {
-        assert_eq!(credential.kind(), self.expected_kind);
-        if credential.secret() != self.password {
-            return Err(ImapError::Auth("bad password".into()));
-        }
-        let messages: Vec<FetchedMessage> = self
-            .messages
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|m| m.uid >= from_uid)
-            .cloned()
-            .collect();
-        Ok(FolderSync {
-            uid_validity: Some(*self.uid_validity.lock().unwrap()),
-            uid_next: Some(*self.uid_next.lock().unwrap()),
-            exists: messages.len() as u32,
+            uid_validity,
+            uid_next,
             messages,
-        })
+            inner: Arc::new(mock),
+        }
+    }
+
+    fn syncer(&self) -> Arc<dyn ImapSync> {
+        Arc::clone(&self.inner)
     }
 }
 
-#[derive(Default)]
+/// Records the secrets passed to each `sync_folder` call so tests can
+/// verify the worker refreshed credentials between cycles.
 struct RecordingSync {
-    secrets: Mutex<Vec<String>>,
+    secrets: Arc<Mutex<Vec<String>>>,
+    inner: Arc<dyn ImapSync>,
+}
+
+impl Default for RecordingSync {
+    fn default() -> Self {
+        let secrets: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let secrets_for_mock = Arc::clone(&secrets);
+        let mut mock = MockImapSyncMock::new();
+        mock.expect_sync_folder()
+            .returning(move |_, _, _, credential, _, _| {
+                secrets_for_mock
+                    .lock()
+                    .unwrap()
+                    .push(credential.secret().to_string());
+                Ok(FolderSync {
+                    uid_validity: Some(1),
+                    uid_next: Some(1),
+                    exists: 0,
+                    messages: vec![],
+                })
+            });
+        Self {
+            secrets,
+            inner: Arc::new(mock),
+        }
+    }
 }
 
 impl RecordingSync {
+    fn syncer(&self) -> Arc<dyn ImapSync> {
+        Arc::clone(&self.inner)
+    }
+
     fn secrets(&self) -> Vec<String> {
         self.secrets.lock().unwrap().clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl ImapSync for RecordingSync {
-    async fn sync_folder(
-        &self,
-        _: &str,
-        _: u16,
-        _: &str,
-        credential: &MailCredential,
-        _: &str,
-        _: u32,
-    ) -> Result<FolderSync, ImapError> {
-        self.secrets
-            .lock()
-            .unwrap()
-            .push(credential.secret().to_string());
-        Ok(FolderSync {
-            uid_validity: Some(1),
-            uid_next: Some(1),
-            exists: 0,
-            messages: vec![],
-        })
     }
 }
 
@@ -1733,7 +1744,7 @@ async fn account_start_sync_starts_worker_and_stop_sync_is_idempotent() {
         raw: rfc822("worker@x", None, "Worker", "body"),
     }];
     let h = make_harness_with_sync_config(
-        Arc::new(ScriptedSync::new(1, 12, msgs)),
+        ScriptedSync::new(1, 12, msgs).syncer(),
         fast_worker_config(),
     )
     .await;
@@ -1786,19 +1797,19 @@ async fn account_start_sync_starts_worker_and_stop_sync_is_idempotent() {
 
 #[tokio::test]
 async fn account_start_sync_oauth_worker_refreshes_between_poll_cycles() {
-    let oauth = Arc::new(MockGoogleOAuth::with_exchange_and_refreshes(
+    let oauth = google_oauth_with_exchange_and_refreshes(
         oauth_token("expired-complete", "refresh-token", -10),
         vec![
             oauth_token("startup-refresh", "refresh-token", -10),
             oauth_token("cycle-refresh-1", "refresh-token", -10),
             oauth_token("cycle-refresh-2", "refresh-token", -10),
         ],
-    ));
-    let sync = Arc::new(RecordingSync::default());
+    );
+    let sync = RecordingSync::default();
     let h = make_harness_with_config_smtp_oauth(
-        Arc::new(NoImap),
-        sync.clone(),
-        Arc::new(MockSmtp::ok()),
+        no_imap(),
+        sync.syncer(),
+        MockSmtp::ok().submitter(),
         oauth,
         fast_worker_config(),
     )
@@ -1863,7 +1874,7 @@ async fn account_start_sync_oauth_worker_refreshes_between_poll_cycles() {
 #[tokio::test]
 async fn account_start_sync_missing_secret_returns_missing_secret() {
     let h = make_harness_with_sync_config(
-        Arc::new(ScriptedSync::new(1, 1, vec![])),
+        ScriptedSync::new(1, 1, vec![]).syncer(),
         fast_worker_config(),
     )
     .await;
@@ -1899,7 +1910,7 @@ async fn account_start_sync_missing_secret_returns_missing_secret() {
 #[tokio::test]
 async fn account_start_sync_unknown_account_or_folder_returns_bad_args() {
     let h = make_harness_with_sync_config(
-        Arc::new(ScriptedSync::new(1, 1, vec![])),
+        ScriptedSync::new(1, 1, vec![]).syncer(),
         fast_worker_config(),
     )
     .await;
@@ -1935,21 +1946,16 @@ async fn account_start_sync_unknown_account_or_folder_returns_bad_args() {
 
 #[tokio::test]
 async fn account_sync_folder_oauth_account_refreshes_and_uses_bearer_token() {
-    let oauth = Arc::new(MockGoogleOAuth::with_exchange_and_refresh(
+    let oauth = google_oauth_with_exchange_and_refresh(
         oauth_token("expired-access", "refresh-token", -10),
         oauth_token("fresh-access", "refresh-token", 3600),
-    ));
-    let sync = Arc::new(ScriptedSync::with_credential(
-        1,
-        1,
-        vec![],
-        CredentialKind::OAuth2Bearer,
-        "fresh-access",
-    ));
+    );
+    let sync =
+        ScriptedSync::with_credential(1, 1, vec![], CredentialKind::OAuth2Bearer, "fresh-access");
     let h = make_harness_with_config_smtp_oauth(
-        Arc::new(NoImap),
-        sync,
-        Arc::new(MockSmtp::ok()),
+        no_imap(),
+        sync.syncer(),
+        MockSmtp::ok().submitter(),
         oauth,
         WorkerConfig::default(),
     )
@@ -2019,7 +2025,7 @@ async fn account_sync_folder_inserts_new_messages_and_publishes_events() {
             raw: rfc822("a2@x", Some("a1@x"), "Re: Hello", "again"),
         },
     ];
-    let h = make_harness_with_sync(Arc::new(ScriptedSync::new(1, 7, msgs))).await;
+    let h = make_harness_with_sync(ScriptedSync::new(1, 7, msgs).syncer()).await;
     let account_id = setup_account_with_secret(&h).await;
 
     // subscribe to mail.new before triggering the sync so we see events
@@ -2194,7 +2200,7 @@ async fn account_sync_folder_persists_attachment_bytes_for_safe_preview() {
         internal_date: Some(chrono::Utc::now()),
         raw: rfc822_with_text_attachment("sync-attachment@x", "sync.txt", attachment_text),
     }];
-    let h = make_harness_with_sync(Arc::new(ScriptedSync::new(1, 56, msgs))).await;
+    let h = make_harness_with_sync(ScriptedSync::new(1, 56, msgs).syncer()).await;
     let account_id = setup_account_with_secret(&h).await;
 
     let mut c = Client::connect(&h.sock).await.unwrap();
@@ -2246,8 +2252,8 @@ async fn account_sync_folder_skips_already_present_uids() {
         internal_date: Some(chrono::Utc::now()),
         raw: rfc822("dup@x", None, "Hi", "dup"),
     }];
-    let scripted = Arc::new(ScriptedSync::new(1, 2, msgs));
-    let h = make_harness_with_sync(scripted.clone()).await;
+    let scripted = ScriptedSync::new(1, 2, msgs);
+    let h = make_harness_with_sync(scripted.syncer()).await;
     let account_id = setup_account_with_secret(&h).await;
 
     let mut c = Client::connect(&h.sock).await.unwrap();
@@ -2286,7 +2292,7 @@ async fn account_sync_folder_skips_already_present_uids() {
 
 #[tokio::test]
 async fn account_sync_folder_uid_validity_change_triggers_full_resync() {
-    let scripted = Arc::new(ScriptedSync::new(
+    let scripted = ScriptedSync::new(
         1,
         2,
         vec![FetchedMessage {
@@ -2295,8 +2301,8 @@ async fn account_sync_folder_uid_validity_change_triggers_full_resync() {
             internal_date: Some(chrono::Utc::now()),
             raw: rfc822("first@x", None, "first", "body1"),
         }],
-    ));
-    let h = make_harness_with_sync(scripted.clone()).await;
+    );
+    let h = make_harness_with_sync(scripted.syncer()).await;
     let account_id = setup_account_with_secret(&h).await;
 
     let mut c = Client::connect(&h.sock).await.unwrap();
@@ -2348,7 +2354,7 @@ async fn account_sync_folder_uid_validity_change_triggers_full_resync() {
 
 #[tokio::test]
 async fn account_sync_folder_empty_inbox_is_a_noop() {
-    let h = make_harness_with_sync(Arc::new(ScriptedSync::new(1, 1, vec![]))).await;
+    let h = make_harness_with_sync(ScriptedSync::new(1, 1, vec![]).syncer()).await;
     let account_id = setup_account_with_secret(&h).await;
 
     let mut c = Client::connect(&h.sock).await.unwrap();
@@ -2367,7 +2373,7 @@ async fn account_sync_folder_empty_inbox_is_a_noop() {
 #[tokio::test]
 async fn account_sync_folder_returns_auth_failed_on_bad_password() {
     // Stored password is "wrong" but ScriptedSync expects "right"
-    let h = make_harness_with_sync(Arc::new(ScriptedSync::new(1, 1, vec![]))).await;
+    let h = make_harness_with_sync(ScriptedSync::new(1, 1, vec![]).syncer()).await;
     let id = make_account(&h, "u@example.com").await;
     folders::upsert(
         &h.pool,
@@ -2405,7 +2411,7 @@ async fn account_sync_folder_returns_auth_failed_on_bad_password() {
 
 #[tokio::test]
 async fn account_sync_folder_unknown_folder_returns_bad_args() {
-    let h = make_harness_with_sync(Arc::new(ScriptedSync::new(1, 1, vec![]))).await;
+    let h = make_harness_with_sync(ScriptedSync::new(1, 1, vec![]).syncer()).await;
     let id = make_account(&h, "u@example.com").await;
     let mut c = Client::connect(&h.sock).await.unwrap();
     c.request(
@@ -2430,7 +2436,7 @@ async fn account_sync_folder_unknown_folder_returns_bad_args() {
 
 #[tokio::test]
 async fn account_sync_folder_missing_secret_surfaces_specific_error() {
-    let h = make_harness_with_sync(Arc::new(ScriptedSync::new(1, 1, vec![]))).await;
+    let h = make_harness_with_sync(ScriptedSync::new(1, 1, vec![]).syncer()).await;
     let id = make_account(&h, "u@example.com").await;
     folders::upsert(
         &h.pool,
@@ -3247,8 +3253,8 @@ async fn draft_create_attachment_missing_path_returns_bad_args() {
 
 #[tokio::test]
 async fn message_send_with_attachments_builds_multipart_mime() {
-    let smtp = Arc::new(MockSmtp::ok());
-    let h = make_harness_with_smtp(smtp.clone()).await;
+    let smtp = MockSmtp::ok();
+    let h = make_harness_with_smtp(smtp.submitter()).await;
     let account_id = setup_account_with_secret(&h).await;
     let mut c = Client::connect(&h.sock).await.unwrap();
 
@@ -3562,8 +3568,8 @@ async fn attachment_fetch_for_forward_without_cache_or_creds_returns_unavailable
 
 #[tokio::test]
 async fn message_send_with_reply_headers_emits_in_reply_to_and_references() {
-    let smtp = Arc::new(MockSmtp::ok());
-    let h = make_harness_with_smtp(smtp.clone()).await;
+    let smtp = MockSmtp::ok();
+    let h = make_harness_with_smtp(smtp.submitter()).await;
     let account_id = setup_account_with_secret(&h).await;
     let mut c = Client::connect(&h.sock).await.unwrap();
 
@@ -3794,8 +3800,8 @@ async fn draft_delete_cascades_attachments() {
 
 #[tokio::test]
 async fn message_send_removes_draft_after_smtp_accepts() {
-    let smtp = Arc::new(MockSmtp::ok());
-    let h = make_harness_with_smtp(smtp.clone()).await;
+    let smtp = MockSmtp::ok();
+    let h = make_harness_with_smtp(smtp.submitter()).await;
     let account_id = setup_account_with_secret(&h).await;
     let mut c = Client::connect(&h.sock).await.unwrap();
 

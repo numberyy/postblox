@@ -73,6 +73,7 @@ mime_guess = { version = "2", default-features = false }
 arboard = { version = "3", default-features = false }
 
 [dev-dependencies]
+mockall = "0.14"
 tempfile = "3"
 
 [profile.release]
