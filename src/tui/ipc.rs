@@ -86,6 +86,20 @@ impl ForwardAttachmentBytes {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct ForwardAttachmentBatch {
+    pub attachments: Vec<ForwardAttachmentBytes>,
+    pub failed: Vec<ForwardAttachmentFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct ForwardAttachmentFailure {
+    pub attachment_id: AttachmentId,
+    pub filename: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 struct SendResult {
     message_id: String,
 }
@@ -432,6 +446,20 @@ impl MailboxClient {
             )
             .await?;
         decode_response("attachment.fetch_for_forward", response)
+    }
+
+    pub async fn fetch_attachments_for_forward(
+        &mut self,
+        message_id: MessageId,
+        attachment_ids: &[AttachmentId],
+    ) -> Result<ForwardAttachmentBatch, MailboxError> {
+        let response = self
+            .request(
+                "attachment.fetch_for_forward_batch",
+                json!({ "message_id": message_id, "attachment_ids": attachment_ids }),
+            )
+            .await?;
+        decode_response("attachment.fetch_for_forward_batch", response)
     }
 
     /// Subscribe to a daemon event topic. Returns the daemon-allocated

@@ -3683,6 +3683,138 @@ async fn attachment_fetch_for_forward_returns_cached_bytes_when_available() {
 }
 
 #[tokio::test]
+async fn attachment_fetch_for_forward_batch_returns_cached_bytes() {
+    let h = make_harness().await;
+    let (_account_id, _folder_id, message_id) = insert_reply_seed(&h).await;
+    let first_path = h._db_dir.path().join("cached-first.txt");
+    let second_path = h._db_dir.path().join("cached-second.txt");
+    let first_payload = b"first forward bytes";
+    let second_payload = b"second forward bytes";
+    tokio::fs::write(&first_path, first_payload).await.unwrap();
+    tokio::fs::write(&second_path, second_payload)
+        .await
+        .unwrap();
+    let first = db_attachments::create(
+        &h.pool,
+        &db_attachments::NewAttachment {
+            message_id,
+            filename: "cached-first.txt".into(),
+            content_type: "text/plain".into(),
+            content_id: None,
+            size_bytes: first_payload.len() as i64,
+            disposition: AttachmentDisposition::Attachment,
+            storage_path: first_path.display().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let second = db_attachments::create(
+        &h.pool,
+        &db_attachments::NewAttachment {
+            message_id,
+            filename: "cached-second.txt".into(),
+            content_type: "text/plain".into(),
+            content_id: None,
+            size_bytes: second_payload.len() as i64,
+            disposition: AttachmentDisposition::Attachment,
+            storage_path: second_path.display().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "attachment.fetch_for_forward_batch",
+            json!({
+                "message_id": message_id,
+                "attachment_ids": [first.id, second.id],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp.error);
+    assert!(resp.data["failed"].as_array().unwrap().is_empty());
+    let attachments = resp.data["attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 2);
+    assert_eq!(attachments[0]["filename"], "cached-first.txt");
+    assert_eq!(attachments[1]["filename"], "cached-second.txt");
+    use base64::Engine;
+    let decoded_first = base64::engine::general_purpose::STANDARD
+        .decode(attachments[0]["content_base64"].as_str().unwrap())
+        .unwrap();
+    let decoded_second = base64::engine::general_purpose::STANDARD
+        .decode(attachments[1]["content_base64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(decoded_first, first_payload);
+    assert_eq!(decoded_second, second_payload);
+}
+
+#[tokio::test]
+async fn attachment_fetch_for_forward_batch_reports_partial_failures() {
+    let h = make_harness().await;
+    let (_account_id, _folder_id, message_id) = insert_reply_seed(&h).await;
+    let cached_path = h._db_dir.path().join("batch-cached.txt");
+    let payload = b"cached batch bytes";
+    tokio::fs::write(&cached_path, payload).await.unwrap();
+    let cached = db_attachments::create(
+        &h.pool,
+        &db_attachments::NewAttachment {
+            message_id,
+            filename: "batch-cached.txt".into(),
+            content_type: "text/plain".into(),
+            content_id: None,
+            size_bytes: payload.len() as i64,
+            disposition: AttachmentDisposition::Attachment,
+            storage_path: cached_path.display().to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let missing = db_attachments::create(
+        &h.pool,
+        &db_attachments::NewAttachment {
+            message_id,
+            filename: "batch-missing.bin".into(),
+            content_type: "application/octet-stream".into(),
+            content_id: None,
+            size_bytes: 0,
+            disposition: AttachmentDisposition::Attachment,
+            storage_path: h
+                ._db_dir
+                .path()
+                .join("batch-missing.bin")
+                .display()
+                .to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let resp = c
+        .request(
+            "attachment.fetch_for_forward_batch",
+            json!({
+                "message_id": message_id,
+                "attachment_ids": [cached.id, missing.id],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(resp.ok, "{:?}", resp.error);
+    let attachments = resp.data["attachments"].as_array().unwrap();
+    let failed = resp.data["failed"].as_array().unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0]["filename"], "batch-cached.txt");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["attachment_id"], missing.id.to_string());
+    assert_eq!(failed[0]["filename"], "batch-missing.bin");
+    assert_eq!(failed[0]["code"], "unavailable_offline");
+}
+
+#[tokio::test]
 async fn attachment_fetch_for_forward_without_cache_or_creds_returns_unavailable_offline() {
     let h = make_harness().await;
     let (_account_id, _folder_id, message_id) = insert_reply_seed(&h).await;

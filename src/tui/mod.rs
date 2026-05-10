@@ -42,6 +42,8 @@ const DETAIL_KEY_VIEWPORT_LINES: usize = 6;
 /// height we render today; used by `j/k`/Page keys when there is no
 /// frame around to measure.
 const PREVIEW_KEY_VIEWPORT_LINES: usize = 6;
+const FORWARD_ATTACHMENT_BATCH_MAX_IDS: usize = 32;
+const FORWARD_ATTACHMENT_BATCH_WIRE_BUDGET: usize = crate::ipc::wire::MAX_FRAME_BYTES - (64 * 1024);
 
 #[derive(Debug, Error)]
 pub enum TuiError {
@@ -153,6 +155,29 @@ trait Mailbox {
         &mut self,
         attachment_id: AttachmentId,
     ) -> Result<ipc::ForwardAttachmentBytes, ipc::MailboxError>;
+    async fn fetch_attachments_for_forward(
+        &mut self,
+        _message_id: MessageId,
+        attachment_ids: &[AttachmentId],
+    ) -> Result<ipc::ForwardAttachmentBatch, ipc::MailboxError> {
+        let mut attachments = Vec::with_capacity(attachment_ids.len());
+        let mut failed = Vec::new();
+        for attachment_id in attachment_ids {
+            match self.fetch_attachment_for_forward(*attachment_id).await {
+                Ok(bytes) => attachments.push(bytes),
+                Err(error) => failed.push(ipc::ForwardAttachmentFailure {
+                    attachment_id: *attachment_id,
+                    filename: String::new(),
+                    code: "request_failed".into(),
+                    message: error.to_string(),
+                }),
+            }
+        }
+        Ok(ipc::ForwardAttachmentBatch {
+            attachments,
+            failed,
+        })
+    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -321,6 +346,14 @@ impl Mailbox for MailboxClient {
         attachment_id: AttachmentId,
     ) -> Result<ipc::ForwardAttachmentBytes, ipc::MailboxError> {
         MailboxClient::fetch_attachment_for_forward(self, attachment_id).await
+    }
+
+    async fn fetch_attachments_for_forward(
+        &mut self,
+        message_id: MessageId,
+        attachment_ids: &[AttachmentId],
+    ) -> Result<ipc::ForwardAttachmentBatch, ipc::MailboxError> {
+        MailboxClient::fetch_attachments_for_forward(self, message_id, attachment_ids).await
     }
 }
 
@@ -782,16 +815,31 @@ async fn run_forward<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
     let mut attachments: Vec<app::ComposerAttachment> =
         Vec::with_capacity(prepared.forwarded_attachments.len());
     let mut failed_attachments: Vec<String> = Vec::new();
-    for meta in &prepared.forwarded_attachments {
+    for attachment_ids in forward_attachment_batches(&prepared.forwarded_attachments) {
         match client
-            .fetch_attachment_for_forward(meta.attachment_id)
+            .fetch_attachments_for_forward(prepared.message_id, &attachment_ids)
             .await
         {
-            Ok(bytes) => match materialise_forward_attachment(&bytes).await {
-                Ok(attachment) => attachments.push(attachment),
-                Err(_) => failed_attachments.push(meta.filename.clone()),
-            },
-            Err(_) => failed_attachments.push(meta.filename.clone()),
+            Ok(batch) => {
+                for bytes in batch.attachments {
+                    match materialise_forward_attachment(&bytes).await {
+                        Ok(attachment) => attachments.push(attachment),
+                        Err(_) => failed_attachments.push(bytes.filename),
+                    }
+                }
+                failed_attachments.extend(batch.failed.into_iter().map(|failure| {
+                    if failure.filename.is_empty() {
+                        failure.attachment_id.to_string()
+                    } else {
+                        failure.filename
+                    }
+                }));
+            }
+            Err(_) => {
+                failed_attachments.extend(attachment_ids.iter().map(|attachment_id| {
+                    forward_attachment_label(&prepared.forwarded_attachments, *attachment_id)
+                }));
+            }
         }
     }
     if !failed_attachments.is_empty() {
@@ -813,7 +861,51 @@ async fn run_forward<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
     app.set_status("Forward");
 }
 
-/// Decode the bytes returned by `attachment.fetch_for_forward` and
+fn forward_attachment_batches(metas: &[ipc::ForwardAttachmentMeta]) -> Vec<Vec<AttachmentId>> {
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    let mut estimated_wire_bytes = 0usize;
+
+    for meta in metas {
+        let next_bytes = estimated_forward_attachment_wire_bytes(meta.size_bytes);
+        let would_exceed_count = batch.len() >= FORWARD_ATTACHMENT_BATCH_MAX_IDS;
+        let would_exceed_budget = !batch.is_empty()
+            && estimated_wire_bytes.saturating_add(next_bytes)
+                > FORWARD_ATTACHMENT_BATCH_WIRE_BUDGET;
+        if would_exceed_count || would_exceed_budget {
+            batches.push(std::mem::take(&mut batch));
+            estimated_wire_bytes = 0;
+        }
+
+        batch.push(meta.attachment_id);
+        estimated_wire_bytes = estimated_wire_bytes.saturating_add(next_bytes);
+    }
+
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    batches
+}
+
+fn estimated_forward_attachment_wire_bytes(size_bytes: i64) -> usize {
+    let raw_bytes = usize::try_from(size_bytes.max(0)).unwrap_or(usize::MAX / 4);
+    (raw_bytes.saturating_add(2) / 3)
+        .saturating_mul(4)
+        .saturating_add(512)
+}
+
+fn forward_attachment_label(
+    metas: &[ipc::ForwardAttachmentMeta],
+    attachment_id: AttachmentId,
+) -> String {
+    metas
+        .iter()
+        .find(|meta| meta.attachment_id == attachment_id)
+        .map(|meta| meta.filename.clone())
+        .unwrap_or_else(|| attachment_id.to_string())
+}
+
+/// Decode bytes returned by the forward-attachment fetch ops and
 /// stash them in a temp file the composer can attach. The composer
 /// API only takes file paths, so we materialise the bytes once.
 async fn materialise_forward_attachment(
@@ -2351,6 +2443,7 @@ mod tests {
         PrepareReply(MessageId, bool),
         PrepareForward(MessageId),
         FetchAttachmentForForward(AttachmentId),
+        FetchAttachmentsForForward(MessageId, Vec<AttachmentId>),
         ListDrafts(AccountId),
         GetDraft(DraftId),
         DeleteDraft(DraftId),
@@ -2369,6 +2462,7 @@ mod tests {
         reply_prepared: Option<ipc::ReplyPrepared>,
         forward_prepared: Option<ipc::ForwardPrepared>,
         forward_attachment_bytes: Option<ipc::ForwardAttachmentBytes>,
+        forward_attachment_batch: Option<ipc::ForwardAttachmentBatch>,
         drafts: Vec<app::DraftItem>,
         draft_summary: Option<app::DraftSummary>,
         fail_sync: bool,
@@ -2382,6 +2476,7 @@ mod tests {
         fail_prepare_reply: bool,
         fail_prepare_forward: bool,
         fail_fetch_attachment_for_forward: bool,
+        fail_fetch_attachments_for_forward: bool,
         fail_list_drafts: bool,
         fail_get_draft: bool,
         fail_delete_draft: bool,
@@ -2650,6 +2745,35 @@ mod tests {
                     content_type: "application/octet-stream".into(),
                     size_bytes: 0,
                     content_base64: String::new(),
+                }
+            }))
+        }
+
+        async fn fetch_attachments_for_forward(
+            &mut self,
+            message_id: MessageId,
+            attachment_ids: &[AttachmentId],
+        ) -> Result<ipc::ForwardAttachmentBatch, ipc::MailboxError> {
+            self.calls.push(Call::FetchAttachmentsForForward(
+                message_id,
+                attachment_ids.to_vec(),
+            ));
+            if self.fail_fetch_attachments_for_forward {
+                return Err(server_error("attachment.fetch_for_forward_batch"));
+            }
+            Ok(self.forward_attachment_batch.clone().unwrap_or_else(|| {
+                ipc::ForwardAttachmentBatch {
+                    attachments: attachment_ids
+                        .iter()
+                        .map(|attachment_id| ipc::ForwardAttachmentBytes {
+                            attachment_id: *attachment_id,
+                            filename: "att.bin".into(),
+                            content_type: "application/octet-stream".into(),
+                            size_bytes: 0,
+                            content_base64: String::new(),
+                        })
+                        .collect(),
+                    failed: Vec::new(),
                 }
             }))
         }
@@ -4910,6 +5034,177 @@ mod tests {
         assert!(composer.subject.starts_with("Fwd: "));
         assert!(composer.to.is_empty());
         assert_eq!(app.status, "Forward");
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_capital_f_fetches_forward_attachments_in_batch() {
+        use base64::Engine;
+
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        let first_id = AttachmentId::new();
+        let second_id = AttachmentId::new();
+        let mut prepared = forward_prepared_fixture(message.id, account_id);
+        prepared.forwarded_attachments = vec![
+            ipc::ForwardAttachmentMeta {
+                message_id: message.id,
+                attachment_id: first_id,
+                filename: "first.txt".into(),
+                content_type: "text/plain".into(),
+                size_bytes: 5,
+            },
+            ipc::ForwardAttachmentMeta {
+                message_id: message.id,
+                attachment_id: second_id,
+                filename: "second.txt".into(),
+                content_type: "text/plain".into(),
+                size_bytes: 6,
+            },
+        ];
+        let mut client = MockMailbox {
+            forward_prepared: Some(prepared),
+            forward_attachment_batch: Some(ipc::ForwardAttachmentBatch {
+                attachments: vec![
+                    ipc::ForwardAttachmentBytes {
+                        attachment_id: first_id,
+                        filename: "first.txt".into(),
+                        content_type: "text/plain".into(),
+                        size_bytes: 5,
+                        content_base64: base64::engine::general_purpose::STANDARD.encode(b"first"),
+                    },
+                    ipc::ForwardAttachmentBytes {
+                        attachment_id: second_id,
+                        filename: "second.txt".into(),
+                        content_type: "text/plain".into(),
+                        size_bytes: 6,
+                        content_base64: base64::engine::general_purpose::STANDARD.encode(b"second"),
+                    },
+                ],
+                failed: Vec::new(),
+            }),
+            ..Default::default()
+        };
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert!(matches!(
+            client.calls.as_slice(),
+            [
+                Call::PrepareForward(id),
+                Call::FetchAttachmentsForForward(batch_message_id, ids),
+            ] if *id == message.id
+                && *batch_message_id == message.id
+                && ids.as_slice() == [first_id, second_id]
+        ));
+        let composer = app.composer.as_ref().unwrap();
+        let filenames = composer
+            .attachments()
+            .iter()
+            .map(|attachment| attachment.filename.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(filenames, vec!["first.txt", "second.txt"]);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_capital_f_reports_batch_attachment_failures() {
+        use base64::Engine;
+
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        let ok_id = AttachmentId::new();
+        let missing_id = AttachmentId::new();
+        let mut prepared = forward_prepared_fixture(message.id, account_id);
+        prepared.forwarded_attachments = vec![
+            ipc::ForwardAttachmentMeta {
+                message_id: message.id,
+                attachment_id: ok_id,
+                filename: "ok.txt".into(),
+                content_type: "text/plain".into(),
+                size_bytes: 2,
+            },
+            ipc::ForwardAttachmentMeta {
+                message_id: message.id,
+                attachment_id: missing_id,
+                filename: "missing.bin".into(),
+                content_type: "application/octet-stream".into(),
+                size_bytes: 0,
+            },
+        ];
+        let mut client = MockMailbox {
+            forward_prepared: Some(prepared),
+            forward_attachment_batch: Some(ipc::ForwardAttachmentBatch {
+                attachments: vec![ipc::ForwardAttachmentBytes {
+                    attachment_id: ok_id,
+                    filename: "ok.txt".into(),
+                    content_type: "text/plain".into(),
+                    size_bytes: 2,
+                    content_base64: base64::engine::general_purpose::STANDARD.encode(b"ok"),
+                }],
+                failed: vec![ipc::ForwardAttachmentFailure {
+                    attachment_id: missing_id,
+                    filename: "missing.bin".into(),
+                    code: "unavailable_offline".into(),
+                    message: "attachment unavailable offline".into(),
+                }],
+            }),
+            ..Default::default()
+        };
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.attachments().len(), 1);
+        assert_eq!(composer.attachments()[0].filename, "ok.txt");
+        assert!(app
+            .toasts
+            .iter()
+            .any(|toast| toast.text.contains("missing.bin")));
+        assert_eq!(app.status, "Forward");
+    }
+
+    #[test]
+    fn test_forward_attachment_batches_split_by_count_and_wire_budget() {
+        let message_id = MessageId::new();
+        let small = (0..=FORWARD_ATTACHMENT_BATCH_MAX_IDS)
+            .map(|index| ipc::ForwardAttachmentMeta {
+                message_id,
+                attachment_id: AttachmentId::new(),
+                filename: format!("small-{index}.txt"),
+                content_type: "text/plain".into(),
+                size_bytes: 1,
+            })
+            .collect::<Vec<_>>();
+        let small_batches = forward_attachment_batches(&small);
+        assert_eq!(small_batches.len(), 2);
+        assert_eq!(small_batches[0].len(), FORWARD_ATTACHMENT_BATCH_MAX_IDS);
+        assert_eq!(small_batches[1].len(), 1);
+
+        let large_size = (FORWARD_ATTACHMENT_BATCH_WIRE_BUDGET / 2) as i64;
+        let large = (0..2)
+            .map(|index| ipc::ForwardAttachmentMeta {
+                message_id,
+                attachment_id: AttachmentId::new(),
+                filename: format!("large-{index}.bin"),
+                content_type: "application/octet-stream".into(),
+                size_bytes: large_size,
+            })
+            .collect::<Vec<_>>();
+        let large_batches = forward_attachment_batches(&large);
+        assert_eq!(large_batches.len(), 2);
+        assert_eq!(large_batches[0].len(), 1);
+        assert_eq!(large_batches[1].len(), 1);
     }
 
     #[tokio::test]

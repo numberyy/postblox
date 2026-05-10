@@ -3,6 +3,7 @@
 //! Maps wire op names to `db::*` calls and publishes events on the
 //! [`Hub`] for write ops. No IMAP/SMTP yet — that wires in R3b.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -17,8 +18,8 @@ use crate::db;
 use crate::imap::{self, ImapAuth, ImapError, ImapIdle, ImapSync};
 use crate::ipc::{Dispatcher, Hub, RpcError, Topic};
 use crate::models::{
-    Account, AccountId, AddressList, ApprovalState, AttachmentId, AuthKind, DraftId, FolderId,
-    FolderRole, GateAction, MessageFlags, MessageId, ThreadId,
+    Account, AccountId, AddressList, ApprovalState, Attachment, AttachmentId, AuthKind, DraftId,
+    FolderId, FolderRole, GateAction, Message, MessageFlags, MessageId, ThreadId,
 };
 use crate::oauth::google::{
     self, GoogleOAuth, GoogleOAuthConfig, GoogleOAuthError, GoogleOAuthHttpClient,
@@ -395,6 +396,16 @@ impl Dispatcher for DaemonDispatcher {
             Op::MessagePrepareForward => op_message_prepare_forward(&self.pool, args).await,
             Op::AttachmentFetchForForward => {
                 op_attachment_fetch_for_forward(
+                    &self.pool,
+                    self.imap_sync.as_ref(),
+                    self.secrets.as_ref(),
+                    self.oauth.as_ref(),
+                    args,
+                )
+                .await
+            }
+            Op::AttachmentFetchForForwardBatch => {
+                op_attachment_fetch_for_forward_batch(
                     &self.pool,
                     self.imap_sync.as_ref(),
                     self.secrets.as_ref(),
@@ -1384,9 +1395,8 @@ async fn op_message_prepare_reply(pool: &SqlitePool, args: Value) -> Result<Valu
     }))
 }
 
-/// Build a `ForwardDraft` plus a manifest of the original
-/// attachments. The TUI then asks `attachment.fetch_for_forward` per
-/// entry to materialise bytes before the user sends.
+/// Build a `ForwardDraft` plus a manifest of original attachments.
+/// The TUI fetches the bytes in one follow-up batch before sending.
 async fn op_message_prepare_forward(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
     let message_id = parse_id::<MessageId>(&args, "message_id")?;
     let message = require_message(pool, message_id).await?;
@@ -1458,8 +1468,6 @@ async fn op_attachment_fetch_for_forward(
     oauth: &dyn GoogleOAuth,
     args: Value,
 ) -> Result<Value, RpcError> {
-    use base64::Engine;
-
     let attachment_id = parse_id::<AttachmentId>(&args, "attachment_id")?;
     let attachment = db::attachments::get(pool, attachment_id)
         .await
@@ -1467,17 +1475,104 @@ async fn op_attachment_fetch_for_forward(
         .ok_or_else(|| RpcError::bad_args("unknown attachment id"))?;
 
     if let Ok(bytes) = tokio::fs::read(&attachment.storage_path).await {
-        return Ok(json!({
-            "attachment_id": attachment.id.to_string(),
-            "filename": attachment.filename,
-            "content_type": attachment.content_type,
-            "size_bytes": bytes.len() as i64,
-            "content_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-            "source": "cache",
-        }));
+        return Ok(forward_attachment_payload(&attachment, &bytes, "cache"));
     }
 
-    let message = db::messages::get(pool, attachment.message_id)
+    let message = forward_parent_message(pool, attachment.message_id).await?;
+    let mut parsed = refetch_forward_attachments(pool, imap_sync, secrets, oauth, &message).await?;
+    let bytes = pick_attachment_bytes(&mut parsed, &attachment)
+        .ok_or_else(|| RpcError::new("unavailable_offline", "attachment unavailable offline"))?;
+
+    if let Err(e) = persist_refetched_bytes(&attachment.storage_path, &bytes).await {
+        tracing::warn!(error = %e, "could not cache refetched attachment bytes");
+    }
+
+    Ok(forward_attachment_payload(&attachment, &bytes, "imap"))
+}
+
+const MAX_FORWARD_ATTACHMENT_BATCH: usize = 32;
+
+async fn op_attachment_fetch_for_forward_batch(
+    pool: &SqlitePool,
+    imap_sync: &dyn ImapSync,
+    secrets: &dyn SecretStore,
+    oauth: &dyn GoogleOAuth,
+    args: Value,
+) -> Result<Value, RpcError> {
+    let message_id = parse_id::<MessageId>(&args, "message_id")?;
+    let attachment_ids =
+        parse_id_array::<AttachmentId>(&args, "attachment_ids", MAX_FORWARD_ATTACHMENT_BATCH)?;
+    let message = require_message(pool, message_id).await?;
+    let message_attachments = db::attachments::list_for_message(pool, message_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("attachments::list_for_message: {e}")))?;
+    let mut message_attachments: HashMap<AttachmentId, Attachment> = message_attachments
+        .into_iter()
+        .map(|attachment| (attachment.id, attachment))
+        .collect();
+
+    let mut attachments = vec![None; attachment_ids.len()];
+    let mut failed = Vec::new();
+    let mut cache_misses = Vec::new();
+
+    for (index, attachment_id) in attachment_ids.into_iter().enumerate() {
+        let Some(attachment) = message_attachments.remove(&attachment_id) else {
+            failed.push(json!({
+                "attachment_id": attachment_id.to_string(),
+                "filename": "",
+                "code": "bad_args",
+                "message": "unknown attachment id for message",
+            }));
+            continue;
+        };
+
+        match tokio::fs::read(&attachment.storage_path).await {
+            Ok(bytes) => {
+                attachments[index] = Some(forward_attachment_payload(&attachment, &bytes, "cache"));
+            }
+            Err(_) => cache_misses.push((index, attachment)),
+        }
+    }
+
+    if !cache_misses.is_empty() {
+        match refetch_forward_attachments(pool, imap_sync, secrets, oauth, &message).await {
+            Ok(mut parsed) => {
+                for (index, attachment) in cache_misses {
+                    if let Some(bytes) = pick_attachment_bytes(&mut parsed, &attachment) {
+                        if let Err(e) =
+                            persist_refetched_bytes(&attachment.storage_path, &bytes).await
+                        {
+                            tracing::warn!(error = %e, "could not cache refetched attachment bytes");
+                        }
+                        attachments[index] =
+                            Some(forward_attachment_payload(&attachment, &bytes, "imap"));
+                    } else {
+                        failed.push(forward_attachment_failure(
+                            &attachment,
+                            &RpcError::new("unavailable_offline", "attachment unavailable offline"),
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                for (_, attachment) in cache_misses {
+                    failed.push(forward_attachment_failure(&attachment, &error));
+                }
+            }
+        }
+    }
+
+    Ok(json!({
+        "attachments": attachments.into_iter().flatten().collect::<Vec<_>>(),
+        "failed": failed,
+    }))
+}
+
+async fn forward_parent_message(
+    pool: &SqlitePool,
+    message_id: MessageId,
+) -> Result<Message, RpcError> {
+    db::messages::get(pool, message_id)
         .await
         .map_err(|e| RpcError::internal(format!("messages::get: {e}")))?
         .ok_or_else(|| {
@@ -1485,8 +1580,16 @@ async fn op_attachment_fetch_for_forward(
                 "unavailable_offline",
                 "attachment unavailable offline (parent message missing)",
             )
-        })?;
-    // folder and account are independent given `message`; fetch concurrently.
+        })
+}
+
+async fn refetch_forward_attachments(
+    pool: &SqlitePool,
+    imap_sync: &dyn ImapSync,
+    secrets: &dyn SecretStore,
+    oauth: &dyn GoogleOAuth,
+    message: &Message,
+) -> Result<Vec<crate::mail::parser::ParsedAttachment>, RpcError> {
     let (folder, account) = tokio::try_join!(
         db::folders::get(pool, message.folder_id),
         db::accounts::get(pool, message.account_id),
@@ -1542,25 +1645,33 @@ async fn op_attachment_fetch_for_forward(
         .ok_or_else(|| RpcError::new("unavailable_offline", "attachment unavailable offline"))?;
     let parsed = crate::mail::parser::parse(&fetched.raw)
         .map_err(|_| RpcError::new("unavailable_offline", "attachment unavailable offline"))?;
-    let bytes = pick_attachment_bytes(parsed.attachments, &attachment)
-        .ok_or_else(|| RpcError::new("unavailable_offline", "attachment unavailable offline"))?;
+    Ok(parsed.attachments)
+}
 
-    if let Err(e) = persist_refetched_bytes(&attachment.storage_path, &bytes).await {
-        tracing::warn!(error = %e, "could not cache refetched attachment bytes");
-    }
+fn forward_attachment_payload(attachment: &Attachment, bytes: &[u8], source: &str) -> Value {
+    use base64::Engine;
 
-    Ok(json!({
+    json!({
         "attachment_id": attachment.id.to_string(),
-        "filename": attachment.filename,
-        "content_type": attachment.content_type,
+        "filename": &attachment.filename,
+        "content_type": &attachment.content_type,
         "size_bytes": bytes.len() as i64,
-        "content_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-        "source": "imap",
-    }))
+        "content_base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+        "source": source,
+    })
+}
+
+fn forward_attachment_failure(attachment: &Attachment, error: &RpcError) -> Value {
+    json!({
+        "attachment_id": attachment.id.to_string(),
+        "filename": &attachment.filename,
+        "code": &error.code,
+        "message": &error.message,
+    })
 }
 
 fn pick_attachment_bytes(
-    mut parsed: Vec<crate::mail::parser::ParsedAttachment>,
+    parsed: &mut Vec<crate::mail::parser::ParsedAttachment>,
     attachment: &crate::models::Attachment,
 ) -> Option<Vec<u8>> {
     let cid = attachment.content_id.as_deref().filter(|s| !s.is_empty());
@@ -2282,6 +2393,36 @@ where
         .map_err(|e| RpcError::bad_args(format!("bad '{key}': {e}")))
 }
 
+fn parse_id_array<T>(args: &Value, key: &str, max_len: usize) -> Result<Vec<T>, RpcError>
+where
+    T: std::str::FromStr<Err = uuid::Error>,
+{
+    let values = args
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| RpcError::bad_args(format!("missing '{key}'")))?;
+    if values.is_empty() {
+        return Err(RpcError::bad_args(format!("'{key}' cannot be empty")));
+    }
+    if values.len() > max_len {
+        return Err(RpcError::bad_args(format!(
+            "'{key}' cannot contain more than {max_len} ids"
+        )));
+    }
+
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let s = value
+                .as_str()
+                .ok_or_else(|| RpcError::bad_args(format!("'{key}[{index}]' must be a string")))?;
+            s.parse::<T>()
+                .map_err(|e| RpcError::bad_args(format!("bad '{key}[{index}]': {e}")))
+        })
+        .collect()
+}
+
 fn parse_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, RpcError> {
     args.get(key)
         .and_then(Value::as_str)
@@ -2549,7 +2690,7 @@ mod tests {
     #[test]
     fn test_pick_attachment_bytes_prefers_content_id_match() {
         use crate::mail::parser::{Disposition, ParsedAttachment};
-        let parsed = vec![
+        let mut parsed = vec![
             ParsedAttachment {
                 filename: "wrong.txt".into(),
                 content_type: "text/plain".into(),
@@ -2576,14 +2717,14 @@ mod tests {
             storage_path: String::new(),
             created_at: chrono::Utc::now(),
         };
-        let bytes = pick_attachment_bytes(parsed, &attachment).unwrap();
+        let bytes = pick_attachment_bytes(&mut parsed, &attachment).unwrap();
         assert_eq!(bytes, b"by-cid");
     }
 
     #[test]
     fn test_pick_attachment_bytes_falls_back_to_filename_when_cid_absent() {
         use crate::mail::parser::{Disposition, ParsedAttachment};
-        let parsed = vec![ParsedAttachment {
+        let mut parsed = vec![ParsedAttachment {
             filename: "report.pdf".into(),
             content_type: "application/pdf".into(),
             data: b"pdf-bytes".to_vec(),
@@ -2602,8 +2743,53 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         assert_eq!(
-            pick_attachment_bytes(parsed, &attachment).unwrap(),
+            pick_attachment_bytes(&mut parsed, &attachment).unwrap(),
             b"pdf-bytes"
+        );
+    }
+
+    #[test]
+    fn test_pick_attachment_bytes_consumes_duplicate_filename_matches() {
+        use crate::mail::parser::{Disposition, ParsedAttachment};
+        let mut parsed = vec![
+            ParsedAttachment {
+                filename: "report.pdf".into(),
+                content_type: "application/pdf".into(),
+                data: b"first".to_vec(),
+                disposition: Disposition::Attachment,
+                content_id: None,
+            },
+            ParsedAttachment {
+                filename: "report.pdf".into(),
+                content_type: "application/pdf".into(),
+                data: b"second".to_vec(),
+                disposition: Disposition::Attachment,
+                content_id: None,
+            },
+        ];
+        let attachment = crate::models::Attachment {
+            id: AttachmentId::new(),
+            message_id: MessageId::new(),
+            filename: "report.pdf".into(),
+            content_type: "application/pdf".into(),
+            content_id: None,
+            size_bytes: 5,
+            disposition: crate::models::AttachmentDisposition::Attachment,
+            storage_path: String::new(),
+            created_at: chrono::Utc::now(),
+        };
+        let next_attachment = crate::models::Attachment {
+            id: AttachmentId::new(),
+            ..attachment.clone()
+        };
+
+        assert_eq!(
+            pick_attachment_bytes(&mut parsed, &attachment).unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            pick_attachment_bytes(&mut parsed, &next_attachment).unwrap(),
+            b"second"
         );
     }
 

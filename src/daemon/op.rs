@@ -58,6 +58,7 @@ pub enum Op {
     MessagePrepareReply,
     MessagePrepareForward,
     AttachmentFetchForForward,
+    AttachmentFetchForForwardBatch,
     MessageSend,
 
     // -- network ops --
@@ -115,6 +116,7 @@ impl Op {
             Self::MessagePrepareReply => "message.prepare_reply",
             Self::MessagePrepareForward => "message.prepare_forward",
             Self::AttachmentFetchForForward => "attachment.fetch_for_forward",
+            Self::AttachmentFetchForForwardBatch => "attachment.fetch_for_forward_batch",
             Self::MessageSend => "message.send",
             Self::AccountTestLogin => "account.test_login",
             Self::AccountSyncFolder => "account.sync_folder",
@@ -181,6 +183,7 @@ impl FromStr for Op {
             "message.prepare_reply" => Ok(Self::MessagePrepareReply),
             "message.prepare_forward" => Ok(Self::MessagePrepareForward),
             "attachment.fetch_for_forward" => Ok(Self::AttachmentFetchForForward),
+            "attachment.fetch_for_forward_batch" => Ok(Self::AttachmentFetchForForwardBatch),
             "message.send" => Ok(Self::MessageSend),
             "account.test_login" => Ok(Self::AccountTestLogin),
             "account.sync_folder" => Ok(Self::AccountSyncFolder),
@@ -237,6 +240,7 @@ mod tests {
         Op::MessagePrepareReply,
         Op::MessagePrepareForward,
         Op::AttachmentFetchForForward,
+        Op::AttachmentFetchForForwardBatch,
         Op::MessageSend,
         Op::AccountTestLogin,
         Op::AccountSyncFolder,
