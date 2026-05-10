@@ -50,6 +50,9 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::connect(&db_path)
         .await
         .with_context(|| format!("connect to db at {}", db_path.display()))?;
+    let read_pool = db::connect_readonly(&db_path)
+        .await
+        .with_context(|| format!("connect read-only to db at {}", db_path.display()))?;
 
     let secrets = build_secret_store(&cfg, &db_path)?;
 
@@ -69,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
     );
     let dispatcher = Arc::new(DaemonDispatcher::with_imap_smtp_oauth_and_manager(
         pool,
+        read_pool,
         hub.clone(),
         imap_auth,
         imap_sync,

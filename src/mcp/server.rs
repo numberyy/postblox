@@ -789,7 +789,7 @@ mod tests {
             .handle_line(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)
             .await
             .unwrap();
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 12);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 14);
 
         let called = bridge
             .handle_line(

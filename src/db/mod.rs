@@ -16,6 +16,7 @@ pub mod folders;
 pub mod mcp;
 pub mod messages;
 pub mod search;
+pub mod sql_query;
 pub mod threads;
 
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +64,30 @@ pub async fn connect(path: &Path) -> Result<SqlitePool, DbError> {
         .await?;
 
     sqlx::migrate!("./migrations").run(&pool).await?;
+    Ok(pool)
+}
+
+/// Open a read-only SQLite pool against an existing file. Used by the
+/// agent-facing SQL surface; the daemon writes through the rwc pool
+/// returned by [`connect`] and queries from this one.
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the file is missing or unreadable, the
+/// pool can't acquire a connection within the timeout, or the connect
+/// string is rejected.
+pub async fn connect_readonly(path: &Path) -> Result<SqlitePool, DbError> {
+    let url = format!("sqlite://{}?mode=ro", path.display());
+    let opts = SqliteConnectOptions::from_str(&url)?
+        .create_if_missing(false)
+        .read_only(true)
+        .foreign_keys(true)
+        .busy_timeout(std::time::Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(std::time::Duration::from_secs(3))
+        .connect_with(opts)
+        .await?;
     Ok(pool)
 }
 

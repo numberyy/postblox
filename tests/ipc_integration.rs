@@ -177,6 +177,9 @@ async fn make_harness_with_config_smtp_oauth(
     );
     let dispatcher = Arc::new(DaemonDispatcher::with_imap_smtp_oauth_and_manager(
         pool.clone(),
+        // In-memory SQLite has no separate RO connection; reuse the
+        // same pool. The keyword scan is the actual safety net.
+        pool.clone(),
         hub.clone(),
         imap,
         imap_sync,

@@ -107,6 +107,11 @@ pub fn worker_manager_with_idle_config(
 #[derive(Clone)]
 pub struct DaemonDispatcher {
     pool: SqlitePool,
+    /// Sibling RO pool for the agent-facing `sql.query` / `sql.schema`
+    /// surface. Cloned from `pool` in tests (in-memory SQLite has no
+    /// separate RO connection); the daemon binary opens a real
+    /// `mode=ro` pool via [`crate::db::connect_readonly`].
+    read_pool: SqlitePool,
     hub: Arc<Hub>,
     imap: Arc<dyn ImapAuth>,
     imap_sync: Arc<dyn ImapSync>,
@@ -130,6 +135,7 @@ impl DaemonDispatcher {
     /// Production constructor: TLS-backed IMAP via rustls.
     pub fn new(
         pool: SqlitePool,
+        read_pool: SqlitePool,
         hub: Arc<Hub>,
         secrets: Arc<dyn SecretStore>,
     ) -> Result<Self, DispatcherInitError> {
@@ -149,6 +155,7 @@ impl DaemonDispatcher {
         );
         Ok(Self::with_imap_smtp_oauth_and_manager(
             pool,
+            read_pool,
             hub,
             imap,
             imap_sync,
@@ -188,8 +195,10 @@ impl DaemonDispatcher {
             &services,
             sync::WorkerConfig::default(),
         );
+        let read_pool = pool.clone();
         Self::with_imap_smtp_oauth_and_manager(
             pool,
+            read_pool,
             hub,
             imap,
             imap_sync,
@@ -230,8 +239,10 @@ impl DaemonDispatcher {
             &services,
             worker_config,
         );
+        let read_pool = pool.clone();
         Self::with_imap_smtp_oauth_and_manager(
             pool,
+            read_pool,
             hub,
             imap,
             imap_sync,
@@ -259,8 +270,10 @@ impl DaemonDispatcher {
             &services,
             worker_config,
         );
+        let read_pool = pool.clone();
         Self::with_imap_smtp_oauth_and_manager(
             pool,
+            read_pool,
             hub,
             imap,
             imap_sync,
@@ -292,8 +305,10 @@ impl DaemonDispatcher {
         worker_manager: Arc<sync::WorkerManager>,
     ) -> Self {
         let services = DaemonServices::with_smtp(smtp);
+        let read_pool = pool.clone();
         Self::with_imap_smtp_oauth_and_manager(
             pool,
+            read_pool,
             hub,
             imap,
             imap_sync,
@@ -303,8 +318,10 @@ impl DaemonDispatcher {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn with_imap_smtp_oauth_and_manager(
         pool: SqlitePool,
+        read_pool: SqlitePool,
         hub: Arc<Hub>,
         imap: Arc<dyn ImapAuth>,
         imap_sync: Arc<dyn ImapSync>,
@@ -314,6 +331,7 @@ impl DaemonDispatcher {
     ) -> Self {
         Self {
             pool,
+            read_pool,
             hub,
             imap,
             imap_sync,
@@ -343,6 +361,8 @@ impl Dispatcher for DaemonDispatcher {
             Op::AttachmentList => op_attachment_list(&self.pool, args).await,
             Op::AttachmentPreview => op_attachment_preview(&self.pool, args).await,
             Op::Search => op_search(&self.pool, args).await,
+            Op::SqlQuery => op_sql_query(&self.read_pool, args).await,
+            Op::SqlSchema => op_sql_schema(&self.read_pool).await,
             Op::AuditListRecent => op_audit_list(&self.pool, args).await,
 
             // -- MCP gate/approval ops --
@@ -549,6 +569,45 @@ async fn op_search(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
             .await,
         "search",
     )
+}
+
+async fn op_sql_query(read_pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    let sql = args
+        .get("sql")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::bad_args("missing 'sql'"))?;
+    let limit = args
+        .get("limit")
+        .map(|value| {
+            value
+                .as_u64()
+                .filter(|limit| *limit > 0)
+                .map(|limit| limit.min(crate::db::sql_query::MAX_ROWS as u64) as usize)
+                .ok_or_else(|| RpcError::bad_args("'limit' must be a positive integer"))
+        })
+        .transpose()?
+        .unwrap_or(crate::db::sql_query::DEFAULT_ROWS);
+    match crate::db::sql_query::query(read_pool, sql, limit).await {
+        Ok(rows) => serde_json::to_value(rows)
+            .map_err(|e| RpcError::internal(format!("sql_query encode: {e}"))),
+        Err(crate::db::sql_query::SqlError::Rejected { reason }) => Err(RpcError::bad_args(reason)),
+        Err(crate::db::sql_query::SqlError::Sqlx(e)) => {
+            Err(RpcError::internal(format!("sql_query: {e}")))
+        }
+    }
+}
+
+async fn op_sql_schema(read_pool: &SqlitePool) -> Result<Value, RpcError> {
+    match crate::db::sql_query::schema(read_pool).await {
+        Ok(rows) => serde_json::to_value(rows)
+            .map_err(|e| RpcError::internal(format!("sql_schema encode: {e}"))),
+        Err(crate::db::sql_query::SqlError::Sqlx(e)) => {
+            Err(RpcError::internal(format!("sql_schema: {e}")))
+        }
+        Err(crate::db::sql_query::SqlError::Rejected { reason }) => {
+            Err(RpcError::internal(format!("sql_schema rejected: {reason}")))
+        }
+    }
 }
 
 async fn op_audit_list(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
@@ -2491,6 +2550,131 @@ mod tests {
         let err = op_search(&pool, json!({})).await.unwrap_err();
         assert_eq!(err.code, "bad_args");
         assert!(err.message.contains("missing 'q'"));
+    }
+
+    #[tokio::test]
+    async fn test_op_sql_query_with_select_returns_rows() {
+        let pool = test_pool().await;
+        // In-memory SQLite has no separate RO connection; the keyword
+        // scan is the actual safety check being tested here.
+        let read_pool = pool.clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO accounts \
+             (id, email, display_name, auth_kind, secret_ref, \
+              imap_host, imap_port, imap_use_tls, smtp_host, smtp_port, \
+              smtp_use_tls, smtp_starttls, created_at) \
+             VALUES (?, 'a@b.com', 'A', 'password', NULL, \
+                     'imap.example', 993, 1, 'smtp.example', 587, 0, 1, '2026-01-01T00:00:00Z')",
+        )
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let value = op_sql_query(&read_pool, json!({"sql": "SELECT email FROM accounts"}))
+            .await
+            .unwrap();
+        let rows = value.as_array().expect("array");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["email"], "a@b.com");
+    }
+
+    #[tokio::test]
+    async fn test_op_sql_query_with_insert_returns_bad_args() {
+        let pool = test_pool().await;
+        let read_pool = pool.clone();
+        let err = op_sql_query(
+            &read_pool,
+            json!({"sql": "INSERT INTO accounts(id) VALUES ('x')"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "bad_args");
+        assert!(
+            err.message.contains("INSERT"),
+            "expected mention of INSERT, got: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_op_sql_query_missing_sql_returns_bad_args() {
+        let pool = test_pool().await;
+        let read_pool = pool.clone();
+        let err = op_sql_query(&read_pool, json!({})).await.unwrap_err();
+        assert_eq!(err.code, "bad_args");
+        assert!(err.message.contains("missing 'sql'"));
+    }
+
+    #[tokio::test]
+    async fn test_op_sql_query_default_limit_returns_default_rows() {
+        let pool = test_pool().await;
+        let read_pool = pool.clone();
+        let value = op_sql_query(
+            &read_pool,
+            json!({
+                "sql": "WITH RECURSIVE n(x) AS ( \
+                            VALUES(1) \
+                            UNION ALL \
+                            SELECT x + 1 FROM n WHERE x < 250 \
+                        ) \
+                        SELECT x FROM n"
+            }),
+        )
+        .await
+        .unwrap();
+        let rows = value.as_array().expect("array");
+        assert_eq!(rows.len(), crate::db::sql_query::DEFAULT_ROWS);
+    }
+
+    #[tokio::test]
+    async fn test_op_sql_query_limit_over_max_is_capped() {
+        let pool = test_pool().await;
+        let read_pool = pool.clone();
+        let value = op_sql_query(
+            &read_pool,
+            json!({
+                "sql": "WITH RECURSIVE n(x) AS ( \
+                            VALUES(1) \
+                            UNION ALL \
+                            SELECT x + 1 FROM n WHERE x < 1005 \
+                        ) \
+                        SELECT x FROM n",
+                "limit": 2000,
+            }),
+        )
+        .await
+        .unwrap();
+        let rows = value.as_array().expect("array");
+        assert_eq!(rows.len(), crate::db::sql_query::MAX_ROWS);
+    }
+
+    #[tokio::test]
+    async fn test_op_sql_query_invalid_limit_returns_bad_args() {
+        let pool = test_pool().await;
+        let read_pool = pool.clone();
+        let err = op_sql_query(&read_pool, json!({"sql": "SELECT 1", "limit": 0}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "bad_args");
+        assert!(err.message.contains("limit"));
+    }
+
+    #[tokio::test]
+    async fn test_op_sql_schema_returns_table_definitions() {
+        let pool = test_pool().await;
+        let read_pool = pool.clone();
+        let value = op_sql_schema(&read_pool).await.unwrap();
+        let rows = value.as_array().expect("array");
+        let names: Vec<String> = rows
+            .iter()
+            .filter_map(|r| r.get("name").and_then(Value::as_str).map(String::from))
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "accounts"),
+            "expected 'accounts' table in schema dump, got: {names:?}"
+        );
+        assert!(names.iter().any(|n| n == "messages"));
     }
 
     #[tokio::test]

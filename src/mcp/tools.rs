@@ -21,7 +21,7 @@ enum FieldKind {
     Integer { minimum: i64, maximum: i64 },
 }
 
-pub const TOOLS: [ToolSpec; 12] = [
+pub const TOOLS: [ToolSpec; 14] = [
     ToolSpec {
         name: "postblox_account_list",
         op: "account.list",
@@ -114,6 +114,24 @@ pub const TOOLS: [ToolSpec; 12] = [
         dangerous: true,
         required: &["account_id", "draft_id"],
     },
+    ToolSpec {
+        name: "postblox_sql_query",
+        op: "sql.query",
+        description: "Run a read-only SQL query against the local postblox database. \
+                      Only SELECT statements are accepted; DDL and DML are rejected. \
+                      Returns up to `limit` rows (default 200, hard max 1000) as JSON objects.",
+        dangerous: true,
+        required: &["sql"],
+    },
+    ToolSpec {
+        name: "postblox_sql_schema",
+        op: "sql.schema",
+        description: "Return CREATE statements for every table, view, index, and \
+                      trigger in the postblox database. Use this before issuing \
+                      ad-hoc queries via postblox_sql_query.",
+        dangerous: false,
+        required: &[],
+    },
 ];
 
 pub fn find_tool(name: &str) -> Option<&'static ToolSpec> {
@@ -199,6 +217,11 @@ fn field_kind(tool: &ToolSpec, field: &str) -> Option<FieldKind> {
         | ("postblox_search", "offset") => Some(FieldKind::Integer {
             minimum: 0,
             maximum: i64::MAX,
+        }),
+        ("postblox_sql_query", "sql") => Some(FieldKind::String),
+        ("postblox_sql_query", "limit") => Some(FieldKind::Integer {
+            minimum: 1,
+            maximum: 1000,
         }),
         _ => None,
     }
@@ -327,6 +350,16 @@ fn input_schema(tool: &ToolSpec) -> Value {
             uuid("account_id", "Account id."),
             uuid("draft_id", "Draft id."),
         ]),
+        "postblox_sql_query" => fields(&[
+            string("sql", "Read-only SQL statement to execute."),
+            integer(
+                "limit",
+                1,
+                1000,
+                "Maximum rows to return (default 200, hard cap 1000).",
+            ),
+        ]),
+        "postblox_sql_schema" => Map::new(),
         _ => Map::new(),
     };
 
@@ -420,7 +453,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tool_list_has_exactly_twelve_stable_names() {
+    fn test_tool_list_has_exactly_fourteen_stable_names() {
         let names = TOOLS.iter().map(|tool| tool.name).collect::<Vec<_>>();
         assert_eq!(
             names,
@@ -437,6 +470,8 @@ mod tests {
                 "postblox_draft_delete",
                 "postblox_message_set_flags",
                 "postblox_message_send",
+                "postblox_sql_query",
+                "postblox_sql_schema",
             ]
         );
     }
@@ -445,7 +480,7 @@ mod tests {
     fn test_list_tools_returns_json_schemas_without_extra_tools() {
         let listed = list_tools();
         let tools = listed["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 14);
         assert_eq!(tools[0]["name"], "postblox_account_list");
         assert_eq!(tools[0]["inputSchema"]["type"], "object");
         assert_eq!(
@@ -464,6 +499,14 @@ mod tests {
             tools[11]["inputSchema"]["required"],
             json!(["account_id", "draft_id"])
         );
+        assert_eq!(tools[12]["name"], "postblox_sql_query");
+        assert_eq!(tools[12]["inputSchema"]["required"], json!(["sql"]));
+        assert_eq!(
+            tools[12]["inputSchema"]["properties"]["limit"]["maximum"],
+            json!(1000)
+        );
+        assert_eq!(tools[13]["name"], "postblox_sql_schema");
+        assert_eq!(tools[13]["inputSchema"]["required"], json!([]));
     }
 
     #[test]
@@ -565,5 +608,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(args["to_addrs"], json!(["to@example.com"]));
+    }
+
+    #[test]
+    fn test_validate_arguments_accepts_sql_query_limit() {
+        let tool = find_tool("postblox_sql_query").unwrap();
+        let args = validate_arguments(tool, json!({"sql": "SELECT 1", "limit": 1000})).unwrap();
+        assert_eq!(args["sql"], "SELECT 1");
+        assert_eq!(args["limit"], 1000);
+    }
+
+    #[test]
+    fn test_validate_arguments_rejects_sql_query_limit_over_max() {
+        let tool = find_tool("postblox_sql_query").unwrap();
+        let err = validate_arguments(tool, json!({"sql": "SELECT 1", "limit": 1001})).unwrap_err();
+        assert_eq!(err, "limit must be between 1 and 1000");
+    }
+
+    #[test]
+    fn test_validate_arguments_accepts_sql_schema_without_args() {
+        let tool = find_tool("postblox_sql_schema").unwrap();
+        let args = validate_arguments(tool, json!({})).unwrap();
+        assert_eq!(args, json!({}));
     }
 }
