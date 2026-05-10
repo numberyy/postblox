@@ -1,0 +1,19 @@
+# Nightly-only rustfmt options. CI uses stable rustfmt with .rustfmt.toml;
+# this file is opt-in for contributors with a nightly toolchain installed.
+#
+# Run with:
+#   cargo +nightly fmt --all -- --config-path rustfmt.nightly.toml
+#
+# Each option below is currently unstable in stable rustfmt (verified with
+# rustfmt 1.8.0 / rustc 1.94). Promote them into .rustfmt.toml once they
+# stabilise. See F-M7 in plans/rust-skills-review.md.
+
+edition = "2021"
+max_width = 100
+use_field_init_shorthand = true
+
+# Nightly-only:
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+wrap_comments = true
+comment_width = 100

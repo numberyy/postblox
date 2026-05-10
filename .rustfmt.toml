@@ -1,2 +1,5 @@
 edition = "2021"
 max_width = 100
+# Stable-only rustfmt options. Nightly-only options live in
+# rustfmt.nightly.toml — see F-M7 in plans/rust-skills-review.md.
+use_field_init_shorthand = true

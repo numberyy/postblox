@@ -1,1 +1,18 @@
 msrv = "1.80"
+
+# Thresholds tuned for postblox's current shape — see F-M6 in
+# plans/rust-skills-review.md. Lower these as the dispatcher and the
+# multi-arg builders are split up.
+cognitive-complexity-threshold = 30
+too-many-arguments-threshold = 8
+type-complexity-threshold = 250
+
+# Placeholders so future contributors know where to extend. Add real
+# entries here only when there is a concrete API the project wants
+# banned — avoid speculative bans.
+# disallowed-methods = [
+#     { path = "std::env::var", reason = "use config::Settings instead" },
+# ]
+# disallowed-types = [
+#     { path = "std::sync::Mutex", reason = "prefer parking_lot::Mutex" },
+# ]
