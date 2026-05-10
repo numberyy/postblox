@@ -402,8 +402,7 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
 fn render_detail_viewport(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
     let active = app.active == ActivePane::Details;
     let viewport_height = area.height.saturating_sub(2) as usize;
-    let lines = app.detail_lines();
-    let line_count = lines.len().max(1);
+    let line_count = app.detail_line_count().max(1);
     let scroll = app.detail_visible_scroll(viewport_height);
     let (cursor_line, cursor_column) = app.detail_cursor_line_column();
     let selection = app.detail_selected_line_range();
@@ -414,20 +413,18 @@ fn render_detail_viewport(frame: &mut Frame<'_>, area: Rect, app: &AppState, the
         line_count,
         visual_indicator
     );
-    let visible_lines = lines
-        .iter()
-        .enumerate()
-        .skip(scroll)
+    let visible_lines = (scroll..line_count)
         .take(viewport_height.max(1))
-        .map(|(line_index, line)| {
+        .map(|line_index| {
+            let line = app.detail_line_text(line_index).unwrap_or("");
             if selection
                 .as_ref()
                 .is_some_and(|range| range.contains(&line_index))
             {
                 let visible = if line.is_empty() { " " } else { line };
-                Line::styled(visible.to_string(), theme.selection)
+                Line::styled(visible, theme.selection)
             } else {
-                Line::raw(line.as_str())
+                Line::raw(line)
             }
         })
         .collect::<Vec<_>>();
@@ -445,11 +442,8 @@ fn render_detail_viewport(frame: &mut Frame<'_>, area: Rect, app: &AppState, the
 fn detail_text(app: &AppState) -> String {
     if let Some(error) = &app.error {
         format!("Error: {error}")
-    } else if let Some(detail) = &app.detail {
-        format!(
-            "Subject: {}\nFrom: {}\nSnippet: {}\n\n{}",
-            detail.subject, detail.from, detail.snippet, detail.body
-        )
+    } else if let Some(text) = app.detail_text_content() {
+        text.to_owned()
     } else if app.messages.is_empty() {
         "No message selected".into()
     } else {
@@ -724,8 +718,7 @@ fn render_composer_body(
     theme: &Theme,
 ) {
     let viewport_height = area.height.saturating_sub(2) as usize;
-    let lines = composer.body_lines();
-    let line_count = lines.len().max(1);
+    let line_count = composer.body_line_count().max(1);
     let scroll = composer.body_visible_scroll(viewport_height);
     let (cursor_line, cursor_column) = composer.body_cursor_line_column();
     let selection = composer.body_selected_line_range();
@@ -736,20 +729,18 @@ fn render_composer_body(
         line_count,
         visual_indicator
     );
-    let visible_lines = lines
-        .iter()
-        .enumerate()
-        .skip(scroll)
+    let visible_lines = (scroll..line_count)
         .take(viewport_height.max(1))
-        .map(|(line_index, line)| {
+        .map(|line_index| {
+            let line = composer.body_line_text(line_index).unwrap_or("");
             if selection
                 .as_ref()
                 .is_some_and(|range| range.contains(&line_index))
             {
                 let visible = if line.is_empty() { " " } else { line };
-                Line::styled(visible.to_string(), theme.selection)
+                Line::styled(visible, theme.selection)
             } else {
-                Line::raw((*line).to_string())
+                Line::raw(line)
             }
         })
         .collect::<Vec<_>>();
@@ -1325,6 +1316,7 @@ mod tests {
             .map(|line| format!("body line {line:02}"))
             .collect::<Vec<_>>()
             .join("\n");
+        composer.refresh_body_line_cache();
         composer.body_cursor = composer.body_line_start(15);
         composer.body_scroll = 13;
         composer.body_selection_anchor = Some(15);

@@ -3722,6 +3722,7 @@ mod tests {
         let composer = app.composer.as_mut().unwrap();
         composer.focused = app::ComposeField::Body;
         composer.body = "one\ntwo\nthree\nfour\nfive".into();
+        composer.refresh_body_line_cache();
         composer.dirty = true;
         let mut client = MockMailbox::default();
 

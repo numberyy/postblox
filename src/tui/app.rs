@@ -567,6 +567,149 @@ impl AttachError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LineCache {
+    bounds: Vec<LineBounds>,
+    char_len: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineBounds {
+    char_start: usize,
+    char_end: usize,
+    byte_start: usize,
+    byte_end: usize,
+}
+
+impl Default for LineCache {
+    fn default() -> Self {
+        Self::from_text("")
+    }
+}
+
+impl LineCache {
+    fn from_text(value: &str) -> Self {
+        let mut bounds = Vec::new();
+        let mut char_start = 0;
+        let mut byte_start = 0;
+        let mut char_index = 0;
+
+        for (byte_index, ch) in value.char_indices() {
+            if ch == '\n' {
+                bounds.push(LineBounds {
+                    char_start,
+                    char_end: char_index,
+                    byte_start,
+                    byte_end: byte_index,
+                });
+                char_index += 1;
+                char_start = char_index;
+                byte_start = byte_index + ch.len_utf8();
+            } else {
+                char_index += 1;
+            }
+        }
+
+        bounds.push(LineBounds {
+            char_start,
+            char_end: char_index,
+            byte_start,
+            byte_end: value.len(),
+        });
+
+        Self {
+            bounds,
+            char_len: char_index,
+        }
+    }
+
+    fn line_count(&self) -> usize {
+        self.bounds.len()
+    }
+
+    fn char_len(&self) -> usize {
+        self.char_len
+    }
+
+    fn clamped_line(&self, line: usize) -> Option<LineBounds> {
+        self.bounds
+            .get(line.min(self.bounds.len().saturating_sub(1)))
+            .copied()
+    }
+
+    fn line_start(&self, line: usize) -> usize {
+        self.clamped_line(line)
+            .map(|bounds| bounds.char_start)
+            .unwrap_or_default()
+    }
+
+    fn line_end(&self, line: usize) -> usize {
+        self.clamped_line(line)
+            .map(|bounds| bounds.char_end)
+            .unwrap_or_default()
+    }
+
+    fn line_for_cursor(&self, cursor: usize) -> usize {
+        line_for_cursor(&self.bounds, cursor)
+    }
+
+    fn line<'a>(&self, text: &'a str, line: usize) -> Option<&'a str> {
+        let bounds = self.bounds.get(line).copied()?;
+        text.get(bounds.byte_start..bounds.byte_end)
+    }
+
+    fn lines<'a>(&self, text: &'a str) -> Vec<&'a str> {
+        (0..self.line_count())
+            .filter_map(|line| self.line(text, line))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TextLineCache {
+    text: String,
+    lines: LineCache,
+}
+
+impl TextLineCache {
+    fn new(text: String) -> Self {
+        let lines = LineCache::from_text(&text);
+        Self { text, lines }
+    }
+
+    fn line(&self, line: usize) -> Option<&str> {
+        self.lines.line(&self.text, line)
+    }
+
+    fn line_count(&self) -> usize {
+        self.lines.line_count()
+    }
+
+    fn line_start(&self, line: usize) -> usize {
+        self.lines.line_start(line)
+    }
+
+    fn line_end(&self, line: usize) -> usize {
+        self.lines.line_end(line)
+    }
+
+    fn line_for_cursor(&self, cursor: usize) -> usize {
+        self.lines.line_for_cursor(cursor)
+    }
+
+    fn char_len(&self) -> usize {
+        self.lines.char_len()
+    }
+
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    fn lines(&self) -> Vec<&str> {
+        self.lines.lines(&self.text)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerState {
     pub account_id: AccountId,
     pub draft_id: Option<DraftId>,
@@ -579,8 +722,9 @@ pub struct ComposerState {
     pub bcc_cursor: usize,
     pub subject: String,
     pub subject_cursor: usize,
-    pub body: String,
+    pub(crate) body: String,
     pub body_cursor: usize,
+    pub(crate) body_line_cache: LineCache,
     pub body_scroll: usize,
     pub body_selection_anchor: Option<usize>,
     pub body_selection_focus: usize,
@@ -610,6 +754,7 @@ impl ComposerState {
             subject_cursor: 0,
             body: String::new(),
             body_cursor: 0,
+            body_line_cache: LineCache::default(),
             body_scroll: 0,
             body_selection_anchor: None,
             body_selection_focus: 0,
@@ -642,6 +787,7 @@ impl ComposerState {
         if let Some(body) = prefill.body {
             state.body = body;
             state.body_cursor = char_count(&state.body);
+            state.refresh_body_line_cache();
         }
         state.attachments = prefill.attachments;
         state.in_reply_to_msg = prefill.in_reply_to_msg;
@@ -723,40 +869,35 @@ impl ComposerState {
             ComposeField::Cc => self.cc_cursor.min(char_count(&self.cc)),
             ComposeField::Bcc => self.bcc_cursor.min(char_count(&self.bcc)),
             ComposeField::Subject => self.subject_cursor.min(char_count(&self.subject)),
-            ComposeField::Body => self.body_cursor.min(char_count(&self.body)),
+            ComposeField::Body => self.body_cursor.min(self.body_line_cache.char_len()),
         }
     }
 
     pub fn body_lines(&self) -> Vec<&str> {
-        self.body.split('\n').collect()
+        self.body_line_cache.lines(&self.body)
     }
 
     pub fn body_line_count(&self) -> usize {
-        line_bounds(&self.body).len()
+        self.body_line_cache.line_count()
     }
 
     pub fn body_line_start(&self, line: usize) -> usize {
-        let bounds = line_bounds(&self.body);
-        bounds
-            .get(line.min(bounds.len().saturating_sub(1)))
-            .map(|(start, _)| *start)
-            .unwrap_or(0)
+        self.body_line_cache.line_start(line)
     }
 
     pub fn body_line_end(&self, line: usize) -> usize {
-        let bounds = line_bounds(&self.body);
-        bounds
-            .get(line.min(bounds.len().saturating_sub(1)))
-            .map(|(_, end)| *end)
-            .unwrap_or(0)
+        self.body_line_cache.line_end(line)
     }
 
     pub fn body_cursor_line_column(&self) -> (usize, usize) {
-        let cursor = self.body_cursor.min(char_count(&self.body));
-        let bounds = line_bounds(&self.body);
-        let line = line_for_cursor(&bounds, cursor);
-        let start = bounds.get(line).map(|(start, _)| *start).unwrap_or(0);
+        let cursor = self.body_cursor.min(self.body_line_cache.char_len());
+        let line = self.body_line_cache.line_for_cursor(cursor);
+        let start = self.body_line_cache.line_start(line);
         (line, cursor.saturating_sub(start))
+    }
+
+    pub fn body_line_text(&self, line: usize) -> Option<&str> {
+        self.body_line_cache.line(&self.body, line)
     }
 
     pub fn body_selected_line_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
@@ -997,8 +1138,13 @@ impl ComposerState {
         }
     }
 
+    pub(crate) fn refresh_body_line_cache(&mut self) {
+        self.body_line_cache = LineCache::from_text(&self.body);
+    }
+
     fn after_text_edit(&mut self) {
         if self.focused == ComposeField::Body {
+            self.refresh_body_line_cache();
             self.body_preferred_column = None;
             self.clear_body_selection();
             self.ensure_body_cursor_visible(1);
@@ -1056,7 +1202,8 @@ pub struct AppState {
     pub folder_messages: Vec<MessageItem>,
     pub threads: Vec<ThreadItem>,
     pub messages: Vec<MessageItem>,
-    pub detail: Option<MessageDetail>,
+    pub(crate) detail: Option<MessageDetail>,
+    pub(crate) detail_text_cache: Option<TextLineCache>,
     pub detail_cursor: usize,
     pub detail_scroll: usize,
     pub detail_selection_anchor: Option<usize>,
@@ -1114,6 +1261,7 @@ impl Default for AppState {
             threads: Vec::new(),
             messages: Vec::new(),
             detail: None,
+            detail_text_cache: None,
             detail_cursor: 0,
             detail_scroll: 0,
             detail_selection_anchor: None,
@@ -1375,6 +1523,9 @@ impl AppState {
                 self.refresh_visible_messages();
             }
         }
+        self.detail_text_cache = detail
+            .as_ref()
+            .map(|detail| TextLineCache::new(detail_text(detail)));
         self.detail = detail;
         self.reset_detail_navigation_state();
         if was_detail_focused && self.detail.is_some() {
@@ -1606,40 +1757,49 @@ impl AppState {
     }
 
     pub fn detail_lines(&self) -> Vec<String> {
-        self.detail_text_content()
-            .map(|text| text.split('\n').map(str::to_string).collect())
+        self.detail_text_cache
+            .as_ref()
+            .map(|cache| cache.lines().into_iter().map(str::to_string).collect())
             .unwrap_or_default()
     }
 
     pub fn detail_line_count(&self) -> usize {
-        self.detail_line_bounds().len()
+        self.detail_text_cache
+            .as_ref()
+            .map(TextLineCache::line_count)
+            .unwrap_or_default()
     }
 
     pub fn detail_line_start(&self, line: usize) -> usize {
-        let bounds = self.detail_line_bounds();
-        bounds
-            .get(line.min(bounds.len().saturating_sub(1)))
-            .map(|(start, _)| *start)
-            .unwrap_or(0)
+        self.detail_text_cache
+            .as_ref()
+            .map(|cache| cache.line_start(line))
+            .unwrap_or_default()
     }
 
     pub fn detail_line_end(&self, line: usize) -> usize {
-        let bounds = self.detail_line_bounds();
-        bounds
-            .get(line.min(bounds.len().saturating_sub(1)))
-            .map(|(_, end)| *end)
-            .unwrap_or(0)
+        self.detail_text_cache
+            .as_ref()
+            .map(|cache| cache.line_end(line))
+            .unwrap_or_default()
     }
 
     pub fn detail_cursor_line_column(&self) -> (usize, usize) {
         let cursor = self.detail_cursor.min(self.detail_len());
-        let bounds = self.detail_line_bounds();
-        if bounds.is_empty() {
-            return (0, 0);
-        }
-        let line = line_for_cursor(&bounds, cursor);
-        let start = bounds.get(line).map(|(start, _)| *start).unwrap_or(0);
-        (line, cursor.saturating_sub(start))
+        self.detail_text_cache
+            .as_ref()
+            .map(|cache| {
+                let line = cache.line_for_cursor(cursor);
+                let start = cache.line_start(line);
+                (line, cursor.saturating_sub(start))
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn detail_line_text(&self, line: usize) -> Option<&str> {
+        self.detail_text_cache
+            .as_ref()
+            .and_then(|cache| cache.line(line))
     }
 
     pub fn detail_selected_line_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
@@ -2405,6 +2565,7 @@ impl AppState {
         if let Some(body) = draft.text_body {
             state.body = body;
             state.body_cursor = char_count(&state.body);
+            state.refresh_body_line_cache();
         }
         state.in_reply_to_msg = draft.in_reply_to_msg;
         state.in_reply_to = draft.in_reply_to;
@@ -2808,6 +2969,7 @@ impl AppState {
 
     fn clear_detail_state(&mut self) {
         self.detail = None;
+        self.detail_text_cache = None;
         self.reset_detail_navigation_state();
         self.clear_attachments();
     }
@@ -2827,24 +2989,14 @@ impl AppState {
         self.preview_selection = None;
     }
 
-    fn detail_text_content(&self) -> Option<String> {
-        self.detail.as_ref().map(|detail| {
-            format!(
-                "Subject: {}\nFrom: {}\nSnippet: {}\n\n{}",
-                detail.subject, detail.from, detail.snippet, detail.body
-            )
-        })
-    }
-
-    fn detail_line_bounds(&self) -> Vec<(usize, usize)> {
-        self.detail_text_content()
-            .map(|text| line_bounds(&text))
-            .unwrap_or_default()
+    pub fn detail_text_content(&self) -> Option<&str> {
+        self.detail_text_cache.as_ref().map(TextLineCache::text)
     }
 
     fn detail_len(&self) -> usize {
-        self.detail_text_content()
-            .map(|text| char_count(&text))
+        self.detail_text_cache
+            .as_ref()
+            .map(TextLineCache::char_len)
             .unwrap_or(0)
     }
 
@@ -2932,6 +3084,13 @@ fn text_or_default(value: Option<&str>, default: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or(default)
         .to_string()
+}
+
+fn detail_text(detail: &MessageDetail) -> String {
+    format!(
+        "Subject: {}\nFrom: {}\nSnippet: {}\n\n{}",
+        detail.subject, detail.from, detail.snippet, detail.body
+    )
 }
 
 /// Render a JSON address array as a comma-joined label for a Drafts
@@ -3052,24 +3211,10 @@ fn char_to_byte_index(value: &str, char_index: usize) -> usize {
         .unwrap_or(value.len())
 }
 
-fn line_bounds(value: &str) -> Vec<(usize, usize)> {
-    let mut bounds = Vec::new();
-    let mut start = 0;
-    for (index, ch) in value.chars().enumerate() {
-        if ch == '\n' {
-            bounds.push((start, index));
-            start = index + 1;
-        }
-    }
-    bounds.push((start, value.chars().count()));
+fn line_for_cursor(bounds: &[LineBounds], cursor: usize) -> usize {
     bounds
-}
-
-fn line_for_cursor(bounds: &[(usize, usize)], cursor: usize) -> usize {
-    bounds
-        .iter()
-        .position(|(_, end)| cursor <= *end)
-        .unwrap_or_else(|| bounds.len().saturating_sub(1))
+        .partition_point(|bounds| bounds.char_end < cursor)
+        .min(bounds.len().saturating_sub(1))
 }
 
 fn move_index(index: &mut usize, len: usize, delta: isize) -> bool {
@@ -4021,6 +4166,68 @@ mod tests {
         assert_eq!(app.detail_cursor_line_column(), (0, 0));
     }
 
+    #[test]
+    fn test_apply_detail_rebuilds_cached_text_lines_and_bounds() {
+        let mut app = AppState {
+            active: ActivePane::Details,
+            ..Default::default()
+        };
+
+        app.apply_detail(Some(detail(MessageId::new(), "alpha\nemoji café")));
+
+        assert_eq!(
+            app.detail_lines(),
+            vec![
+                "Subject: hello".to_string(),
+                "From: alice@example.com".to_string(),
+                "Snippet: snippet".to_string(),
+                String::new(),
+                "alpha".to_string(),
+                "emoji café".to_string(),
+            ]
+        );
+        assert_eq!(app.detail_line_text(5), Some("emoji café"));
+        assert_eq!(app.detail_line_count(), 6);
+        app.detail_cursor = app.detail_line_end(5);
+        assert_eq!(
+            app.detail_cursor_line_column(),
+            (5, "emoji café".chars().count())
+        );
+
+        app.apply_detail(Some(detail(MessageId::new(), "replacement")));
+
+        assert_eq!(
+            app.detail_lines(),
+            vec![
+                "Subject: hello".to_string(),
+                "From: alice@example.com".to_string(),
+                "Snippet: snippet".to_string(),
+                String::new(),
+                "replacement".to_string(),
+            ]
+        );
+        assert_eq!(app.detail_line_count(), 5);
+        assert_eq!(app.detail_cursor_line_column(), (0, 0));
+    }
+
+    #[test]
+    fn test_line_cache_preserves_empty_and_trailing_unicode_lines() {
+        let text = "é\n\nx\n";
+        let cache = LineCache::from_text(text);
+
+        assert_eq!(cache.lines(text), vec!["é", "", "x", ""]);
+        assert_eq!(cache.line_count(), 4);
+        assert_eq!(cache.char_len(), 5);
+        assert_eq!(cache.line_start(1), 2);
+        assert_eq!(cache.line_end(1), 2);
+        assert_eq!(cache.line_start(3), 5);
+        assert_eq!(cache.line_end(3), 5);
+        assert_eq!(cache.line_for_cursor(1), 0);
+        assert_eq!(cache.line_for_cursor(2), 1);
+        assert_eq!(cache.line_for_cursor(3), 2);
+        assert_eq!(cache.line_for_cursor(5), 3);
+    }
+
     fn preview_focused_app(body: &str) -> AppState {
         // Body becomes preview.text. The header line is the preview
         // `message` field, then a blank separator, then the body lines.
@@ -4501,6 +4708,7 @@ mod tests {
         let composer = app.composer.as_mut().unwrap();
         composer.focused = ComposeField::Body;
         composer.body = "abcde\nxy\nwxyz".into();
+        composer.refresh_body_line_cache();
         composer.body_cursor = 5;
 
         assert!(app.move_composer_body_line(1, 10));
@@ -4520,12 +4728,47 @@ mod tests {
     }
 
     #[test]
+    fn test_composer_body_line_cache_updates_after_body_edits() {
+        let mut app = AppState::default();
+        app.enter_composer(AccountId::new());
+        app.composer.as_mut().unwrap().focused = ComposeField::Body;
+
+        for ch in "ab".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+        assert!(app.composer_enter());
+        for ch in "café".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.body_lines(), vec!["ab", "café"]);
+        assert_eq!(composer.body_line_start(1), 3);
+        assert_eq!(composer.body_line_end(1), 7);
+        assert_eq!(composer.body_cursor_line_column(), (1, 4));
+
+        assert!(app.backspace_composer());
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.body_lines(), vec!["ab", "caf"]);
+        assert_eq!(composer.body_line_end(1), 6);
+        assert_eq!(composer.body_cursor_line_column(), (1, 3));
+
+        assert!(app.composer_home());
+        assert!(app.delete_composer());
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.body_lines(), vec!["ab", "af"]);
+        assert_eq!(composer.body_line_start(1), 3);
+        assert_eq!(composer.body_cursor_line_column(), (1, 0));
+    }
+
+    #[test]
     fn test_composer_body_scroll_keeps_cursor_visible() {
         let mut app = AppState::default();
         app.enter_composer(AccountId::new());
         let composer = app.composer.as_mut().unwrap();
         composer.focused = ComposeField::Body;
         composer.body = "one\ntwo\nthree\nfour\nfive\nsix".into();
+        composer.refresh_body_line_cache();
 
         for _ in 0..4 {
             assert!(app.move_composer_body_line(1, 2));
@@ -4548,6 +4791,7 @@ mod tests {
         let composer = app.composer.as_mut().unwrap();
         composer.focused = ComposeField::Body;
         composer.body = "one\ntwo\nthree".into();
+        composer.refresh_body_line_cache();
 
         assert!(app.toggle_composer_body_line_selection());
         assert_eq!(
