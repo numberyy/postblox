@@ -28,54 +28,54 @@ use super::app::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub struct AttachmentExportResult {
-    pub attachment_id: AttachmentId,
-    pub destination_path: String,
-    pub bytes_copied: u64,
+pub(crate) struct AttachmentExportResult {
+    pub(crate) attachment_id: AttachmentId,
+    pub(crate) destination_path: String,
+    pub(crate) bytes_copied: u64,
 }
 
 /// Decoded `message.prepare_reply` response.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub struct ReplyPrepared {
-    pub message_id: MessageId,
-    pub account_id: AccountId,
-    pub to: Vec<String>,
-    pub cc: Vec<String>,
-    pub subject: String,
-    pub in_reply_to: String,
-    pub references: String,
-    pub quoted_body: String,
+pub(crate) struct ReplyPrepared {
+    pub(crate) message_id: MessageId,
+    pub(crate) account_id: AccountId,
+    pub(crate) to: Vec<String>,
+    pub(crate) cc: Vec<String>,
+    pub(crate) subject: String,
+    pub(crate) in_reply_to: String,
+    pub(crate) references: String,
+    pub(crate) quoted_body: String,
 }
 
 /// Decoded `message.prepare_forward` response.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub struct ForwardPrepared {
-    pub message_id: MessageId,
-    pub account_id: AccountId,
-    pub subject: String,
-    pub forwarded_body: String,
-    pub forwarded_attachments: Vec<ForwardAttachmentMeta>,
+pub(crate) struct ForwardPrepared {
+    pub(crate) message_id: MessageId,
+    pub(crate) account_id: AccountId,
+    pub(crate) subject: String,
+    pub(crate) forwarded_body: String,
+    pub(crate) forwarded_attachments: Vec<ForwardAttachmentMeta>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub struct ForwardAttachmentMeta {
-    pub message_id: MessageId,
-    pub attachment_id: AttachmentId,
-    pub filename: String,
-    pub content_type: String,
-    pub size_bytes: i64,
+pub(crate) struct ForwardAttachmentMeta {
+    pub(crate) message_id: MessageId,
+    pub(crate) attachment_id: AttachmentId,
+    pub(crate) filename: String,
+    pub(crate) content_type: String,
+    pub(crate) size_bytes: i64,
 }
 
 /// Decoded `attachment.fetch_for_forward` response. The bytes are
 /// base64-encoded over the wire; the helper returns raw bytes via
 /// [`ForwardAttachmentBytes::decoded_bytes`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub struct ForwardAttachmentBytes {
-    pub attachment_id: AttachmentId,
-    pub filename: String,
-    pub content_type: String,
-    pub size_bytes: i64,
-    pub content_base64: String,
+pub(crate) struct ForwardAttachmentBytes {
+    pub(crate) attachment_id: AttachmentId,
+    pub(crate) filename: String,
+    pub(crate) content_type: String,
+    pub(crate) size_bytes: i64,
+    pub(crate) content_base64: String,
 }
 
 impl ForwardAttachmentBytes {
@@ -85,24 +85,24 @@ impl ForwardAttachmentBytes {
     ///
     /// Returns [`base64::DecodeError`] if the daemon-supplied base64
     /// payload is malformed.
-    pub fn decoded_bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
+    pub(crate) fn decoded_bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.decode(&self.content_base64)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub struct ForwardAttachmentBatch {
-    pub attachments: Vec<ForwardAttachmentBytes>,
-    pub failed: Vec<ForwardAttachmentFailure>,
+pub(crate) struct ForwardAttachmentBatch {
+    pub(crate) attachments: Vec<ForwardAttachmentBytes>,
+    pub(crate) failed: Vec<ForwardAttachmentFailure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub struct ForwardAttachmentFailure {
-    pub attachment_id: AttachmentId,
-    pub filename: String,
-    pub code: String,
-    pub message: String,
+pub(crate) struct ForwardAttachmentFailure {
+    pub(crate) attachment_id: AttachmentId,
+    pub(crate) filename: String,
+    pub(crate) code: String,
+    pub(crate) message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -114,19 +114,19 @@ struct SendResult {
 /// base64 so the wire stays JSON-friendly; the TUI re-materialises
 /// them as temp files when re-opening a draft.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-pub struct DraftGetResult {
-    pub draft: Draft,
-    pub attachments: Vec<DraftAttachmentPayload>,
+pub(crate) struct DraftGetResult {
+    pub(crate) draft: Draft,
+    pub(crate) attachments: Vec<DraftAttachmentPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub struct DraftAttachmentPayload {
-    pub id: Uuid,
-    pub draft_id: DraftId,
-    pub filename: String,
-    pub content_type: String,
-    pub size_bytes: i64,
-    pub content_base64: String,
+pub(crate) struct DraftAttachmentPayload {
+    pub(crate) id: Uuid,
+    pub(crate) draft_id: DraftId,
+    pub(crate) filename: String,
+    pub(crate) content_type: String,
+    pub(crate) size_bytes: i64,
+    pub(crate) content_base64: String,
 }
 
 impl DraftAttachmentPayload {
@@ -136,7 +136,7 @@ impl DraftAttachmentPayload {
     ///
     /// Returns [`base64::DecodeError`] if the daemon-supplied base64
     /// payload is malformed.
-    pub fn decoded_bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
+    pub(crate) fn decoded_bytes(&self) -> Result<Vec<u8>, base64::DecodeError> {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.decode(&self.content_base64)
     }
@@ -194,7 +194,7 @@ impl MailboxClient {
     /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as `Vec<Account>`.
-    pub async fn list_accounts(&mut self) -> Result<Vec<AccountItem>, MailboxError> {
+    pub(crate) async fn list_accounts(&mut self) -> Result<Vec<AccountItem>, MailboxError> {
         let response = self.request("account.list", json!({})).await?;
         let accounts: Vec<Account> = decode_response("account.list", response)?;
         Ok(accounts.into_iter().map(AccountItem::from).collect())
@@ -209,7 +209,7 @@ impl MailboxClient {
     /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as `Vec<Folder>`.
-    pub async fn list_folders(
+    pub(crate) async fn list_folders(
         &mut self,
         account_id: AccountId,
     ) -> Result<Vec<FolderItem>, MailboxError> {
@@ -230,7 +230,7 @@ impl MailboxClient {
     /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as `Vec<MessageSummary>`.
-    pub async fn list_messages(
+    pub(crate) async fn list_messages(
         &mut self,
         folder_id: FolderId,
     ) -> Result<Vec<MessageItem>, MailboxError> {
@@ -253,7 +253,7 @@ impl MailboxClient {
     /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as `Option<Message>`.
-    pub async fn get_message(
+    pub(crate) async fn get_message(
         &mut self,
         message_id: MessageId,
     ) -> Result<Option<MessageDetail>, MailboxError> {
@@ -274,7 +274,7 @@ impl MailboxClient {
     ///   (e.g. unknown account, IMAP failure).
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded.
-    pub async fn sync_folder(
+    pub(crate) async fn sync_folder(
         &mut self,
         account_id: AccountId,
         folder_name: &str,
@@ -298,7 +298,7 @@ impl MailboxClient {
     ///   (e.g. unknown account, worker spawn failure).
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded.
-    pub async fn start_sync(
+    pub(crate) async fn start_sync(
         &mut self,
         account_id: AccountId,
         folder_name: &str,
@@ -321,7 +321,7 @@ impl MailboxClient {
     /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded.
-    pub async fn stop_sync(
+    pub(crate) async fn stop_sync(
         &mut self,
         account_id: AccountId,
         folder_name: &str,
@@ -344,7 +344,7 @@ impl MailboxClient {
     /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded.
-    pub async fn set_flags(
+    pub(crate) async fn set_flags(
         &mut self,
         message_id: MessageId,
         flags: &[String],
@@ -382,7 +382,10 @@ impl MailboxClient {
     /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded.
-    pub async fn delete_message(&mut self, message_id: MessageId) -> Result<(), MailboxError> {
+    pub(crate) async fn delete_message(
+        &mut self,
+        message_id: MessageId,
+    ) -> Result<(), MailboxError> {
         let response = self
             .request("message.delete", json!({ "id": message_id }))
             .await?;
@@ -401,7 +404,7 @@ impl MailboxClient {
     ///   (e.g. unknown folder name).
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded.
-    pub async fn move_message(
+    pub(crate) async fn move_message(
         &mut self,
         message_id: MessageId,
         folder_name: &str,
@@ -425,7 +428,7 @@ impl MailboxClient {
     /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as `Vec<Attachment>`.
-    pub async fn list_attachments(
+    pub(crate) async fn list_attachments(
         &mut self,
         message_id: MessageId,
     ) -> Result<Vec<AttachmentItem>, MailboxError> {
@@ -446,7 +449,7 @@ impl MailboxClient {
     ///   (e.g. attachment too large to preview).
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as [`crate::attachments::AttachmentPreview`].
-    pub async fn preview_attachment(
+    pub(crate) async fn preview_attachment(
         &mut self,
         attachment_id: AttachmentId,
     ) -> Result<AttachmentPreviewItem, MailboxError> {
@@ -468,7 +471,7 @@ impl MailboxClient {
     ///   (e.g. unknown attachment, IO failure on the daemon side).
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as [`AttachmentExportResult`].
-    pub async fn export_attachment(
+    pub(crate) async fn export_attachment(
         &mut self,
         attachment_id: AttachmentId,
         destination_path: &Path,
@@ -491,7 +494,10 @@ impl MailboxClient {
     /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as [`Draft`].
-    pub async fn create_draft(&mut self, draft: &ComposerDraft) -> Result<DraftId, MailboxError> {
+    pub(crate) async fn create_draft(
+        &mut self,
+        draft: &ComposerDraft,
+    ) -> Result<DraftId, MailboxError> {
         let response = self
             .request("draft.create", draft_create_args(draft))
             .await?;
@@ -510,7 +516,7 @@ impl MailboxClient {
     ///   `not_found`).
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as `Option<Draft>`.
-    pub async fn update_draft(
+    pub(crate) async fn update_draft(
         &mut self,
         draft_id: DraftId,
         draft: &ComposerDraft,
@@ -539,7 +545,7 @@ impl MailboxClient {
     ///   (SMTP submission failed, draft missing, etc.).
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded.
-    pub async fn send_draft(
+    pub(crate) async fn send_draft(
         &mut self,
         account_id: AccountId,
         draft_id: DraftId,
@@ -560,7 +566,7 @@ impl MailboxClient {
     /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as `Vec<Draft>`.
-    pub async fn list_drafts(
+    pub(crate) async fn list_drafts(
         &mut self,
         account_id: AccountId,
     ) -> Result<Vec<DraftItem>, MailboxError> {
@@ -581,7 +587,7 @@ impl MailboxClient {
     /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as `Option<DraftGetResult>`.
-    pub async fn get_draft(
+    pub(crate) async fn get_draft(
         &mut self,
         draft_id: DraftId,
     ) -> Result<Option<DraftSummary>, MailboxError> {
@@ -599,7 +605,7 @@ impl MailboxClient {
     /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded.
-    pub async fn delete_draft(&mut self, draft_id: DraftId) -> Result<(), MailboxError> {
+    pub(crate) async fn delete_draft(&mut self, draft_id: DraftId) -> Result<(), MailboxError> {
         let response = self
             .request("draft.delete", json!({ "id": draft_id }))
             .await?;
@@ -617,7 +623,7 @@ impl MailboxClient {
     /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as `Vec<MessageSummary>`.
-    pub async fn search(
+    pub(crate) async fn search(
         &mut self,
         query: &str,
         account_id: Option<AccountId>,
@@ -641,7 +647,7 @@ impl MailboxClient {
     ///   (e.g. unknown message).
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as [`ReplyPrepared`].
-    pub async fn prepare_reply(
+    pub(crate) async fn prepare_reply(
         &mut self,
         message_id: MessageId,
         reply_all: bool,
@@ -666,7 +672,7 @@ impl MailboxClient {
     ///   (e.g. unknown message).
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as [`ForwardPrepared`].
-    pub async fn prepare_forward(
+    pub(crate) async fn prepare_forward(
         &mut self,
         message_id: MessageId,
     ) -> Result<ForwardPrepared, MailboxError> {
@@ -690,7 +696,7 @@ impl MailboxClient {
     ///   (e.g. unknown attachment, disk IO failure).
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as [`ForwardAttachmentBytes`].
-    pub async fn fetch_attachment_for_forward(
+    pub(crate) async fn fetch_attachment_for_forward(
         &mut self,
         attachment_id: AttachmentId,
     ) -> Result<ForwardAttachmentBytes, MailboxError> {
@@ -713,7 +719,7 @@ impl MailboxClient {
     /// - [`MailboxError::Decode`] if the response payload cannot be
     ///   decoded as [`ForwardAttachmentBatch`]. Per-attachment failures
     ///   surface inside the decoded payload, not as errors.
-    pub async fn fetch_attachments_for_forward(
+    pub(crate) async fn fetch_attachments_for_forward(
         &mut self,
         message_id: MessageId,
         attachment_ids: &[AttachmentId],
@@ -735,7 +741,7 @@ impl MailboxClient {
     /// Returns [`MailboxError::Request`] if the IPC subscribe request
     /// fails (e.g. the socket dropped or the per-connection
     /// subscription cap was hit).
-    pub async fn subscribe(&mut self, topic: Topic) -> Result<u64, MailboxError> {
+    pub(crate) async fn subscribe(&mut self, topic: Topic) -> Result<u64, MailboxError> {
         self.client
             .subscribe(topic)
             .await
@@ -751,7 +757,7 @@ impl MailboxClient {
     ///
     /// Returns [`MailboxError::Request`] if the underlying IPC stream
     /// closed or returned a transport error.
-    pub async fn next_event(&mut self) -> Result<Event, MailboxError> {
+    pub(crate) async fn next_event(&mut self) -> Result<Event, MailboxError> {
         self.client
             .next_event()
             .await

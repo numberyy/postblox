@@ -1,8 +1,8 @@
 //! TUI colour palettes and the [`ThemeName`] cycle.
 //!
 //! Three built-in themes — `light`, `dark`, `high-contrast` — each
-//! resolved to a flat [`Theme`] of [`ratatui::style::Style`] slots
-//! used by [`super::render`]. [`ThemeName::next`] drives the
+//! resolved to a flat `Theme` of [`ratatui::style::Style`] slots
+//! used by [`super::render`]. `ThemeName::next` drives the
 //! `Ctrl-T` rotation and the `:theme` command. Parsing is sync and
 //! infallible per CLAUDE.md's "async is for real I/O only" rule.
 
@@ -21,7 +21,7 @@ pub enum ThemeName {
 }
 
 impl ThemeName {
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Light => "light",
             Self::Dark => "dark",
@@ -29,7 +29,7 @@ impl ThemeName {
         }
     }
 
-    pub fn next(self) -> Self {
+    pub(crate) fn next(self) -> Self {
         match self {
             Self::Light => Self::Dark,
             Self::Dark => Self::HighContrast,
@@ -37,7 +37,7 @@ impl ThemeName {
         }
     }
 
-    pub fn theme(self) -> Theme {
+    pub(crate) fn theme(self) -> Theme {
         match self {
             Self::Light => Theme {
                 text: Style::default().fg(Color::Black).bg(Color::White),
@@ -138,17 +138,17 @@ pub enum ThemeParseError {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct Theme {
-    pub text: Style,
-    pub muted: Style,
-    pub pane: Style,
-    pub active_pane: Style,
-    pub selection: Style,
-    pub status: Style,
-    pub error: Style,
-    pub command: Style,
-    pub unread: Style,
-    pub flagged: Style,
+pub(crate) struct Theme {
+    pub(crate) text: Style,
+    pub(crate) muted: Style,
+    pub(crate) pane: Style,
+    pub(crate) active_pane: Style,
+    pub(crate) selection: Style,
+    pub(crate) status: Style,
+    pub(crate) error: Style,
+    pub(crate) command: Style,
+    pub(crate) unread: Style,
+    pub(crate) flagged: Style,
 }
 
 #[cfg(test)]

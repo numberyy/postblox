@@ -78,7 +78,7 @@ pub enum ActivePane {
 }
 
 impl ActivePane {
-    pub fn next(self) -> Self {
+    pub(crate) fn next(self) -> Self {
         match self {
             Self::Accounts => Self::Folders,
             Self::Folders => Self::Threads,
@@ -90,7 +90,7 @@ impl ActivePane {
         }
     }
 
-    pub fn previous(self) -> Self {
+    pub(crate) fn previous(self) -> Self {
         match self {
             Self::Accounts => Self::Search,
             Self::Folders => Self::Accounts,
@@ -193,13 +193,13 @@ impl From<Folder> for FolderItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageItem {
-    pub id: MessageId,
-    pub thread_id: Option<ThreadId>,
-    pub subject: String,
-    pub from: String,
-    pub date: String,
-    pub snippet: String,
-    pub flags: Vec<String>,
+    pub(crate) id: MessageId,
+    pub(crate) thread_id: Option<ThreadId>,
+    pub(crate) subject: String,
+    pub(crate) from: String,
+    pub(crate) date: String,
+    pub(crate) snippet: String,
+    pub(crate) flags: Vec<String>,
 }
 
 impl From<Message> for MessageItem {
@@ -237,34 +237,34 @@ impl From<MessageSummary> for MessageItem {
 }
 
 impl MessageItem {
-    pub fn has_flag(&self, flag: &str) -> bool {
+    pub(crate) fn has_flag(&self, flag: &str) -> bool {
         has_flag(&self.flags, flag)
     }
 
-    pub fn with_flag(&self, flag: &str, enabled: bool) -> Vec<String> {
+    pub(crate) fn with_flag(&self, flag: &str, enabled: bool) -> Vec<String> {
         set_flag_preserving(&self.flags, flag, enabled)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadItem {
-    pub key: Uuid,
-    pub thread_id: Option<ThreadId>,
-    pub subject: String,
-    pub message_count: usize,
-    pub latest_date: String,
-    pub unread: bool,
-    pub flagged: bool,
+    pub(crate) key: Uuid,
+    pub(crate) thread_id: Option<ThreadId>,
+    pub(crate) subject: String,
+    pub(crate) message_count: usize,
+    pub(crate) latest_date: String,
+    pub(crate) unread: bool,
+    pub(crate) flagged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageDetail {
-    pub id: MessageId,
-    pub subject: String,
-    pub from: String,
-    pub snippet: String,
-    pub body: String,
-    pub flags: Vec<String>,
+    pub(crate) id: MessageId,
+    pub(crate) subject: String,
+    pub(crate) from: String,
+    pub(crate) snippet: String,
+    pub(crate) body: String,
+    pub(crate) flags: Vec<String>,
 }
 
 impl From<Message> for MessageDetail {
@@ -294,12 +294,12 @@ impl From<Message> for MessageDetail {
 /// reuse the same widget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftItem {
-    pub id: DraftId,
-    pub account_id: AccountId,
-    pub subject: String,
-    pub to: String,
-    pub date: String,
-    pub snippet: String,
+    pub(crate) id: DraftId,
+    pub(crate) account_id: AccountId,
+    pub(crate) subject: String,
+    pub(crate) to: String,
+    pub(crate) date: String,
+    pub(crate) snippet: String,
 }
 
 impl From<Draft> for DraftItem {
@@ -323,8 +323,8 @@ impl From<Draft> for DraftItem {
 /// materialises them into temp files.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DraftSummary {
-    pub draft: Draft,
-    pub attachments: Vec<DraftAttachmentBytes>,
+    pub(crate) draft: Draft,
+    pub(crate) attachments: Vec<DraftAttachmentBytes>,
 }
 
 impl From<crate::tui::ipc::DraftGetResult> for DraftSummary {
@@ -342,11 +342,11 @@ impl From<crate::tui::ipc::DraftGetResult> for DraftSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftAttachmentBytes {
-    pub filename: String,
-    pub content_type: String,
-    pub size_bytes: i64,
-    pub bytes: Option<Vec<u8>>,
-    pub decode_error: Option<String>,
+    pub(crate) filename: String,
+    pub(crate) content_type: String,
+    pub(crate) size_bytes: i64,
+    pub(crate) bytes: Option<Vec<u8>>,
+    pub(crate) decode_error: Option<String>,
 }
 
 impl From<crate::tui::ipc::DraftAttachmentPayload> for DraftAttachmentBytes {
@@ -369,13 +369,13 @@ impl From<crate::tui::ipc::DraftAttachmentPayload> for DraftAttachmentBytes {
 /// One row returned by the `search` op, projected for the search pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchHit {
-    pub message_id: MessageId,
-    pub account_id: AccountId,
-    pub folder_id: FolderId,
-    pub subject: String,
-    pub from: String,
-    pub snippet: String,
-    pub date: String,
+    pub(crate) message_id: MessageId,
+    pub(crate) account_id: AccountId,
+    pub(crate) folder_id: FolderId,
+    pub(crate) subject: String,
+    pub(crate) from: String,
+    pub(crate) snippet: String,
+    pub(crate) date: String,
 }
 
 impl From<Message> for SearchHit {
@@ -412,17 +412,17 @@ impl From<MessageSummary> for SearchHit {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchState {
-    pub query: String,
-    pub scope_account: Option<AccountId>,
-    pub hits: Vec<SearchHit>,
-    pub selected: usize,
-    pub pending: bool,
+    pub(crate) query: String,
+    pub(crate) scope_account: Option<AccountId>,
+    pub(crate) hits: Vec<SearchHit>,
+    pub(crate) selected: usize,
+    pub(crate) pending: bool,
     /// Pane to restore when the user closes search via Esc.
-    pub previous_pane: ActivePane,
+    pub(crate) previous_pane: ActivePane,
 }
 
 impl SearchState {
-    pub fn new(
+    pub(crate) fn new(
         query: impl Into<String>,
         scope_account: Option<AccountId>,
         previous_pane: ActivePane,
@@ -440,13 +440,13 @@ impl SearchState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentItem {
-    pub id: AttachmentId,
-    pub message_id: MessageId,
-    pub filename: String,
-    pub content_type: String,
-    pub size_bytes: i64,
-    pub disposition: String,
-    pub storage_path: String,
+    pub(crate) id: AttachmentId,
+    pub(crate) message_id: MessageId,
+    pub(crate) filename: String,
+    pub(crate) content_type: String,
+    pub(crate) size_bytes: i64,
+    pub(crate) disposition: String,
+    pub(crate) storage_path: String,
 }
 
 impl From<Attachment> for AttachmentItem {
@@ -465,11 +465,11 @@ impl From<Attachment> for AttachmentItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentPreviewItem {
-    pub attachment_id: AttachmentId,
-    pub text: Option<String>,
-    pub message: String,
-    pub truncated: bool,
-    pub preview_bytes: usize,
+    pub(crate) attachment_id: AttachmentId,
+    pub(crate) text: Option<String>,
+    pub(crate) message: String,
+    pub(crate) truncated: bool,
+    pub(crate) preview_bytes: usize,
 }
 
 impl From<crate::attachments::AttachmentPreview> for AttachmentPreviewItem {
@@ -485,7 +485,7 @@ impl From<crate::attachments::AttachmentPreview> for AttachmentPreviewItem {
 }
 
 /// Captured state needed to undo an optimistic message-list mutation.
-/// Opaque to callers; produced by [`AppState::snapshot_message_list`].
+/// Opaque to callers; produced by `AppState::snapshot_message_list`.
 #[derive(Debug, Clone)]
 pub struct MessageListSnapshot {
     folder_messages: Vec<MessageItem>,
@@ -495,42 +495,42 @@ pub struct MessageListSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerAttachment {
-    pub path: PathBuf,
-    pub filename: String,
-    pub size_bytes: u64,
-    pub content_type: String,
+    pub(crate) path: PathBuf,
+    pub(crate) filename: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) content_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerDraft {
-    pub account_id: AccountId,
-    pub in_reply_to_msg: Option<MessageId>,
-    pub to_addrs: Vec<String>,
-    pub cc_addrs: Vec<String>,
-    pub bcc_addrs: Vec<String>,
-    pub subject: Option<String>,
-    pub text_body: Option<String>,
-    pub html_body: Option<String>,
-    pub attachments: Vec<ComposerAttachment>,
-    pub in_reply_to: Option<String>,
-    pub references_header: Option<String>,
+    pub(crate) account_id: AccountId,
+    pub(crate) in_reply_to_msg: Option<MessageId>,
+    pub(crate) to_addrs: Vec<String>,
+    pub(crate) cc_addrs: Vec<String>,
+    pub(crate) bcc_addrs: Vec<String>,
+    pub(crate) subject: Option<String>,
+    pub(crate) text_body: Option<String>,
+    pub(crate) html_body: Option<String>,
+    pub(crate) attachments: Vec<ComposerAttachment>,
+    pub(crate) in_reply_to: Option<String>,
+    pub(crate) references_header: Option<String>,
 }
 
-/// Pre-fill payload handed to [`AppState::enter_composer_with_prefill`].
+/// Pre-fill payload handed to `AppState::enter_composer_with_prefill`.
 /// Used by the reply / reply-all / forward key bindings to seed the
 /// composer with the response headers + quoted body before the user
 /// starts editing.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ComposerPrefill {
-    pub in_reply_to_msg: Option<MessageId>,
-    pub to_addrs: Vec<String>,
-    pub cc_addrs: Vec<String>,
-    pub bcc_addrs: Vec<String>,
-    pub subject: Option<String>,
-    pub body: Option<String>,
-    pub in_reply_to: Option<String>,
-    pub references_header: Option<String>,
-    pub attachments: Vec<ComposerAttachment>,
+    pub(crate) in_reply_to_msg: Option<MessageId>,
+    pub(crate) to_addrs: Vec<String>,
+    pub(crate) cc_addrs: Vec<String>,
+    pub(crate) bcc_addrs: Vec<String>,
+    pub(crate) subject: Option<String>,
+    pub(crate) body: Option<String>,
+    pub(crate) in_reply_to: Option<String>,
+    pub(crate) references_header: Option<String>,
+    pub(crate) attachments: Vec<ComposerAttachment>,
 }
 
 /// Reasons a path the user typed into the compose attach prompt was
@@ -545,7 +545,7 @@ pub enum AttachError {
 }
 
 impl AttachError {
-    pub fn toast_text(&self) -> String {
+    pub(crate) fn toast_text(&self) -> String {
         match self {
             Self::NotFound(path) => format!("File not found: {}", path.display()),
             Self::NotAFile(path) => format!("Not a regular file: {}", path.display()),
@@ -711,31 +711,31 @@ impl TextLineCache {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerState {
-    pub account_id: AccountId,
-    pub draft_id: Option<DraftId>,
-    pub focused: ComposeField,
-    pub to: String,
-    pub to_cursor: usize,
-    pub cc: String,
-    pub cc_cursor: usize,
-    pub bcc: String,
-    pub bcc_cursor: usize,
-    pub subject: String,
-    pub subject_cursor: usize,
+    pub(crate) account_id: AccountId,
+    pub(crate) draft_id: Option<DraftId>,
+    pub(crate) focused: ComposeField,
+    pub(crate) to: String,
+    pub(crate) to_cursor: usize,
+    pub(crate) cc: String,
+    pub(crate) cc_cursor: usize,
+    pub(crate) bcc: String,
+    pub(crate) bcc_cursor: usize,
+    pub(crate) subject: String,
+    pub(crate) subject_cursor: usize,
     pub(crate) body: String,
-    pub body_cursor: usize,
+    pub(crate) body_cursor: usize,
     pub(crate) body_line_cache: LineCache,
-    pub body_scroll: usize,
-    pub body_selection_anchor: Option<usize>,
-    pub body_selection_focus: usize,
-    pub body_preferred_column: Option<usize>,
-    pub dirty: bool,
-    pub attachments: Vec<ComposerAttachment>,
-    pub selected_attachment: usize,
-    pub attach_input: String,
-    pub in_reply_to_msg: Option<MessageId>,
-    pub in_reply_to: Option<String>,
-    pub references_header: Option<String>,
+    pub(crate) body_scroll: usize,
+    pub(crate) body_selection_anchor: Option<usize>,
+    pub(crate) body_selection_focus: usize,
+    pub(crate) body_preferred_column: Option<usize>,
+    pub(crate) dirty: bool,
+    pub(crate) attachments: Vec<ComposerAttachment>,
+    pub(crate) selected_attachment: usize,
+    pub(crate) attach_input: String,
+    pub(crate) in_reply_to_msg: Option<MessageId>,
+    pub(crate) in_reply_to: Option<String>,
+    pub(crate) references_header: Option<String>,
 }
 
 impl ComposerState {
@@ -802,7 +802,7 @@ impl ComposerState {
         &self.attachments
     }
 
-    pub fn aggregate_attachment_size(&self) -> u64 {
+    pub(crate) fn aggregate_attachment_size(&self) -> u64 {
         self.attachments
             .iter()
             .map(|a| a.size_bytes)
@@ -877,30 +877,30 @@ impl ComposerState {
         self.body_line_cache.lines(&self.body)
     }
 
-    pub fn body_line_count(&self) -> usize {
+    pub(crate) fn body_line_count(&self) -> usize {
         self.body_line_cache.line_count()
     }
 
-    pub fn body_line_start(&self, line: usize) -> usize {
+    pub(crate) fn body_line_start(&self, line: usize) -> usize {
         self.body_line_cache.line_start(line)
     }
 
-    pub fn body_line_end(&self, line: usize) -> usize {
+    pub(crate) fn body_line_end(&self, line: usize) -> usize {
         self.body_line_cache.line_end(line)
     }
 
-    pub fn body_cursor_line_column(&self) -> (usize, usize) {
+    pub(crate) fn body_cursor_line_column(&self) -> (usize, usize) {
         let cursor = self.body_cursor.min(self.body_line_cache.char_len());
         let line = self.body_line_cache.line_for_cursor(cursor);
         let start = self.body_line_cache.line_start(line);
         (line, cursor.saturating_sub(start))
     }
 
-    pub fn body_line_text(&self, line: usize) -> Option<&str> {
+    pub(crate) fn body_line_text(&self, line: usize) -> Option<&str> {
         self.body_line_cache.line(&self.body, line)
     }
 
-    pub fn body_selected_line_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
+    pub(crate) fn body_selected_line_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
         let anchor = self.body_selection_anchor?;
         let max_line = self.body_line_count().saturating_sub(1);
         let start = anchor.min(self.body_selection_focus).min(max_line);
@@ -908,7 +908,7 @@ impl ComposerState {
         Some(start..=end)
     }
 
-    pub fn body_visible_scroll(&self, viewport_height: usize) -> usize {
+    pub(crate) fn body_visible_scroll(&self, viewport_height: usize) -> usize {
         let viewport_height = viewport_height.max(1);
         let line_count = self.body_line_count();
         let max_scroll = line_count.saturating_sub(viewport_height);
@@ -1161,7 +1161,7 @@ pub enum ToastKind {
 }
 
 impl ToastKind {
-    pub fn ttl(self) -> Duration {
+    pub(crate) fn ttl(self) -> Duration {
         match self {
             Self::Error => TOAST_TTL_ERROR,
             _ => TOAST_TTL_INFO,
@@ -1174,7 +1174,7 @@ pub struct Toast {
     pub id: u64,
     pub kind: ToastKind,
     pub text: String,
-    pub expires_at: Instant,
+    pub(crate) expires_at: Instant,
 }
 
 /// TUI-side mirror of the wire `sync.state` enum. Kept independent so
@@ -1189,65 +1189,65 @@ pub enum SyncStateUi {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountStatus {
-    pub state: SyncStateUi,
-    pub last_error: Option<String>,
+    pub(crate) state: SyncStateUi,
+    pub(crate) last_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct AppState {
-    pub active: ActivePane,
-    pub mode: InputMode,
-    pub accounts: Vec<AccountItem>,
-    pub folders: Vec<FolderItem>,
-    pub folder_messages: Vec<MessageItem>,
-    pub threads: Vec<ThreadItem>,
-    pub messages: Vec<MessageItem>,
+    pub(crate) active: ActivePane,
+    pub(crate) mode: InputMode,
+    pub(crate) accounts: Vec<AccountItem>,
+    pub(crate) folders: Vec<FolderItem>,
+    pub(crate) folder_messages: Vec<MessageItem>,
+    pub(crate) threads: Vec<ThreadItem>,
+    pub(crate) messages: Vec<MessageItem>,
     pub(crate) detail: Option<MessageDetail>,
     pub(crate) detail_text_cache: Option<TextLineCache>,
-    pub detail_cursor: usize,
-    pub detail_scroll: usize,
-    pub detail_selection_anchor: Option<usize>,
-    pub detail_selection_focus: usize,
-    pub detail_preferred_column: Option<usize>,
-    pub attachments: Vec<AttachmentItem>,
-    pub attachment_preview: Option<AttachmentPreviewItem>,
+    pub(crate) detail_cursor: usize,
+    pub(crate) detail_scroll: usize,
+    pub(crate) detail_selection_anchor: Option<usize>,
+    pub(crate) detail_selection_focus: usize,
+    pub(crate) detail_preferred_column: Option<usize>,
+    pub(crate) attachments: Vec<AttachmentItem>,
+    pub(crate) attachment_preview: Option<AttachmentPreviewItem>,
     /// True when keyboard input within `ActivePane::Attachments` should
     /// drive the preview viewport (scroll, visual select, yank) instead
     /// of the attachment list. Toggled with Enter / Esc; reset whenever
     /// the underlying preview goes away.
-    pub preview_focused: bool,
+    pub(crate) preview_focused: bool,
     /// Top-line offset into the preview text. Bound by viewport height
     /// so we never scroll past the last line.
-    pub preview_scroll: usize,
+    pub(crate) preview_scroll: usize,
     /// Visual line-mode anchor (the line the user pressed `v` on) and
     /// the current focus line. `None` means no active selection.
-    pub preview_selection: Option<(usize, usize)>,
-    pub selected_account: usize,
-    pub selected_folder: usize,
-    pub selected_thread: usize,
-    pub selected_message: usize,
-    pub selected_attachment: usize,
-    pub pending_open_attachment: Option<AttachmentItem>,
-    pub pending_delete_message: Option<MessageId>,
-    pub command_input: String,
-    pub status: String,
-    pub error: Option<String>,
-    pub theme: ThemeName,
-    pub composer: Option<ComposerState>,
+    pub(crate) preview_selection: Option<(usize, usize)>,
+    pub(crate) selected_account: usize,
+    pub(crate) selected_folder: usize,
+    pub(crate) selected_thread: usize,
+    pub(crate) selected_message: usize,
+    pub(crate) selected_attachment: usize,
+    pub(crate) pending_open_attachment: Option<AttachmentItem>,
+    pub(crate) pending_delete_message: Option<MessageId>,
+    pub(crate) command_input: String,
+    pub(crate) status: String,
+    pub(crate) error: Option<String>,
+    pub(crate) theme: ThemeName,
+    pub(crate) composer: Option<ComposerState>,
     pub toasts: VecDeque<Toast>,
-    pub next_toast_id: u64,
-    pub account_states: HashMap<AccountId, AccountStatus>,
-    pub search: Option<SearchState>,
-    pub search_input: String,
-    pub search_input_previous_pane: ActivePane,
+    pub(crate) next_toast_id: u64,
+    pub(crate) account_states: HashMap<AccountId, AccountStatus>,
+    pub(crate) search: Option<SearchState>,
+    pub(crate) search_input: String,
+    pub(crate) search_input_previous_pane: ActivePane,
     /// Drafts list when the Drafts folder is selected. Disjoint from
     /// `folder_messages`/`messages` so the renderer can pick a code
     /// path without inspecting both stores.
-    pub drafts: Vec<DraftItem>,
-    pub selected_draft: usize,
+    pub(crate) drafts: Vec<DraftItem>,
+    pub(crate) selected_draft: usize,
     /// Pending draft to delete; mirrors `pending_delete_message` so
     /// the same y/n confirmation flow can be reused.
-    pub pending_delete_draft: Option<DraftId>,
+    pub(crate) pending_delete_draft: Option<DraftId>,
 }
 
 impl Default for AppState {
@@ -1298,23 +1298,23 @@ impl Default for AppState {
 }
 
 impl AppState {
-    pub fn cycle_active_pane(&mut self) {
+    pub(crate) fn cycle_active_pane(&mut self) {
         self.active = self.next_visible_pane();
     }
 
-    pub fn cycle_active_pane_reverse(&mut self) {
+    pub(crate) fn cycle_active_pane_reverse(&mut self) {
         self.active = self.previous_visible_pane();
     }
 
-    pub fn has_threaded_conversations(&self) -> bool {
+    pub(crate) fn has_threaded_conversations(&self) -> bool {
         self.threads.iter().any(|thread| thread.message_count > 1)
     }
 
-    pub fn threads_pane_visible(&self) -> bool {
+    pub(crate) fn threads_pane_visible(&self) -> bool {
         self.has_threaded_conversations()
     }
 
-    pub fn move_selection(&mut self, delta: isize) -> bool {
+    pub(crate) fn move_selection(&mut self, delta: isize) -> bool {
         match self.active {
             ActivePane::Accounts => {
                 let changed = move_index(&mut self.selected_account, self.accounts.len(), delta);
@@ -1427,7 +1427,7 @@ impl AppState {
         self.clear_detail_state();
     }
 
-    pub fn apply_folder_messages(&mut self, messages: Vec<MessageItem>) {
+    pub(crate) fn apply_folder_messages(&mut self, messages: Vec<MessageItem>) {
         let previous_key = self.selected_thread().map(|thread| thread.key);
         self.folder_messages = messages;
         self.rebuild_threads(previous_key);
@@ -1439,17 +1439,17 @@ impl AppState {
         self.clear_detail_state();
     }
 
-    pub fn apply_drafts(&mut self, drafts: Vec<DraftItem>) {
+    pub(crate) fn apply_drafts(&mut self, drafts: Vec<DraftItem>) {
         self.drafts = drafts;
         clamp_index(&mut self.selected_draft, self.drafts.len());
     }
 
-    pub fn clear_drafts(&mut self) {
+    pub(crate) fn clear_drafts(&mut self) {
         self.drafts.clear();
         self.selected_draft = 0;
     }
 
-    pub fn selected_draft_id(&self) -> Option<DraftId> {
+    pub(crate) fn selected_draft_id(&self) -> Option<DraftId> {
         self.drafts.get(self.selected_draft).map(|d| d.id)
     }
 
@@ -1463,19 +1463,19 @@ impl AppState {
         move_index(&mut self.selected_draft, self.drafts.len(), delta)
     }
 
-    pub fn begin_draft_delete(&mut self, draft_id: DraftId) {
+    pub(crate) fn begin_draft_delete(&mut self, draft_id: DraftId) {
         self.pending_delete_draft = Some(draft_id);
         self.mode = InputMode::ConfirmDelete;
     }
 
-    pub fn cancel_pending_delete_draft(&mut self) {
+    pub(crate) fn cancel_pending_delete_draft(&mut self) {
         self.pending_delete_draft = None;
         if self.mode == InputMode::ConfirmDelete {
             self.mode = InputMode::Normal;
         }
     }
 
-    pub fn take_pending_delete_draft(&mut self) -> Option<DraftId> {
+    pub(crate) fn take_pending_delete_draft(&mut self) -> Option<DraftId> {
         let id = self.pending_delete_draft.take();
         if id.is_some() && self.mode == InputMode::ConfirmDelete {
             self.mode = InputMode::Normal;
@@ -1485,7 +1485,7 @@ impl AppState {
 
     /// Drop the row matching `draft_id` from the drafts list and
     /// clamp the selection. Used by the optimistic delete path.
-    pub fn remove_draft_locally(&mut self, draft_id: DraftId) -> bool {
+    pub(crate) fn remove_draft_locally(&mut self, draft_id: DraftId) -> bool {
         let before = self.drafts.len();
         self.drafts.retain(|d| d.id != draft_id);
         let removed = self.drafts.len() != before;
@@ -1495,7 +1495,7 @@ impl AppState {
         removed
     }
 
-    pub fn apply_detail(&mut self, detail: Option<MessageDetail>) {
+    pub(crate) fn apply_detail(&mut self, detail: Option<MessageDetail>) {
         let was_detail_focused = self.active == ActivePane::Details;
         let old_detail_id = self.detail.as_ref().map(|detail| detail.id);
         let new_detail_id = detail.as_ref().map(|detail| detail.id);
@@ -1537,7 +1537,7 @@ impl AppState {
         self.normalize_active_pane();
     }
 
-    pub fn apply_attachments(&mut self, attachments: Vec<AttachmentItem>) {
+    pub(crate) fn apply_attachments(&mut self, attachments: Vec<AttachmentItem>) {
         self.attachments = attachments;
         clamp_index(&mut self.selected_attachment, self.attachments.len());
         if self
@@ -1556,7 +1556,7 @@ impl AppState {
         self.normalize_active_pane();
     }
 
-    pub fn apply_attachment_preview(&mut self, preview: AttachmentPreviewItem) {
+    pub(crate) fn apply_attachment_preview(&mut self, preview: AttachmentPreviewItem) {
         let same_attachment = self
             .attachment_preview
             .as_ref()
@@ -1571,7 +1571,7 @@ impl AppState {
     /// Renderable preview text. Mirrors what the user sees in the
     /// preview pane so scroll, selection, and yank operate on a single
     /// source of truth.
-    pub fn preview_text(&self) -> Option<String> {
+    pub(crate) fn preview_text(&self) -> Option<String> {
         let preview = self.attachment_preview.as_ref()?;
         let mut text = preview.message.clone();
         if let Some(body) = &preview.text {
@@ -1584,32 +1584,32 @@ impl AppState {
         Some(text)
     }
 
-    pub fn preview_lines(&self) -> Vec<String> {
+    pub(crate) fn preview_lines(&self) -> Vec<String> {
         self.preview_text()
             .map(|text| text.split('\n').map(str::to_string).collect())
             .unwrap_or_default()
     }
 
-    pub fn preview_line_count(&self) -> usize {
+    pub(crate) fn preview_line_count(&self) -> usize {
         self.preview_lines().len()
     }
 
     /// Maximum legal `preview_scroll` value for a viewport of
     /// `viewport_height` lines. Anything larger leaves blank rows at
     /// the bottom, so we clamp.
-    pub fn preview_max_scroll(&self, viewport_height: usize) -> usize {
+    pub(crate) fn preview_max_scroll(&self, viewport_height: usize) -> usize {
         let viewport_height = viewport_height.max(1);
         self.preview_line_count().saturating_sub(viewport_height)
     }
 
-    pub fn preview_visible_scroll(&self, viewport_height: usize) -> usize {
+    pub(crate) fn preview_visible_scroll(&self, viewport_height: usize) -> usize {
         self.preview_scroll
             .min(self.preview_max_scroll(viewport_height))
     }
 
     /// Scroll the preview by `delta` lines. Positive values scroll
     /// down. Returns true if the offset moved.
-    pub fn scroll_preview(&mut self, delta: isize, viewport_height: usize) -> bool {
+    pub(crate) fn scroll_preview(&mut self, delta: isize, viewport_height: usize) -> bool {
         if !self.is_preview_focus_active() {
             return false;
         }
@@ -1624,7 +1624,7 @@ impl AppState {
         next != old
     }
 
-    pub fn scroll_preview_to_top(&mut self) -> bool {
+    pub(crate) fn scroll_preview_to_top(&mut self) -> bool {
         if !self.is_preview_focus_active() {
             return false;
         }
@@ -1633,7 +1633,7 @@ impl AppState {
         changed
     }
 
-    pub fn scroll_preview_to_bottom(&mut self, viewport_height: usize) -> bool {
+    pub(crate) fn scroll_preview_to_bottom(&mut self, viewport_height: usize) -> bool {
         if !self.is_preview_focus_active() {
             return false;
         }
@@ -1646,7 +1646,7 @@ impl AppState {
     /// Move the preview "cursor" line by `delta`. If a visual selection
     /// is active, extend it; otherwise just scroll the viewport so the
     /// new line stays visible.
-    pub fn move_preview_line(&mut self, delta: isize) -> bool {
+    pub(crate) fn move_preview_line(&mut self, delta: isize) -> bool {
         if !self.is_preview_focus_active() {
             return false;
         }
@@ -1663,7 +1663,7 @@ impl AppState {
         }
     }
 
-    pub fn preview_selected_line_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
+    pub(crate) fn preview_selected_line_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
         let (anchor, focus) = self.preview_selection?;
         let max_line = self.preview_line_count().saturating_sub(1);
         if max_line == 0 && self.preview_line_count() == 0 {
@@ -1676,7 +1676,7 @@ impl AppState {
 
     /// Toggle visual line-mode selection, anchoring on the current
     /// preview cursor (taken to be the top of the viewport).
-    pub fn toggle_preview_selection(&mut self) -> bool {
+    pub(crate) fn toggle_preview_selection(&mut self) -> bool {
         if !self.is_preview_focus_active() {
             return false;
         }
@@ -1691,7 +1691,7 @@ impl AppState {
         true
     }
 
-    pub fn clear_preview_selection(&mut self) -> bool {
+    pub(crate) fn clear_preview_selection(&mut self) -> bool {
         let had = self.preview_selection.is_some();
         self.preview_selection = None;
         had
@@ -1700,7 +1700,7 @@ impl AppState {
     /// Build the clipboard payload for `y`. With an active selection,
     /// joins the selected line range with `\n`. With no selection,
     /// returns `None` so the caller can decide what to do.
-    pub fn preview_yank_text(&self) -> Option<String> {
+    pub(crate) fn preview_yank_text(&self) -> Option<String> {
         let range = self.preview_selected_line_range()?;
         let lines = self.preview_lines();
         let start = *range.start();
@@ -1712,7 +1712,7 @@ impl AppState {
         Some(lines[start..=end].join("\n"))
     }
 
-    pub fn focus_preview(&mut self) -> bool {
+    pub(crate) fn focus_preview(&mut self) -> bool {
         if self.attachment_preview.is_none() {
             return false;
         }
@@ -1723,7 +1723,7 @@ impl AppState {
         true
     }
 
-    pub fn defocus_preview(&mut self) -> bool {
+    pub(crate) fn defocus_preview(&mut self) -> bool {
         if !self.preview_focused {
             return false;
         }
@@ -1732,21 +1732,21 @@ impl AppState {
         true
     }
 
-    pub fn is_preview_focus_active(&self) -> bool {
+    pub(crate) fn is_preview_focus_active(&self) -> bool {
         self.preview_focused
             && self.attachment_preview.is_some()
             && self.active == ActivePane::Attachments
     }
 
-    pub fn attachments_pane_visible(&self) -> bool {
+    pub(crate) fn attachments_pane_visible(&self) -> bool {
         self.detail.is_some() && !self.attachments.is_empty()
     }
 
-    pub fn detail_pane_visible(&self) -> bool {
+    pub(crate) fn detail_pane_visible(&self) -> bool {
         self.detail.is_some()
     }
 
-    pub fn focus_detail_pane(&mut self) -> bool {
+    pub(crate) fn focus_detail_pane(&mut self) -> bool {
         if self.detail_pane_visible() {
             self.active = ActivePane::Details;
             true
@@ -1763,28 +1763,28 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    pub fn detail_line_count(&self) -> usize {
+    pub(crate) fn detail_line_count(&self) -> usize {
         self.detail_text_cache
             .as_ref()
             .map(TextLineCache::line_count)
             .unwrap_or_default()
     }
 
-    pub fn detail_line_start(&self, line: usize) -> usize {
+    pub(crate) fn detail_line_start(&self, line: usize) -> usize {
         self.detail_text_cache
             .as_ref()
             .map(|cache| cache.line_start(line))
             .unwrap_or_default()
     }
 
-    pub fn detail_line_end(&self, line: usize) -> usize {
+    pub(crate) fn detail_line_end(&self, line: usize) -> usize {
         self.detail_text_cache
             .as_ref()
             .map(|cache| cache.line_end(line))
             .unwrap_or_default()
     }
 
-    pub fn detail_cursor_line_column(&self) -> (usize, usize) {
+    pub(crate) fn detail_cursor_line_column(&self) -> (usize, usize) {
         let cursor = self.detail_cursor.min(self.detail_len());
         self.detail_text_cache
             .as_ref()
@@ -1796,13 +1796,13 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    pub fn detail_line_text(&self, line: usize) -> Option<&str> {
+    pub(crate) fn detail_line_text(&self, line: usize) -> Option<&str> {
         self.detail_text_cache
             .as_ref()
             .and_then(|cache| cache.line(line))
     }
 
-    pub fn detail_selected_line_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
+    pub(crate) fn detail_selected_line_range(&self) -> Option<std::ops::RangeInclusive<usize>> {
         let anchor = self.detail_selection_anchor?;
         let max_line = self.detail_line_count().saturating_sub(1);
         let start = anchor.min(self.detail_selection_focus).min(max_line);
@@ -1810,7 +1810,7 @@ impl AppState {
         Some(start..=end)
     }
 
-    pub fn detail_visible_scroll(&self, viewport_height: usize) -> usize {
+    pub(crate) fn detail_visible_scroll(&self, viewport_height: usize) -> usize {
         let viewport_height = viewport_height.max(1);
         let line_count = self.detail_line_count();
         let max_scroll = line_count.saturating_sub(viewport_height);
@@ -1828,7 +1828,7 @@ impl AppState {
         scroll.min(max_scroll)
     }
 
-    pub fn move_detail_cursor_left(&mut self) -> bool {
+    pub(crate) fn move_detail_cursor_left(&mut self) -> bool {
         if !self.detail_pane_visible() {
             return false;
         }
@@ -1841,7 +1841,7 @@ impl AppState {
         true
     }
 
-    pub fn move_detail_cursor_right(&mut self) -> bool {
+    pub(crate) fn move_detail_cursor_right(&mut self) -> bool {
         if !self.detail_pane_visible() {
             return false;
         }
@@ -1855,7 +1855,7 @@ impl AppState {
         true
     }
 
-    pub fn detail_home(&mut self) -> bool {
+    pub(crate) fn detail_home(&mut self) -> bool {
         if !self.detail_pane_visible() {
             return false;
         }
@@ -1863,7 +1863,7 @@ impl AppState {
         self.set_detail_cursor(self.detail_line_start(line))
     }
 
-    pub fn detail_end(&mut self) -> bool {
+    pub(crate) fn detail_end(&mut self) -> bool {
         if !self.detail_pane_visible() {
             return false;
         }
@@ -1871,7 +1871,7 @@ impl AppState {
         self.set_detail_cursor(self.detail_line_end(line))
     }
 
-    pub fn move_detail_line(&mut self, delta: isize, viewport_height: usize) -> bool {
+    pub(crate) fn move_detail_line(&mut self, delta: isize, viewport_height: usize) -> bool {
         if self.active != ActivePane::Details || !self.detail_pane_visible() {
             return false;
         }
@@ -1905,7 +1905,7 @@ impl AppState {
             || self.detail_selection_focus != old_selection_focus
     }
 
-    pub fn toggle_detail_line_selection(&mut self) -> bool {
+    pub(crate) fn toggle_detail_line_selection(&mut self) -> bool {
         if self.active != ActivePane::Details || !self.detail_pane_visible() {
             return false;
         }
@@ -1919,7 +1919,7 @@ impl AppState {
         }
     }
 
-    pub fn start_detail_line_selection(&mut self) -> bool {
+    pub(crate) fn start_detail_line_selection(&mut self) -> bool {
         if self.active != ActivePane::Details
             || !self.detail_pane_visible()
             || self.detail_selection_anchor.is_some()
@@ -1932,22 +1932,22 @@ impl AppState {
         true
     }
 
-    pub fn clear_detail_selection(&mut self) -> bool {
+    pub(crate) fn clear_detail_selection(&mut self) -> bool {
         let changed = self.detail_selection_anchor.is_some();
         self.detail_selection_anchor = None;
         self.detail_selection_focus = self.detail_cursor_line_column().0;
         changed
     }
 
-    pub fn selected_attachment(&self) -> Option<&AttachmentItem> {
+    pub(crate) fn selected_attachment(&self) -> Option<&AttachmentItem> {
         self.attachments.get(self.selected_attachment)
     }
 
-    pub fn selected_attachment_id(&self) -> Option<AttachmentId> {
+    pub(crate) fn selected_attachment_id(&self) -> Option<AttachmentId> {
         self.selected_attachment().map(|attachment| attachment.id)
     }
 
-    pub fn toggle_attachment_focus(&mut self) -> bool {
+    pub(crate) fn toggle_attachment_focus(&mut self) -> bool {
         if !self.attachments_pane_visible() {
             self.normalize_active_pane();
             return false;
@@ -1962,7 +1962,7 @@ impl AppState {
         true
     }
 
-    pub fn begin_open_attachment_confirmation(&mut self) -> bool {
+    pub(crate) fn begin_open_attachment_confirmation(&mut self) -> bool {
         let Some(attachment) = self.selected_attachment().cloned() else {
             return false;
         };
@@ -1970,29 +1970,34 @@ impl AppState {
         true
     }
 
-    pub fn cancel_open_attachment_confirmation(&mut self) {
+    pub(crate) fn cancel_open_attachment_confirmation(&mut self) {
         self.pending_open_attachment = None;
     }
 
-    pub fn take_pending_open_attachment(&mut self) -> Option<AttachmentItem> {
+    pub(crate) fn take_pending_open_attachment(&mut self) -> Option<AttachmentItem> {
         self.pending_open_attachment.take()
     }
 
-    pub fn set_status(&mut self, status: impl Into<String>) {
+    pub(crate) fn set_status(&mut self, status: impl Into<String>) {
         self.status = status.into();
     }
 
-    pub fn set_error(&mut self, error: impl Into<String>) {
+    pub(crate) fn set_error(&mut self, error: impl Into<String>) {
         self.error = Some(error.into());
     }
 
-    pub fn clear_error(&mut self) {
+    pub(crate) fn clear_error(&mut self) {
         self.error = None;
     }
 
     /// Push a toast onto the back of the deque. If the deque is full,
     /// the oldest toast (front) is dropped.
-    pub fn push_toast(&mut self, kind: ToastKind, text: impl Into<String>, now: Instant) -> u64 {
+    pub(crate) fn push_toast(
+        &mut self,
+        kind: ToastKind,
+        text: impl Into<String>,
+        now: Instant,
+    ) -> u64 {
         let id = self.next_toast_id;
         self.next_toast_id = self.next_toast_id.wrapping_add(1);
         let toast = Toast {
@@ -2032,12 +2037,12 @@ impl AppState {
     }
 
     /// Drop the most recently pushed toast (back of deque).
-    pub fn dismiss_newest_toast(&mut self) -> bool {
+    pub(crate) fn dismiss_newest_toast(&mut self) -> bool {
         self.toasts.pop_back().is_some()
     }
 
     /// Clear every toast.
-    pub fn clear_toasts(&mut self) -> bool {
+    pub(crate) fn clear_toasts(&mut self) -> bool {
         let had = !self.toasts.is_empty();
         self.toasts.clear();
         had
@@ -2045,13 +2050,13 @@ impl AppState {
 
     /// Drop expired toasts. Caller passes the current `Instant` so
     /// tests can drive expiry deterministically.
-    pub fn tick_toasts(&mut self, now: Instant) {
+    pub(crate) fn tick_toasts(&mut self, now: Instant) {
         self.toasts.retain(|toast| toast.expires_at > now);
     }
 
     /// Apply a `sync.state` transition. Updates the per-account map
     /// and, on `Error`, pushes (or coalesces) an Error toast.
-    pub fn apply_sync_state(
+    pub(crate) fn apply_sync_state(
         &mut self,
         account_id: AccountId,
         state: SyncStateUi,
@@ -2080,7 +2085,7 @@ impl AppState {
     }
 
     /// Push a `mail.new` toast resolved against current accounts/folders.
-    pub fn push_mail_new_toast(
+    pub(crate) fn push_mail_new_toast(
         &mut self,
         account_id: AccountId,
         folder_id: Option<FolderId>,
@@ -2096,7 +2101,7 @@ impl AppState {
     }
 
     /// Push (or coalesce) an `account.synced` toast for `account_id`.
-    pub fn push_account_synced_toast(&mut self, account_id: AccountId, now: Instant) {
+    pub(crate) fn push_account_synced_toast(&mut self, account_id: AccountId, now: Instant) {
         let label = self.account_label_for_toast(account_id);
         let text = format!("Synced {label}");
         if !self.coalesce_toast(ToastKind::Info, &text, now, COALESCE_ACCOUNT_SYNCED) {
@@ -2112,21 +2117,21 @@ impl AppState {
             .unwrap_or_else(|| short_id(account_id))
     }
 
-    pub fn selected_account_id(&self) -> Option<AccountId> {
+    pub(crate) fn selected_account_id(&self) -> Option<AccountId> {
         self.accounts.get(self.selected_account).map(|a| a.id)
     }
 
-    pub fn selected_folder_id(&self) -> Option<FolderId> {
+    pub(crate) fn selected_folder_id(&self) -> Option<FolderId> {
         self.folders.get(self.selected_folder).map(|f| f.id)
     }
 
-    pub fn selected_folder_name(&self) -> Option<&str> {
+    pub(crate) fn selected_folder_name(&self) -> Option<&str> {
         self.folders
             .get(self.selected_folder)
             .map(|f| f.name.as_str())
     }
 
-    pub fn selected_folder_role(&self) -> Option<&str> {
+    pub(crate) fn selected_folder_role(&self) -> Option<&str> {
         self.folders
             .get(self.selected_folder)
             .map(|f| f.role.as_str())
@@ -2135,7 +2140,7 @@ impl AppState {
     /// True when the user is currently viewing a folder whose role is
     /// `drafts`. Drives the "Enter opens composer" / "D deletes draft"
     /// keybindings on the messages list.
-    pub fn drafts_pane_active(&self) -> bool {
+    pub(crate) fn drafts_pane_active(&self) -> bool {
         self.selected_folder_role() == Some("drafts")
     }
 
@@ -2143,7 +2148,7 @@ impl AppState {
     /// match. Mirrors the navigation effect of pressing `↑`/`↓` on the
     /// accounts pane: clears folder/message state so the caller can
     /// refresh from the daemon. Returns true on a successful match.
-    pub fn select_account_by_name(&mut self, name: &str) -> bool {
+    pub(crate) fn select_account_by_name(&mut self, name: &str) -> bool {
         let needle = name.trim();
         if needle.is_empty() {
             return false;
@@ -2175,7 +2180,7 @@ impl AppState {
     /// Switch the active folder by exact name match within the current
     /// account. Returns true on a successful match. Same downstream
     /// reset as moving via `↑`/`↓` on the folders pane.
-    pub fn select_folder_by_name(&mut self, name: &str) -> bool {
+    pub(crate) fn select_folder_by_name(&mut self, name: &str) -> bool {
         let needle = name.trim();
         if needle.is_empty() {
             return false;
@@ -2199,13 +2204,13 @@ impl AppState {
         true
     }
 
-    pub fn search_pane_visible(&self) -> bool {
+    pub(crate) fn search_pane_visible(&self) -> bool {
         self.search.is_some()
     }
 
     /// Resolve an account name (label or email, case-insensitive) to a
     /// `AccountId`. Used by `:search --account <name>`.
-    pub fn account_id_by_name(&self, name: &str) -> Option<AccountId> {
+    pub(crate) fn account_id_by_name(&self, name: &str) -> Option<AccountId> {
         let lowered = name.trim().to_lowercase();
         if lowered.is_empty() {
             return None;
@@ -2220,7 +2225,7 @@ impl AppState {
 
     /// Begin quick-search input over the message list. Restores
     /// `previous_pane` on cancel.
-    pub fn enter_quick_search(&mut self) {
+    pub(crate) fn enter_quick_search(&mut self) {
         self.search_input_previous_pane = self.active;
         self.search_input.clear();
         self.mode = InputMode::QuickSearch;
@@ -2228,7 +2233,7 @@ impl AppState {
         self.set_status("Search /");
     }
 
-    pub fn cancel_quick_search(&mut self) {
+    pub(crate) fn cancel_quick_search(&mut self) {
         self.mode = InputMode::Normal;
         self.search_input.clear();
         self.clear_error();
@@ -2236,7 +2241,7 @@ impl AppState {
         self.set_status("Search cancelled");
     }
 
-    pub fn push_search_char(&mut self, ch: char) -> bool {
+    pub(crate) fn push_search_char(&mut self, ch: char) -> bool {
         if ch.is_control() || self.search_input.chars().count() >= MAX_SEARCH_CHARS {
             return false;
         }
@@ -2244,12 +2249,12 @@ impl AppState {
         true
     }
 
-    pub fn backspace_search(&mut self) -> bool {
+    pub(crate) fn backspace_search(&mut self) -> bool {
         self.search_input.pop().is_some()
     }
 
     /// Consume the quick-search buffer and switch to Normal mode.
-    pub fn finish_quick_search(&mut self) -> String {
+    pub(crate) fn finish_quick_search(&mut self) -> String {
         self.mode = InputMode::Normal;
         std::mem::take(&mut self.search_input)
     }
@@ -2257,7 +2262,11 @@ impl AppState {
     /// Open the search pane with `query` and `scope_account`. Records
     /// `previous_pane` so Esc can restore it. Marks results as pending
     /// until [`AppState::apply_search_hits`] is called.
-    pub fn begin_search(&mut self, query: impl Into<String>, scope_account: Option<AccountId>) {
+    pub(crate) fn begin_search(
+        &mut self,
+        query: impl Into<String>,
+        scope_account: Option<AccountId>,
+    ) {
         let previous = if self.search_pane_visible() {
             self.search
                 .as_ref()
@@ -2271,7 +2280,7 @@ impl AppState {
         self.clear_error();
     }
 
-    pub fn apply_search_hits(&mut self, hits: Vec<SearchHit>) {
+    pub(crate) fn apply_search_hits(&mut self, hits: Vec<SearchHit>) {
         if let Some(state) = &mut self.search {
             state.hits = hits;
             state.pending = false;
@@ -2281,14 +2290,14 @@ impl AppState {
 
     /// Restore the pane that was active before the search opened and
     /// clear the search state.
-    pub fn close_search(&mut self) {
+    pub(crate) fn close_search(&mut self) {
         if let Some(state) = self.search.take() {
             self.active = state.previous_pane;
         }
         self.normalize_active_pane();
     }
 
-    pub fn move_search_selection(&mut self, delta: isize) -> bool {
+    pub(crate) fn move_search_selection(&mut self, delta: isize) -> bool {
         let Some(state) = &mut self.search else {
             return false;
         };
@@ -2299,21 +2308,21 @@ impl AppState {
         move_index(&mut state.selected, state.hits.len(), delta)
     }
 
-    pub fn selected_search_hit(&self) -> Option<&SearchHit> {
+    pub(crate) fn selected_search_hit(&self) -> Option<&SearchHit> {
         self.search
             .as_ref()
             .and_then(|state| state.hits.get(state.selected))
     }
 
-    pub fn search_query(&self) -> Option<&str> {
+    pub(crate) fn search_query(&self) -> Option<&str> {
         self.search.as_ref().map(|state| state.query.as_str())
     }
 
-    pub fn search_scope_account(&self) -> Option<AccountId> {
+    pub(crate) fn search_scope_account(&self) -> Option<AccountId> {
         self.search.as_ref().and_then(|state| state.scope_account)
     }
 
-    pub fn search_is_pending(&self) -> bool {
+    pub(crate) fn search_is_pending(&self) -> bool {
         self.search.as_ref().is_some_and(|state| state.pending)
     }
 
@@ -2323,7 +2332,7 @@ impl AppState {
     /// in a known hit. The folder/account lookups are best-effort —
     /// the message list is loaded lazily by the caller via
     /// `refresh_messages` after this returns.
-    pub fn jump_to_hit(&mut self, hit: &SearchHit) -> bool {
+    pub(crate) fn jump_to_hit(&mut self, hit: &SearchHit) -> bool {
         let Some(account_index) = self
             .accounts
             .iter()
@@ -2361,24 +2370,24 @@ impl AppState {
         true
     }
 
-    pub fn selected_message_id(&self) -> Option<MessageId> {
+    pub(crate) fn selected_message_id(&self) -> Option<MessageId> {
         self.messages.get(self.selected_message).map(|m| m.id)
     }
 
-    pub fn selected_thread(&self) -> Option<&ThreadItem> {
+    pub(crate) fn selected_thread(&self) -> Option<&ThreadItem> {
         self.threads.get(self.selected_thread)
     }
 
-    pub fn selected_message(&self) -> Option<&MessageItem> {
+    pub(crate) fn selected_message(&self) -> Option<&MessageItem> {
         self.messages.get(self.selected_message)
     }
 
-    pub fn selected_message_has_flag(&self, flag: &str) -> Option<bool> {
+    pub(crate) fn selected_message_has_flag(&self, flag: &str) -> Option<bool> {
         self.selected_message()
             .map(|message| message.has_flag(flag))
     }
 
-    pub fn selected_message_flag_update(
+    pub(crate) fn selected_message_flag_update(
         &self,
         flag: &str,
         enabled: bool,
@@ -2390,7 +2399,7 @@ impl AppState {
     /// Capture the message-list state needed to undo an optimistic
     /// remove. Returned snapshot is opaque to callers and should only
     /// be passed back to [`AppState::restore_message_list_snapshot`].
-    pub fn snapshot_message_list(&self) -> MessageListSnapshot {
+    pub(crate) fn snapshot_message_list(&self) -> MessageListSnapshot {
         MessageListSnapshot {
             folder_messages: self.folder_messages.clone(),
             selected_thread: self.selected_thread,
@@ -2401,7 +2410,7 @@ impl AppState {
     /// Drop the message with `message_id` from the visible folder list
     /// and refresh thread/message panes. Returns true when a row was
     /// removed.
-    pub fn remove_message_locally(&mut self, message_id: MessageId) -> bool {
+    pub(crate) fn remove_message_locally(&mut self, message_id: MessageId) -> bool {
         let before = self.folder_messages.len();
         let selected_thread_key = self.selected_thread().map(|thread| thread.key);
         self.folder_messages
@@ -2423,7 +2432,7 @@ impl AppState {
         true
     }
 
-    pub fn restore_message_list_snapshot(&mut self, snapshot: MessageListSnapshot) {
+    pub(crate) fn restore_message_list_snapshot(&mut self, snapshot: MessageListSnapshot) {
         self.folder_messages = snapshot.folder_messages;
         self.rebuild_threads(None);
         self.selected_thread = snapshot.selected_thread;
@@ -2434,19 +2443,19 @@ impl AppState {
         self.normalize_active_pane();
     }
 
-    pub fn begin_delete_confirmation(&mut self, message_id: MessageId) {
+    pub(crate) fn begin_delete_confirmation(&mut self, message_id: MessageId) {
         self.pending_delete_message = Some(message_id);
         self.mode = InputMode::ConfirmDelete;
         self.set_status("Delete? y/n");
     }
 
-    pub fn cancel_delete_confirmation(&mut self) {
+    pub(crate) fn cancel_delete_confirmation(&mut self) {
         self.pending_delete_message = None;
         self.mode = InputMode::Normal;
         self.set_status("Delete cancelled");
     }
 
-    pub fn take_pending_delete_message(&mut self) -> Option<MessageId> {
+    pub(crate) fn take_pending_delete_message(&mut self) -> Option<MessageId> {
         let id = self.pending_delete_message.take();
         if id.is_some() {
             self.mode = InputMode::Normal;
@@ -2454,7 +2463,7 @@ impl AppState {
         id
     }
 
-    pub fn apply_message_flags(&mut self, message_id: MessageId, flags: Vec<String>) {
+    pub(crate) fn apply_message_flags(&mut self, message_id: MessageId, flags: Vec<String>) {
         let selected_thread = self.selected_thread().map(|thread| thread.key);
         if let Some(message) = self
             .folder_messages
@@ -2481,14 +2490,14 @@ impl AppState {
         }
     }
 
-    pub fn enter_command_mode(&mut self) {
+    pub(crate) fn enter_command_mode(&mut self) {
         self.mode = InputMode::Command;
         self.command_input.clear();
         self.clear_error();
         self.set_status("Command mode");
     }
 
-    pub fn cancel_command_mode(&mut self) {
+    pub(crate) fn cancel_command_mode(&mut self) {
         self.mode = if self.composer.is_some() {
             InputMode::Compose
         } else {
@@ -2499,7 +2508,7 @@ impl AppState {
         self.set_status("Command cancelled");
     }
 
-    pub fn push_command_char(&mut self, ch: char) -> bool {
+    pub(crate) fn push_command_char(&mut self, ch: char) -> bool {
         if ch.is_control() || self.command_input.chars().count() >= MAX_COMMAND_CHARS {
             return false;
         }
@@ -2507,11 +2516,11 @@ impl AppState {
         true
     }
 
-    pub fn backspace_command(&mut self) -> bool {
+    pub(crate) fn backspace_command(&mut self) -> bool {
         self.command_input.pop().is_some()
     }
 
-    pub fn finish_command(&mut self) -> String {
+    pub(crate) fn finish_command(&mut self) -> String {
         // Restore the composer mode if we entered command mode from
         // inside a composer (e.g. `:w`). Otherwise drop back to normal.
         self.mode = if self.composer.is_some() {
@@ -2522,7 +2531,7 @@ impl AppState {
         std::mem::take(&mut self.command_input)
     }
 
-    pub fn enter_composer(&mut self, account_id: AccountId) {
+    pub(crate) fn enter_composer(&mut self, account_id: AccountId) {
         self.composer = Some(ComposerState::new(account_id));
         self.mode = InputMode::Compose;
         self.clear_error();
@@ -2532,7 +2541,11 @@ impl AppState {
     /// Enter the composer pre-populated with reply / forward state.
     /// The composer is marked dirty so the autosaver flushes it on the
     /// next idle.
-    pub fn enter_composer_with_prefill(&mut self, account_id: AccountId, prefill: ComposerPrefill) {
+    pub(crate) fn enter_composer_with_prefill(
+        &mut self,
+        account_id: AccountId,
+        prefill: ComposerPrefill,
+    ) {
         self.composer = Some(ComposerState::from_prefill(account_id, prefill));
         self.mode = InputMode::Compose;
         self.clear_error();
@@ -2544,7 +2557,7 @@ impl AppState {
     /// saves go through `draft.update` rather than creating a new
     /// draft. Restored composers are clean — the dirty flag only
     /// flips once the user starts editing.
-    pub fn enter_composer_for_existing_draft(
+    pub(crate) fn enter_composer_for_existing_draft(
         &mut self,
         draft_id: DraftId,
         draft: ComposerDraft,
@@ -2579,76 +2592,76 @@ impl AppState {
         self.set_status("Compose");
     }
 
-    pub fn composer_draft(&self) -> Option<ComposerDraft> {
+    pub(crate) fn composer_draft(&self) -> Option<ComposerDraft> {
         self.composer.as_ref().map(ComposerState::draft)
     }
 
-    pub fn composer_draft_id(&self) -> Option<DraftId> {
+    pub(crate) fn composer_draft_id(&self) -> Option<DraftId> {
         self.composer
             .as_ref()
             .and_then(|composer| composer.draft_id)
     }
 
-    pub fn composer_account_id(&self) -> Option<AccountId> {
+    pub(crate) fn composer_account_id(&self) -> Option<AccountId> {
         self.composer.as_ref().map(|composer| composer.account_id)
     }
 
-    pub fn composer_is_dirty(&self) -> bool {
+    pub(crate) fn composer_is_dirty(&self) -> bool {
         self.composer
             .as_ref()
             .is_some_and(|composer| composer.dirty)
     }
 
-    pub fn mark_composer_saved(&mut self, draft_id: DraftId) {
+    pub(crate) fn mark_composer_saved(&mut self, draft_id: DraftId) {
         if let Some(composer) = &mut self.composer {
             composer.draft_id = Some(draft_id);
             composer.dirty = false;
         }
     }
 
-    pub fn exit_composer(&mut self) {
+    pub(crate) fn exit_composer(&mut self) {
         self.composer = None;
         self.mode = InputMode::Normal;
     }
 
-    pub fn discard_composer(&mut self) {
+    pub(crate) fn discard_composer(&mut self) {
         self.composer = None;
         self.mode = InputMode::Normal;
         self.clear_error();
         self.set_status("Composer discarded");
     }
 
-    pub fn composer_needs_discard_confirmation(&self) -> bool {
+    pub(crate) fn composer_needs_discard_confirmation(&self) -> bool {
         self.composer
             .as_ref()
             .is_some_and(|composer| composer.dirty && composer.has_content())
     }
 
-    pub fn begin_discard_composer_confirmation(&mut self) {
+    pub(crate) fn begin_discard_composer_confirmation(&mut self) {
         self.mode = InputMode::ConfirmDiscard;
         self.set_status("Discard unsaved compose? y/n");
     }
 
-    pub fn cancel_discard_composer_confirmation(&mut self) {
+    pub(crate) fn cancel_discard_composer_confirmation(&mut self) {
         self.mode = InputMode::Compose;
         self.set_status("Compose");
     }
 
-    pub fn next_composer_field(&mut self) {
+    pub(crate) fn next_composer_field(&mut self) {
         if let Some(composer) = &mut self.composer {
             composer.focused = composer.focused.next();
             composer.body_preferred_column = None;
         }
     }
 
-    pub fn previous_composer_field(&mut self) {
+    pub(crate) fn previous_composer_field(&mut self) {
         if let Some(composer) = &mut self.composer {
             composer.focused = composer.focused.previous();
             composer.body_preferred_column = None;
         }
     }
 
-    pub fn push_composer_char(&mut self, ch: char) -> bool {
+    pub(crate) fn push_composer_char(&mut self, ch: char) -> bool {
         let Some(composer) = &mut self.composer else {
             return false;
         };
@@ -2660,7 +2673,7 @@ impl AppState {
         true
     }
 
-    pub fn backspace_composer(&mut self) -> bool {
+    pub(crate) fn backspace_composer(&mut self) -> bool {
         let Some(composer) = &mut self.composer else {
             return false;
         };
@@ -2671,7 +2684,7 @@ impl AppState {
         changed
     }
 
-    pub fn delete_composer(&mut self) -> bool {
+    pub(crate) fn delete_composer(&mut self) -> bool {
         let Some(composer) = &mut self.composer else {
             return false;
         };
@@ -2682,55 +2695,55 @@ impl AppState {
         changed
     }
 
-    pub fn move_composer_cursor_left(&mut self) -> bool {
+    pub(crate) fn move_composer_cursor_left(&mut self) -> bool {
         self.composer
             .as_mut()
             .is_some_and(ComposerState::move_focused_cursor_left)
     }
 
-    pub fn move_composer_cursor_right(&mut self) -> bool {
+    pub(crate) fn move_composer_cursor_right(&mut self) -> bool {
         self.composer
             .as_mut()
             .is_some_and(ComposerState::move_focused_cursor_right)
     }
 
-    pub fn composer_home(&mut self) -> bool {
+    pub(crate) fn composer_home(&mut self) -> bool {
         self.composer
             .as_mut()
             .is_some_and(ComposerState::move_focused_cursor_home)
     }
 
-    pub fn composer_end(&mut self) -> bool {
+    pub(crate) fn composer_end(&mut self) -> bool {
         self.composer
             .as_mut()
             .is_some_and(ComposerState::move_focused_cursor_end)
     }
 
-    pub fn move_composer_body_line(&mut self, delta: isize, viewport_height: usize) -> bool {
+    pub(crate) fn move_composer_body_line(&mut self, delta: isize, viewport_height: usize) -> bool {
         self.composer
             .as_mut()
             .is_some_and(|composer| composer.move_body_line(delta, viewport_height))
     }
 
-    pub fn toggle_composer_body_line_selection(&mut self) -> bool {
+    pub(crate) fn toggle_composer_body_line_selection(&mut self) -> bool {
         self.composer
             .as_mut()
             .is_some_and(ComposerState::toggle_body_line_selection)
     }
 
-    pub fn start_composer_body_line_selection(&mut self) -> bool {
+    pub(crate) fn start_composer_body_line_selection(&mut self) -> bool {
         self.composer
             .as_mut()
             .is_some_and(ComposerState::start_body_line_selection)
     }
 
-    pub fn clear_composer_body_selection(&mut self) -> bool {
+    pub(crate) fn clear_composer_body_selection(&mut self) -> bool {
         self.composer
             .as_mut()
             .is_some_and(ComposerState::clear_body_selection)
     }
 
-    pub fn composer_enter(&mut self) -> bool {
+    pub(crate) fn composer_enter(&mut self) -> bool {
         let Some(composer) = &mut self.composer else {
             return false;
         };
@@ -2748,7 +2761,7 @@ impl AppState {
 
     /// Open the inline path-input prompt for adding a compose
     /// attachment. Returns `false` if no composer is active.
-    pub fn begin_compose_attach(&mut self) -> bool {
+    pub(crate) fn begin_compose_attach(&mut self) -> bool {
         let Some(composer) = &mut self.composer else {
             return false;
         };
@@ -2757,14 +2770,14 @@ impl AppState {
         true
     }
 
-    pub fn cancel_compose_attach(&mut self) {
+    pub(crate) fn cancel_compose_attach(&mut self) {
         if let Some(composer) = &mut self.composer {
             composer.attach_input.clear();
         }
         self.mode = InputMode::Compose;
     }
 
-    pub fn push_compose_attach_char(&mut self, ch: char) -> bool {
+    pub(crate) fn push_compose_attach_char(&mut self, ch: char) -> bool {
         let Some(composer) = &mut self.composer else {
             return false;
         };
@@ -2775,14 +2788,14 @@ impl AppState {
         true
     }
 
-    pub fn backspace_compose_attach(&mut self) -> bool {
+    pub(crate) fn backspace_compose_attach(&mut self) -> bool {
         let Some(composer) = &mut self.composer else {
             return false;
         };
         composer.attach_input.pop().is_some()
     }
 
-    pub fn compose_attach_input(&self) -> Option<&str> {
+    pub(crate) fn compose_attach_input(&self) -> Option<&str> {
         self.composer
             .as_ref()
             .map(|composer| composer.attach_input.as_str())
@@ -2806,7 +2819,7 @@ impl AppState {
     /// - [`AttachError::AggregateTooLarge`] if the cumulative size
     ///   would exceed the composer's aggregate cap.
     /// - [`AttachError::Io`] for any other IO failure on stat.
-    pub async fn confirm_compose_attach(&mut self) -> Result<String, AttachError> {
+    pub(crate) async fn confirm_compose_attach(&mut self) -> Result<String, AttachError> {
         let Some(composer) = &mut self.composer else {
             return Err(AttachError::Io {
                 path: PathBuf::new(),
@@ -2838,7 +2851,7 @@ impl AppState {
 
     /// Remove the currently selected attachment. Index clamps to the
     /// end of the new list. Returns the removed filename if any.
-    pub fn remove_selected_compose_attachment(&mut self) -> Option<String> {
+    pub(crate) fn remove_selected_compose_attachment(&mut self) -> Option<String> {
         let composer = self.composer.as_mut()?;
         if composer.attachments.is_empty() {
             return None;
@@ -2875,12 +2888,12 @@ impl AppState {
         composer.attachments.get(composer.selected_attachment)
     }
 
-    pub fn cycle_theme(&mut self) -> ThemeName {
+    pub(crate) fn cycle_theme(&mut self) -> ThemeName {
         self.theme = self.theme.next();
         self.theme
     }
 
-    pub fn set_theme(&mut self, theme: ThemeName) {
+    pub(crate) fn set_theme(&mut self, theme: ThemeName) {
         self.theme = theme;
     }
 
@@ -3003,7 +3016,7 @@ impl AppState {
         self.preview_selection = None;
     }
 
-    pub fn detail_text_content(&self) -> Option<&str> {
+    pub(crate) fn detail_text_content(&self) -> Option<&str> {
         self.detail_text_cache.as_ref().map(TextLineCache::text)
     }
 
@@ -3146,7 +3159,7 @@ fn non_empty_string(value: &str) -> Option<String> {
 }
 
 /// Format a byte size in IEC units up to GiB. Single decimal place.
-pub fn human_size(bytes: u64) -> String {
+pub(crate) fn human_size(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * 1024;
     const GIB: u64 = 1024 * 1024 * 1024;
@@ -3174,7 +3187,7 @@ pub fn human_size(bytes: u64) -> String {
 ///   size cap.
 /// - [`AttachError::Io`] for any other `tokio::fs::metadata` failure
 ///   (permissions, IO error).
-pub async fn probe_attachment(path: &Path) -> Result<ComposerAttachment, AttachError> {
+pub(crate) async fn probe_attachment(path: &Path) -> Result<ComposerAttachment, AttachError> {
     let metadata = tokio::fs::metadata(path)
         .await
         .map_err(|e| match e.kind() {
@@ -3270,11 +3283,11 @@ fn clamp_isize(value: isize, min: isize, max: isize) -> isize {
     value.max(min).min(max.max(min))
 }
 
-pub fn flags_from_value(value: &MessageFlags) -> Vec<String> {
+pub(crate) fn flags_from_value(value: &MessageFlags) -> Vec<String> {
     value.to_vec()
 }
 
-pub fn has_flag(flags: &[String], flag: &str) -> bool {
+pub(crate) fn has_flag(flags: &[String], flag: &str) -> bool {
     flags.iter().any(|existing| existing == flag)
 }
 
@@ -3282,7 +3295,7 @@ fn short_id(id: AccountId) -> String {
     id.as_uuid().simple().to_string().chars().take(8).collect()
 }
 
-pub fn set_flag_preserving(flags: &[String], flag: &str, enabled: bool) -> Vec<String> {
+pub(crate) fn set_flag_preserving(flags: &[String], flag: &str, enabled: bool) -> Vec<String> {
     let mut out = Vec::with_capacity(flags.len() + usize::from(enabled));
     let mut saw_target = false;
 

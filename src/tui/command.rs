@@ -2,7 +2,7 @@
 //!
 //! [`parse_command`] turns a `:`-line into a [`Command`] enum that
 //! [`super::app::AppState`] dispatches. Vim-style aliases (`:w` for
-//! `Write`) keep muscle memory intact. [`COMMAND_NAMES`] is the
+//! `Write`) keep muscle memory intact. `COMMAND_NAMES` is the
 //! sorted source of truth for tab completion — keeping it sorted
 //! gives deterministic match ordering. Errors are flat, lowercase
 //! [`CommandError`] variants per AGENTS.md.
@@ -43,7 +43,7 @@ pub enum Command {
 
 /// Names recognized as commands at the start of a `:`-line. Sorted so
 /// Tab-completion has a deterministic match order.
-pub const COMMAND_NAMES: &[&str] = &[
+pub(crate) const COMMAND_NAMES: &[&str] = &[
     "account",
     "archive",
     "compose",
@@ -126,7 +126,7 @@ pub fn parse_command(input: &str) -> Result<Command, CommandError> {
 /// - `None` when the input already contains whitespace (i.e. the user
 ///   has moved past the command name into args) or when there are no
 ///   matches.
-pub fn complete_command(input: &str) -> Option<CommandCompletion> {
+pub(crate) fn complete_command(input: &str) -> Option<CommandCompletion> {
     if input.is_empty() {
         return None;
     }
@@ -157,13 +157,13 @@ pub fn complete_command(input: &str) -> Option<CommandCompletion> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandCompletion {
+pub(crate) struct CommandCompletion {
     /// Replacement text for the input prefix (longest common match).
-    pub text: String,
+    pub(crate) text: String,
     /// All matching command names in lexical order.
-    pub matches: Vec<String>,
+    pub(crate) matches: Vec<String>,
     /// True when there is exactly one matching command name.
-    pub unique: bool,
+    pub(crate) unique: bool,
 }
 
 fn longest_common_prefix(words: &[&str]) -> String {
