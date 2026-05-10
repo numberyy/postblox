@@ -21,6 +21,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 use std::time::Duration as StdDuration;
 use thiserror::Error;
 use uuid::Uuid;
@@ -210,7 +211,14 @@ impl Default for GoogleOAuthHttpClient {
 
 impl GoogleOAuthHttpClient {
     pub fn new() -> Self {
-        Self::with_token_endpoint_and_timeout(TOKEN_ENDPOINT, DEFAULT_REQUEST_TIMEOUT)
+        // Production constructor: every caller shares one connection-pooled
+        // `reqwest::Client` via the module-scoped `OnceLock` (E-M1). The
+        // test-only constructors below stay isolated so they can apply
+        // custom timeouts/endpoints without contaminating the cached client.
+        Self {
+            http: shared_http_client().clone(),
+            token_endpoint: TOKEN_ENDPOINT.into(),
+        }
     }
 
     pub fn with_token_endpoint(token_endpoint: impl Into<String>) -> Self {
@@ -332,6 +340,14 @@ fn bounded_http_client(timeout: StdDuration) -> reqwest::Client {
         .timeout(timeout)
         .build()
         .expect("BUG: reqwest client builder accepts plain timeout config")
+}
+
+// Module-scoped cache so all production `GoogleOAuthHttpClient::new()` call
+// sites share one connection pool (E-M1). `reqwest::Client` is internally
+// reference-counted, so cloning the cached handle is cheap.
+fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| bounded_http_client(DEFAULT_REQUEST_TIMEOUT))
 }
 
 pub fn authorization_url(
@@ -462,6 +478,15 @@ mod tests {
         assert!(!printed.contains("client-secret-value"));
         assert!(!printed.contains("access-secret-value"));
         assert!(!printed.contains("refresh-secret-value"));
+    }
+
+    #[test]
+    fn test_shared_http_client_returns_same_handle_across_calls() {
+        // E-M1: every production `GoogleOAuthHttpClient::new()` must reuse
+        // the same module-scoped client so the connection pool is shared.
+        let first = shared_http_client() as *const reqwest::Client;
+        let second = shared_http_client() as *const reqwest::Client;
+        assert!(std::ptr::eq(first, second));
     }
 
     #[test]
