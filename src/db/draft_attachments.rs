@@ -2,7 +2,7 @@
 //! enforced by callers (see daemon dispatcher) so we never write past
 //! the 25 MB hard limit set in `CLAUDE.md`.
 
-use sqlx::SqlitePool;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use crate::db::DbError;
@@ -53,6 +53,38 @@ pub async fn create(
     ))
     .bind(id)
     .fetch_one(pool)
+    .await?)
+}
+
+/// Transactional variant of [`create`].
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the insert or the follow-up `SELECT` fails
+/// (FK violation when `draft_id` is unknown, or any other SQLite error).
+pub async fn create_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    new: &NewDraftAttachment,
+) -> Result<DraftAttachment, DbError> {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO draft_attachments \
+         (id, draft_id, filename, content_type, size_bytes, content) \
+         VALUES (?,?,?,?,?,?)",
+    )
+    .bind(id)
+    .bind(new.draft_id)
+    .bind(&new.filename)
+    .bind(&new.content_type)
+    .bind(new.content.len() as i64)
+    .bind(&new.content)
+    .execute(&mut **tx)
+    .await?;
+    Ok(sqlx::query_as::<_, DraftAttachment>(&format!(
+        "SELECT {COLS} FROM draft_attachments WHERE id = ?"
+    ))
+    .bind(id)
+    .fetch_one(&mut **tx)
     .await?)
 }
 
@@ -117,6 +149,23 @@ pub async fn delete_all_for_draft(pool: &SqlitePool, draft_id: DraftId) -> Resul
     let r = sqlx::query("DELETE FROM draft_attachments WHERE draft_id = ?")
         .bind(draft_id)
         .execute(pool)
+        .await?;
+    Ok(r.rows_affected())
+}
+
+/// Transactional variant of [`delete_all_for_draft`].
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the delete fails (FK or IO). Unknown
+/// `draft_id` returns `Ok(0)`, not an error.
+pub async fn delete_all_for_draft_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    draft_id: DraftId,
+) -> Result<u64, DbError> {
+    let r = sqlx::query("DELETE FROM draft_attachments WHERE draft_id = ?")
+        .bind(draft_id)
+        .execute(&mut **tx)
         .await?;
     Ok(r.rows_affected())
 }

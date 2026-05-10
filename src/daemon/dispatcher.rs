@@ -3,12 +3,12 @@
 //! Maps wire op names to `db::*` calls and publishes events on the
 //! [`Hub`] for write ops. No IMAP/SMTP yet — that wires in R3b.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::SqlitePool;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 use thiserror::Error;
 
 use crate::auth::MailCredential;
@@ -972,16 +972,19 @@ async fn op_draft_create(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
     let actor = actor_from_args(&args);
     // Pull attachments out before NewDraft deserialisation; the inner
     // type rejects unknown fields when deserialised standalone.
-    let attachments = take_attachment_specs(&args)?;
+    let attachment_specs = take_attachment_specs(&args)?;
     let new: db::drafts::NewDraft =
         serde_json::from_value(args).map_err(|e| RpcError::bad_args(e.to_string()))?;
+    let attachments = prepare_draft_attachments(attachment_specs).await?;
     let draft = db::drafts::create(pool, &new)
         .await
         .map_err(|e| RpcError::internal(format!("drafts::create: {e}")))?;
-    if let Err(e) = replace_draft_attachments(pool, draft.id, attachments).await {
-        // Roll back the half-written draft so callers can retry cleanly.
-        let _ = db::drafts::delete(pool, draft.id).await;
-        return Err(e);
+    if let Some(attachments) = attachments {
+        if let Err(e) = replace_draft_attachments(pool, draft.id, attachments).await {
+            // best-effort rollback so callers can retry cleanly if attachment persistence fails.
+            let _ = db::drafts::delete(pool, draft.id).await;
+            return Err(e);
+        }
     }
     audit_actor(
         pool,
@@ -1017,7 +1020,7 @@ fn default_addrs() -> Value {
 
 async fn op_draft_update(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
     let actor = actor_from_args(&args);
-    let attachments = take_attachment_specs(&args)?;
+    let attachment_specs = take_attachment_specs(&args)?;
     let upd: DraftUpdate =
         serde_json::from_value(args).map_err(|e| RpcError::bad_args(e.to_string()))?;
     let patch = db::drafts::DraftPatch {
@@ -1028,15 +1031,23 @@ async fn op_draft_update(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
         text_body: upd.text_body.as_deref(),
         html_body: upd.html_body.as_deref(),
     };
-    let draft = db::drafts::update(pool, upd.id, &patch)
+    let attachments = prepare_draft_attachments(attachment_specs).await?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| RpcError::internal(format!("begin draft update transaction: {e}")))?;
+    let draft = db::drafts::update_tx(&mut tx, upd.id, &patch)
         .await
         .map_err(|e| RpcError::internal(format!("drafts::update: {e}")))?;
     // Only touch attachments when the caller explicitly supplied the
     // field; absence means "leave as-is" (matches the body/subject
     // partial-update contract).
-    if attachments.is_some() && draft.is_some() {
-        replace_draft_attachments(pool, upd.id, attachments).await?;
+    if let (Some(attachments), Some(_)) = (attachments, draft.as_ref()) {
+        replace_draft_attachments_tx(&mut tx, upd.id, attachments).await?;
     }
+    tx.commit()
+        .await
+        .map_err(|e| RpcError::internal(format!("commit draft update transaction: {e}")))?;
     audit_actor(
         pool,
         &actor,
@@ -1071,43 +1082,50 @@ fn take_attachment_specs(args: &Value) -> Result<Option<Vec<DraftAttachmentSpec>
     }
 }
 
-async fn replace_draft_attachments(
-    pool: &SqlitePool,
-    draft_id: DraftId,
+#[derive(Debug)]
+struct PendingDraftAttachment {
+    path: PathBuf,
+    original_path: String,
+    metadata_size: u64,
+    filename: String,
+    content_type: String,
+}
+
+#[derive(Debug)]
+struct PreparedDraftAttachment {
+    filename: String,
+    content_type: String,
+    content: Vec<u8>,
+}
+
+async fn prepare_draft_attachments(
     specs: Option<Vec<DraftAttachmentSpec>>,
-) -> Result<(), RpcError> {
+) -> Result<Option<Vec<PreparedDraftAttachment>>, RpcError> {
     let Some(specs) = specs else {
-        return Ok(());
+        return Ok(None);
     };
-    db::draft_attachments::delete_all_for_draft(pool, draft_id)
-        .await
-        .map_err(|e| RpcError::internal(format!("draft_attachments::delete_all: {e}")))?;
-    let mut aggregate: i64 = 0;
+
+    let limit = db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES as u64;
+    let mut aggregate = 0_u64;
+    let mut pending = Vec::with_capacity(specs.len());
     for spec in specs {
-        let path = Path::new(&spec.path);
-        let bytes = tokio::fs::read(path)
+        let path = PathBuf::from(&spec.path);
+        let metadata = tokio::fs::metadata(&path)
             .await
             .map_err(|e| map_attachment_read_error(&spec.path, e))?;
-        let size = bytes.len() as i64;
-        if size > db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES {
-            return Err(RpcError::new(
-                "attachment_too_large",
-                format!(
-                    "attachment '{}' is {size} bytes, exceeds {} byte limit",
-                    spec.path,
-                    db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES
-                ),
-            ));
+        if !metadata.is_file() {
+            return Err(RpcError::bad_args(format!(
+                "not a regular file: {}",
+                spec.path
+            )));
+        }
+        let size = metadata.len();
+        if size > limit {
+            return Err(attachment_too_large_error(&spec.path, size));
         }
         aggregate = aggregate.saturating_add(size);
-        if aggregate > db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES {
-            return Err(RpcError::new(
-                "attachment_too_large",
-                format!(
-                    "aggregate draft attachments {aggregate} bytes exceed {} byte limit",
-                    db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES
-                ),
-            ));
+        if aggregate > limit {
+            return Err(aggregate_attachments_too_large_error(aggregate));
         }
         let filename = spec.filename.unwrap_or_else(|| {
             path.file_name()
@@ -1118,14 +1136,122 @@ async fn replace_draft_attachments(
         let content_type = spec
             .content_type
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| guess_content_type(path));
+            .unwrap_or_else(|| guess_content_type(&path));
+        pending.push(PendingDraftAttachment {
+            path,
+            original_path: spec.path,
+            metadata_size: size,
+            filename,
+            content_type,
+        });
+    }
+
+    let mut actual_aggregate = 0_u64;
+    let mut prepared = Vec::with_capacity(pending.len());
+    for pending_attachment in pending {
+        let content = read_attachment_bounded(
+            &pending_attachment.path,
+            &pending_attachment.original_path,
+            pending_attachment.metadata_size,
+        )
+        .await?;
+        actual_aggregate = actual_aggregate.saturating_add(content.len() as u64);
+        if actual_aggregate > limit {
+            return Err(aggregate_attachments_too_large_error(actual_aggregate));
+        }
+        prepared.push(PreparedDraftAttachment {
+            filename: pending_attachment.filename,
+            content_type: pending_attachment.content_type,
+            content,
+        });
+    }
+
+    Ok(Some(prepared))
+}
+
+async fn read_attachment_bounded(
+    path: &Path,
+    display_path: &str,
+    metadata_size: u64,
+) -> Result<Vec<u8>, RpcError> {
+    use tokio::io::AsyncReadExt;
+
+    let limit = db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES as u64;
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| map_attachment_read_error(display_path, e))?;
+    let mut reader = file.take(limit + 1);
+    let mut bytes = Vec::with_capacity(metadata_size.min(limit) as usize);
+    reader
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| map_attachment_read_error(display_path, e))?;
+    if bytes.len() as u64 > limit {
+        return Err(attachment_too_large_error(display_path, bytes.len() as u64));
+    }
+    Ok(bytes)
+}
+
+fn attachment_too_large_error(path: &str, size: u64) -> RpcError {
+    RpcError::new(
+        "attachment_too_large",
+        format!(
+            "attachment '{path}' is {size} bytes, exceeds {} byte limit",
+            db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES
+        ),
+    )
+}
+
+fn aggregate_attachments_too_large_error(size: u64) -> RpcError {
+    RpcError::new(
+        "attachment_too_large",
+        format!(
+            "aggregate draft attachments {size} bytes exceed {} byte limit",
+            db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES
+        ),
+    )
+}
+
+async fn replace_draft_attachments(
+    pool: &SqlitePool,
+    draft_id: DraftId,
+    attachments: Vec<PreparedDraftAttachment>,
+) -> Result<(), RpcError> {
+    db::draft_attachments::delete_all_for_draft(pool, draft_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("draft_attachments::delete_all: {e}")))?;
+    for attachment in attachments {
         db::draft_attachments::create(
             pool,
             &db::draft_attachments::NewDraftAttachment {
                 draft_id,
-                filename,
-                content_type,
-                content: bytes,
+                filename: attachment.filename,
+                content_type: attachment.content_type,
+                content: attachment.content,
+            },
+        )
+        .await
+        .map_err(|e| RpcError::internal(format!("draft_attachments::create: {e}")))?;
+    }
+    Ok(())
+}
+
+async fn replace_draft_attachments_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    draft_id: DraftId,
+    attachments: Vec<PreparedDraftAttachment>,
+) -> Result<(), RpcError> {
+    db::draft_attachments::delete_all_for_draft_tx(tx, draft_id)
+        .await
+        .map_err(|e| RpcError::internal(format!("draft_attachments::delete_all: {e}")))?;
+    for attachment in attachments {
+        db::draft_attachments::create_tx(
+            tx,
+            &db::draft_attachments::NewDraftAttachment {
+                draft_id,
+                filename: attachment.filename,
+                content_type: attachment.content_type,
+                content: attachment.content,
             },
         )
         .await
@@ -1191,10 +1317,10 @@ async fn op_draft_get(pool: &SqlitePool, args: Value) -> Result<Value, RpcError>
         .map_err(|e| RpcError::internal(format!("draft_attachments::list_for_draft: {e}")))?;
     let mut attachments_json = Vec::with_capacity(attachment_rows.len());
     for row in attachment_rows {
-        let bytes = db::draft_attachments::load_content(pool, row.id)
+        let content = db::draft_attachments::load_content(pool, row.id)
             .await
-            .map_err(|e| RpcError::internal(format!("draft_attachments::load_content: {e}")))?
-            .unwrap_or_default();
+            .map_err(|e| RpcError::internal(format!("draft_attachments::load_content: {e}")))?;
+        let bytes = require_draft_attachment_content(row.id, content)?;
         attachments_json.push(json!({
             "id": row.id.to_string(),
             "draft_id": row.draft_id.to_string(),
@@ -1208,6 +1334,17 @@ async fn op_draft_get(pool: &SqlitePool, args: Value) -> Result<Value, RpcError>
         "draft": draft,
         "attachments": attachments_json,
     }))
+}
+
+fn require_draft_attachment_content(
+    attachment_id: uuid::Uuid,
+    content: Option<Vec<u8>>,
+) -> Result<Vec<u8>, RpcError> {
+    content.ok_or_else(|| {
+        RpcError::internal(format!(
+            "draft attachment content missing for {attachment_id}"
+        ))
+    })
 }
 
 fn message_view(message: &crate::models::Message) -> crate::mail::reply::MessageView<'_> {
@@ -2509,6 +2646,21 @@ mod tests {
         );
         assert_eq!(err.code, "bad_args");
         assert!(err.message.contains("file not found"));
+    }
+
+    #[test]
+    fn test_require_draft_attachment_content_missing_returns_internal() {
+        let id = uuid::Uuid::new_v4();
+        let err = require_draft_attachment_content(id, None).unwrap_err();
+        assert_eq!(err.code, "internal");
+        assert!(err.message.contains(&id.to_string()));
+    }
+
+    #[test]
+    fn test_require_draft_attachment_content_allows_empty_bytes() {
+        let bytes =
+            require_draft_attachment_content(uuid::Uuid::new_v4(), Some(Vec::new())).unwrap();
+        assert!(bytes.is_empty());
     }
 
     #[test]

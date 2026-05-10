@@ -328,17 +328,23 @@ pub struct DraftAttachmentBytes {
     pub filename: String,
     pub content_type: String,
     pub size_bytes: i64,
-    pub bytes: Vec<u8>,
+    pub bytes: Option<Vec<u8>>,
+    pub decode_error: Option<String>,
 }
 
 impl From<crate::tui::ipc::DraftAttachmentPayload> for DraftAttachmentBytes {
     fn from(payload: crate::tui::ipc::DraftAttachmentPayload) -> Self {
-        let bytes = payload.decoded_bytes().unwrap_or_default();
+        let decoded = payload.decoded_bytes();
+        let (bytes, decode_error) = match decoded {
+            Ok(bytes) => (Some(bytes), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
         Self {
             filename: payload.filename,
             content_type: payload.content_type,
             size_bytes: payload.size_bytes,
             bytes,
+            decode_error,
         }
     }
 }
@@ -3156,6 +3162,17 @@ mod tests {
         }
     }
 
+    fn draft_attachment_payload(content_base64: &str) -> crate::tui::ipc::DraftAttachmentPayload {
+        crate::tui::ipc::DraftAttachmentPayload {
+            id: Uuid::new_v4(),
+            draft_id: DraftId::new(),
+            filename: "notes.txt".into(),
+            content_type: "text/plain".into(),
+            size_bytes: 0,
+            content_base64: content_base64.into(),
+        }
+    }
+
     fn detail(message_id: MessageId, body: &str) -> MessageDetail {
         MessageDetail {
             id: message_id,
@@ -3182,6 +3199,22 @@ mod tests {
             snippet: "hello".into(),
             flags: flags.iter().map(|flag| (*flag).to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn test_draft_attachment_decode_failure_keeps_bytes_absent() {
+        let attachment = DraftAttachmentBytes::from(draft_attachment_payload("not valid base64"));
+
+        assert!(attachment.bytes.is_none());
+        assert!(attachment.decode_error.is_some());
+    }
+
+    #[test]
+    fn test_draft_attachment_decode_allows_legitimate_empty_file() {
+        let attachment = DraftAttachmentBytes::from(draft_attachment_payload(""));
+
+        assert_eq!(attachment.bytes, Some(Vec::new()));
+        assert!(attachment.decode_error.is_none());
     }
 
     #[test]

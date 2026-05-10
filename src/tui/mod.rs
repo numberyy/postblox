@@ -840,15 +840,25 @@ async fn materialise_forward_attachment(
 async fn materialise_draft_attachment(
     bytes: &app::DraftAttachmentBytes,
 ) -> Result<app::ComposerAttachment, std::io::Error> {
+    let decoded = bytes.bytes.as_deref().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "invalid base64 for draft attachment '{}': {}",
+                bytes.filename,
+                bytes.decode_error.as_deref().unwrap_or("decode failed")
+            ),
+        )
+    })?;
     let dir = std::env::temp_dir().join("postblox-drafts");
     tokio::fs::create_dir_all(&dir).await?;
     let unique = format!("{}-{}", Uuid::new_v4().simple(), bytes.filename);
     let path = dir.join(unique);
-    tokio::fs::write(&path, &bytes.bytes).await?;
+    tokio::fs::write(&path, decoded).await?;
     Ok(app::ComposerAttachment {
         path,
         filename: bytes.filename.clone(),
-        size_bytes: bytes.bytes.len() as u64,
+        size_bytes: decoded.len() as u64,
         content_type: bytes.content_type.clone(),
     })
 }
@@ -5020,6 +5030,51 @@ mod tests {
         assert_eq!(composer.draft_id, Some(draft_id));
         assert_eq!(composer.subject, "Resume");
         assert!(!composer.dirty);
+    }
+
+    #[tokio::test]
+    async fn test_drafts_pane_enter_decode_failure_surfaces_error() {
+        let account_id = AccountId::new();
+        let drafts_id = FolderId::new();
+        let draft_id = DraftId::new();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        app.apply_folders(vec![drafts_folder_item(drafts_id)]);
+        app.apply_drafts(vec![draft_item(draft_id, account_id, "Resume")]);
+        app.active = ActivePane::Messages;
+
+        let mut summary = draft_summary(account_id, draft_id);
+        summary.attachments.push(app::DraftAttachmentBytes {
+            filename: "bad.txt".into(),
+            content_type: "text/plain".into(),
+            size_bytes: 4,
+            bytes: None,
+            decode_error: Some("invalid byte".into()),
+        });
+        let mut client = MockMailbox {
+            draft_summary: Some(summary),
+            ..Default::default()
+        };
+
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert!(client.calls.contains(&Call::GetDraft(draft_id)));
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.composer.is_none());
+        assert!(app
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Cannot reopen draft"));
+        assert!(app
+            .toasts
+            .iter()
+            .any(|toast| toast.kind == app::ToastKind::Error));
     }
 
     #[tokio::test]

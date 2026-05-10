@@ -9,7 +9,7 @@
 //! re-deriving them.
 
 use serde::Deserialize;
-use sqlx::SqlitePool;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::db::DbError;
 use crate::models::{AccountId, Draft, DraftId, FolderId, MessageId};
@@ -103,6 +103,35 @@ pub async fn update(
         .bind(patch.html_body)
         .bind(id)
         .fetch_optional(pool)
+        .await?)
+}
+
+/// Transactional variant of [`update`].
+///
+/// # Errors
+///
+/// Returns [`DbError::Sqlx`] if the update fails. A missing id is
+/// reported as `Ok(None)`, not an error.
+pub async fn update_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: DraftId,
+    patch: &DraftPatch<'_>,
+) -> Result<Option<Draft>, DbError> {
+    let q = format!(
+        "UPDATE drafts SET to_addrs=?, cc_addrs=?, bcc_addrs=?, subject=?, \
+         text_body=?, html_body=?, \
+         updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') \
+         WHERE id=? RETURNING {SELECT}"
+    );
+    Ok(sqlx::query_as(&q)
+        .bind(patch.to_addrs)
+        .bind(patch.cc_addrs)
+        .bind(patch.bcc_addrs)
+        .bind(patch.subject)
+        .bind(patch.text_body)
+        .bind(patch.html_body)
+        .bind(id)
+        .fetch_optional(&mut **tx)
         .await?)
 }
 

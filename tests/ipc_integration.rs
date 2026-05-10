@@ -3733,6 +3733,133 @@ async fn draft_get_round_trip_returns_draft_and_attachment_bytes() {
 }
 
 #[tokio::test]
+async fn draft_update_invalid_attachment_path_leaves_draft_and_attachments_unchanged() {
+    use base64::Engine;
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let acc = c
+        .request("account.create", account_args("a@x.com"))
+        .await
+        .unwrap();
+    let acc_id = acc.data["id"].as_str().unwrap().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    let original_path = dir.path().join("original.txt");
+    tokio::fs::write(&original_path, b"original attachment")
+        .await
+        .unwrap();
+
+    let created = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": acc_id,
+                "to_addrs": ["bob@x.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "original",
+                "text_body": "original body",
+                "html_body": null,
+                "attachments": [{"path": original_path.display().to_string()}],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(created.ok, "{:?}", created.error);
+    let draft_id = created.data["id"].as_str().unwrap().to_string();
+
+    let missing_path = dir.path().join("missing.txt");
+    let updated = c
+        .request(
+            "draft.update",
+            json!({
+                "id": draft_id,
+                "to_addrs": ["alice@x.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "edited",
+                "text_body": "edited body",
+                "html_body": null,
+                "attachments": [{"path": missing_path.display().to_string()}],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!updated.ok);
+    assert_eq!(
+        updated.error.as_ref().map(|e| e.code.as_str()),
+        Some("bad_args")
+    );
+
+    let got = c
+        .request("draft.get", json!({ "id": draft_id }))
+        .await
+        .unwrap();
+    assert!(got.ok, "{:?}", got.error);
+    let draft = &got.data["draft"];
+    assert_eq!(draft["subject"], "original");
+    assert_eq!(draft["text_body"], "original body");
+    assert_eq!(draft["to_addrs"], json!(["bob@x.com"]));
+
+    let attachments = got.data["attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0]["filename"], "original.txt");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(attachments[0]["content_base64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(decoded, b"original attachment");
+}
+
+#[tokio::test]
+async fn draft_create_oversized_sparse_attachment_rejects_before_reading_full_file() {
+    let h = make_harness().await;
+    let mut c = Client::connect(&h.sock).await.unwrap();
+
+    let acc = c
+        .request("account.create", account_args("a@x.com"))
+        .await
+        .unwrap();
+    let acc_id = acc.data["id"].as_str().unwrap().to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("too-large.bin");
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len((postblox::db::draft_attachments::MAX_DRAFT_ATTACHMENT_BYTES as u64) + 1)
+        .unwrap();
+    drop(file);
+
+    let created = c
+        .request(
+            "draft.create",
+            json!({
+                "account_id": acc_id,
+                "to_addrs": ["bob@x.com"],
+                "cc_addrs": [],
+                "bcc_addrs": [],
+                "subject": "too large",
+                "text_body": "body",
+                "html_body": null,
+                "attachments": [{"path": path.display().to_string()}],
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!created.ok);
+    assert_eq!(
+        created.error.as_ref().map(|e| e.code.as_str()),
+        Some("attachment_too_large")
+    );
+
+    let listed = c
+        .request("draft.list", json!({ "account_id": acc_id }))
+        .await
+        .unwrap();
+    assert!(listed.ok, "{:?}", listed.error);
+    assert!(listed.data.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn draft_get_returns_null_for_missing_draft() {
     let h = make_harness().await;
     let mut c = Client::connect(&h.sock).await.unwrap();
