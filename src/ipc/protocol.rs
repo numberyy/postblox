@@ -57,7 +57,7 @@ pub struct RpcError {
 
 impl RpcError {
     #[cold]
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
@@ -65,17 +65,17 @@ impl RpcError {
     }
 
     #[cold]
-    pub fn unknown_op(op: &str) -> Self {
+    pub(crate) fn unknown_op(op: &str) -> Self {
         Self::new("unknown_op", format!("unknown op '{op}'"))
     }
 
     #[cold]
-    pub fn bad_args(message: impl Into<String>) -> Self {
+    pub(crate) fn bad_args(message: impl Into<String>) -> Self {
         Self::new("bad_args", message)
     }
 
     #[cold]
-    pub fn internal(message: impl Into<String>) -> Self {
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self::new("internal", message)
     }
 
@@ -83,7 +83,10 @@ impl RpcError {
     /// message — folds the boilerplate that otherwise repeats at every
     /// `.map_err(|e| RpcError::internal(format!("op: {e}")))?` call site.
     #[cold]
-    pub fn internal_ctx(context: impl std::fmt::Display, err: impl std::fmt::Display) -> Self {
+    pub(crate) fn internal_ctx(
+        context: impl std::fmt::Display,
+        err: impl std::fmt::Display,
+    ) -> Self {
         Self::new("internal", format!("{context}: {err}"))
     }
 }
@@ -94,14 +97,14 @@ impl RpcError {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 #[non_exhaustive]
-pub enum Frame {
+pub(crate) enum Frame {
     Request(Request),
     Response(Response),
     Event(Event),
 }
 
 impl Response {
-    pub fn ok(id: u64, data: serde_json::Value) -> Self {
+    pub(crate) fn ok(id: u64, data: serde_json::Value) -> Self {
         Self {
             id,
             ok: true,
@@ -110,7 +113,7 @@ impl Response {
         }
     }
 
-    pub fn err(id: u64, error: RpcError) -> Self {
+    pub(crate) fn err(id: u64, error: RpcError) -> Self {
         Self {
             id,
             ok: false,

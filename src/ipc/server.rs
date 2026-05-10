@@ -45,12 +45,11 @@ pub trait Dispatcher: Send + Sync + 'static {
     /// # Errors
     ///
     /// Implementations return [`RpcError`] for any failure they want to
-    /// surface to the client; the wire layer wraps it in a
-    /// [`Response::err`]. Common variants:
-    /// - `RpcError::bad_args` for malformed `args`.
-    /// - `RpcError::internal` for backend (DB / IO / IMAP / SMTP)
-    ///   failures the dispatcher chooses to expose as a generic
-    ///   internal error.
+    /// surface to the client; the wire layer wraps it in an error
+    /// response. Common variants:
+    /// - `bad_args` for malformed `args`.
+    /// - `internal` for backend (DB / IO / IMAP / SMTP) failures the
+    ///   dispatcher chooses to expose as a generic internal error.
     /// - Tool-specific codes set by handlers themselves.
     async fn dispatch(&self, op: Op, args: Value) -> Result<Value, RpcError>;
 }
@@ -63,16 +62,16 @@ pub enum ServerError {
 
 /// Hard cap on simultaneously connected clients. Beyond this we accept
 /// then immediately close — better than silently queueing.
-pub const MAX_CONNECTIONS: usize = 64;
+pub(crate) const MAX_CONNECTIONS: usize = 64;
 const _: () = assert!(MAX_CONNECTIONS == 64);
 
 /// Hard cap on subscriptions per connection. The TUI typically has
 /// 1-3 (mail.new, mail.updated, mcp.approval_requested).
-pub const MAX_SUBS_PER_CONN: usize = 32;
+pub(crate) const MAX_SUBS_PER_CONN: usize = 32;
 const _: () = assert!(MAX_SUBS_PER_CONN == 32);
 
 /// Per-connection writer mailbox capacity. Bigger than typical TUI burst.
-pub const WRITER_MAILBOX: usize = 128;
+pub(crate) const WRITER_MAILBOX: usize = 128;
 const _: () = assert!(WRITER_MAILBOX == 128);
 
 /// Handle to a running server. Drop or call `shutdown` to stop the

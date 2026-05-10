@@ -25,46 +25,46 @@ use crate::models::{
 
 use super::theme::ThemeName;
 
-pub const SEEN_FLAG: &str = "\\Seen";
-pub const FLAGGED_FLAG: &str = "\\Flagged";
-pub const MAX_COMMAND_CHARS: usize = 128;
-pub const MAX_COMPOSE_HEADER_CHARS: usize = 4096;
-pub const MAX_COMPOSE_BODY_CHARS: usize = 100_000;
+pub(crate) const SEEN_FLAG: &str = "\\Seen";
+pub(crate) const FLAGGED_FLAG: &str = "\\Flagged";
+pub(crate) const MAX_COMMAND_CHARS: usize = 128;
+pub(crate) const MAX_COMPOSE_HEADER_CHARS: usize = 4096;
+pub(crate) const MAX_COMPOSE_BODY_CHARS: usize = 100_000;
 
 /// Maximum bytes for any single compose attachment AND the per-draft
 /// aggregate. Mirrors the daemon-side limit (`CLAUDE.md`: "Attachment
 /// size: max 25 MB") so the TUI can reject before round-tripping.
-pub const MAX_COMPOSE_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
+pub(crate) const MAX_COMPOSE_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 
 /// Maximum chars accepted in the inline path-input prompt opened with
 /// `Ctrl-A` while composing.
-pub const MAX_COMPOSE_PATH_CHARS: usize = 4096;
+pub(crate) const MAX_COMPOSE_PATH_CHARS: usize = 4096;
 
 /// Maximum number of simultaneously visible toasts. Pushing past this
 /// drops the oldest toast.
-pub const MAX_TOASTS: usize = 3;
+pub(crate) const MAX_TOASTS: usize = 3;
 
 /// TTL for non-error toasts.
-pub const TOAST_TTL_INFO: Duration = Duration::from_secs(3);
+pub(crate) const TOAST_TTL_INFO: Duration = Duration::from_secs(3);
 /// TTL for error toasts. Errors stick around longer so they don't get
 /// missed when several land at once.
-pub const TOAST_TTL_ERROR: Duration = Duration::from_secs(6);
+pub(crate) const TOAST_TTL_ERROR: Duration = Duration::from_secs(6);
 
 /// Coalescing windows. Identical text from the same source within the
 /// window refreshes the existing toast's expiry instead of pushing a
 /// duplicate.
-pub const COALESCE_ACCOUNT_SYNCED: Duration = Duration::from_secs(5);
-pub const COALESCE_SYNC_ERROR: Duration = Duration::from_secs(10);
+pub(crate) const COALESCE_ACCOUNT_SYNCED: Duration = Duration::from_secs(5);
+pub(crate) const COALESCE_SYNC_ERROR: Duration = Duration::from_secs(10);
 
 /// Status pane icons.
-pub const ICON_IDLE: &str = "●";
-pub const ICON_POLLING: &str = "~";
-pub const ICON_SYNCING: &str = "…";
-pub const ICON_ERROR: &str = "!";
+pub(crate) const ICON_IDLE: &str = "●";
+pub(crate) const ICON_POLLING: &str = "~";
+pub(crate) const ICON_SYNCING: &str = "…";
+pub(crate) const ICON_ERROR: &str = "!";
 
 /// Maximum chars of `last_error` to render after the selected
 /// account's status icon.
-pub const MAX_SELECTED_ERROR_CHARS: usize = 60;
+pub(crate) const MAX_SELECTED_ERROR_CHARS: usize = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivePane {
@@ -115,7 +115,7 @@ pub enum InputMode {
 }
 
 /// Maximum chars accepted in the `/` quick-search input.
-pub const MAX_SEARCH_CHARS: usize = 256;
+pub(crate) const MAX_SEARCH_CHARS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposeField {
