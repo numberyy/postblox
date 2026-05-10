@@ -14,6 +14,7 @@ keywords = ["email", "imap", "tui", "mcp", "sqlite"]
 categories = ["email", "command-line-utilities", "database"]
 include = [
     "src/**/*.rs",
+    "crates/postblox-mail/**",
     "migrations/**/*.sql",
     "Cargo.toml",
     "README.md",
@@ -24,6 +25,7 @@ include = [
 
 [workspace]
 resolver = "2"
+members = ["crates/postblox-mail"]
 
 [workspace.package]
 edition = "2021"
@@ -40,6 +42,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 mail-parser = "0.9"
 thiserror = "2"
+base64 = "0.22"
 
 [[bin]]
 name = "postblox"
@@ -64,8 +67,9 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 mail-parser = { workspace = true }
 thiserror = { workspace = true }
+postblox-mail = { path = "crates/postblox-mail" }
 anyhow = "1"
-base64 = "0.22"
+base64 = { workspace = true }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread", "sync", "fs", "net", "io-util", "io-std", "process", "signal", "time"] }
 tracing = "0.1"

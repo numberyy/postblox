@@ -15,7 +15,8 @@
 //! # Crate layout
 //!
 //! - [`mail`] — framework-free MIME parsing, reply extraction, threading,
-//!   and message building.
+//!   and message building provided by `postblox-mail` and re-exported as
+//!   `postblox::mail`.
 //! - [`db`] — SQLite layer split per entity (accounts, folders, threads,
 //!   messages, attachments, drafts, MCP state, audit log, search).
 //! - [`daemon`] — `DaemonDispatcher` mapping IPC op strings to db calls
@@ -54,7 +55,7 @@ pub mod daemon;
 pub mod db;
 pub mod imap;
 pub mod ipc;
-pub mod mail;
+pub use postblox_mail as mail;
 pub mod mcp;
 pub mod models;
 pub mod oauth;

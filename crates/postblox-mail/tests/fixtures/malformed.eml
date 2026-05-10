@@ -1,0 +1,8 @@
+From: broken@example.com
+To: someone@example.com
+Subject: Garbled Email
+Message-ID: <malformed001@example.com>
+Date: invalid-date-here
+X-Broken-Header: =?INVALID?X?garbage?=
+
+This body is fine even though some headers are garbled.

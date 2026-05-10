@@ -1,8 +1,8 @@
-//! Integration tests for the framework-free `mail/` module.
+//! Integration tests for the framework-free `postblox-mail` crate.
 //!
 //! These tests cross module boundaries (parse → thread → reply → re-build)
 //! to exercise the public API the way the rest of the crate uses it. The
-//! inline `#[cfg(test)] mod tests` blocks under `src/mail/*` cover each
+//! inline `#[cfg(test)] mod tests` blocks under `src/*` cover each
 //! module in isolation; this file covers the seams.
 //!
 //! See rust-skills audit finding F-L2 in `plans/rust-skills-review.md`.
@@ -11,11 +11,10 @@ use chrono::{TimeZone, Utc};
 use serde_json::json;
 use uuid::Uuid;
 
-use postblox::mail::builder::{build_mime_full, MimeAttachment, ReplyHeaders};
-use postblox::mail::parser::{parse, Disposition};
-use postblox::mail::reply::{forward_draft, reply_draft};
-use postblox::mail::threading::{assign_thread, ThreadMatch, ThreadRef};
-use postblox::models::Message;
+use postblox_mail::builder::{build_mime_full, MimeAttachment, ReplyHeaders};
+use postblox_mail::parser::{parse, Disposition};
+use postblox_mail::reply::{forward_draft, reply_draft, MessageView};
+use postblox_mail::threading::{assign_thread, ThreadMatch, ThreadRef};
 
 const SIMPLE_TEXT_EMAIL: &[u8] = b"From: alice@example.com\r\n\
 To: bob@example.com\r\n\
@@ -61,30 +60,51 @@ References: <abc123@example.com>\r\n\
 \r\n\
 Acknowledged.\r\n";
 
-fn sample_message_for_reply() -> Message {
-    Message {
+struct TestMessage {
+    id: Uuid,
+    from_addr: String,
+    reply_to: Option<String>,
+    subject: Option<String>,
+    message_id_header: Option<String>,
+    references_header: Option<String>,
+    to_addrs: serde_json::Value,
+    cc_addrs: serde_json::Value,
+    text_body: Option<String>,
+    html_body: Option<String>,
+    internal_date: chrono::DateTime<Utc>,
+}
+
+impl TestMessage {
+    fn view(&self) -> MessageView<'_> {
+        MessageView {
+            id: self.id,
+            from_addr: &self.from_addr,
+            reply_to: self.reply_to.as_deref(),
+            subject: self.subject.as_deref(),
+            message_id_header: self.message_id_header.as_deref(),
+            references_header: self.references_header.as_deref(),
+            to_addrs: &self.to_addrs,
+            cc_addrs: &self.cc_addrs,
+            text_body: self.text_body.as_deref(),
+            html_body: self.html_body.as_deref(),
+            internal_date: self.internal_date,
+        }
+    }
+}
+
+fn sample_message_for_reply() -> TestMessage {
+    TestMessage {
         id: Uuid::new_v4(),
-        account_id: Uuid::new_v4(),
-        folder_id: Uuid::new_v4(),
-        thread_id: None,
-        uid: 1,
         message_id_header: Some("orig@example.com".into()),
-        in_reply_to: None,
         references_header: Some("<root@example.com>".into()),
         from_addr: "alice@example.com".into(),
         to_addrs: json!(["bob@example.com"]),
         cc_addrs: json!([]),
-        bcc_addrs: json!([]),
         reply_to: None,
         subject: Some("Quarterly report".into()),
-        snippet: None,
         text_body: Some("Original body line 1\nOriginal body line 2".into()),
         html_body: None,
-        raw_size: 1024,
-        flags: json!([]),
         internal_date: Utc.with_ymd_and_hms(2026, 5, 1, 10, 0, 0).unwrap(),
-        sent_at: None,
-        created_at: Utc.with_ymd_and_hms(2026, 5, 1, 10, 0, 0).unwrap(),
     }
 }
 
@@ -199,7 +219,7 @@ fn test_assign_thread_subject_match_beyond_cutoff_returns_new() {
 #[test]
 fn test_build_reply_emits_in_reply_to_and_references() {
     let original = sample_message_for_reply();
-    let draft = reply_draft(&original, "me@example.com", false);
+    let draft = reply_draft(original.view(), "me@example.com", false);
 
     assert_eq!(draft.subject, "Re: Quarterly report");
     assert_eq!(draft.in_reply_to, "<orig@example.com>");
@@ -244,7 +264,7 @@ fn test_build_reply_emits_in_reply_to_and_references() {
 #[test]
 fn test_build_forward_does_not_emit_in_reply_to() {
     let original = sample_message_for_reply();
-    let draft = forward_draft(&original, &[]);
+    let draft = forward_draft(original.view(), &[]);
     assert_eq!(draft.subject, "Fwd: Quarterly report");
     assert!(draft.to.is_empty(), "forward composer leaves To empty");
     assert!(

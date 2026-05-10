@@ -10,12 +10,12 @@
 //! throughput. Underlying dep is `mail-parser` (Tier 2 in CLAUDE.md —
 //! wrapped here so the rest of the crate doesn't import it directly).
 //!
-//! Failures land in [`crate::mail::error::MailError::Parse`].
+//! Failures land in [`crate::error::MailError::Parse`].
 
 use mail_parser::{Address, HeaderValue, MessageParser, MimeHeaders, PartType};
 use serde::{Deserialize, Serialize};
 
-use crate::mail::error::MailError;
+use crate::error::MailError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -272,7 +272,11 @@ mod tests {
     use super::*;
 
     fn fixture(name: &str) -> Vec<u8> {
-        std::fs::read(format!("tests/fixtures/{name}")).expect("fixture file missing")
+        std::fs::read(format!(
+            "{}/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("fixture file missing")
     }
 
     #[test]

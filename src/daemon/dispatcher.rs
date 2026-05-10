@@ -1207,6 +1207,22 @@ async fn op_draft_get(pool: &SqlitePool, args: Value) -> Result<Value, RpcError>
     }))
 }
 
+fn message_view(message: &crate::models::Message) -> crate::mail::reply::MessageView<'_> {
+    crate::mail::reply::MessageView {
+        id: message.id,
+        from_addr: &message.from_addr,
+        reply_to: message.reply_to.as_deref(),
+        subject: message.subject.as_deref(),
+        message_id_header: message.message_id_header.as_deref(),
+        references_header: message.references_header.as_deref(),
+        to_addrs: &message.to_addrs,
+        cc_addrs: &message.cc_addrs,
+        text_body: message.text_body.as_deref(),
+        html_body: message.html_body.as_deref(),
+        internal_date: message.internal_date,
+    }
+}
+
 /// Build a `ReplyDraft` for the given message + responding account.
 ///
 /// Pure-data op: the daemon doesn't persist anything yet — the TUI
@@ -1223,7 +1239,7 @@ async fn op_message_prepare_reply(pool: &SqlitePool, args: Value) -> Result<Valu
         .await
         .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
         .ok_or_else(|| RpcError::bad_args("unknown account for message"))?;
-    let draft = crate::mail::reply::reply_draft(&message, &account.email, reply_all);
+    let draft = crate::mail::reply::reply_draft(message_view(&message), &account.email, reply_all);
     Ok(json!({
         "message_id": message.id.to_string(),
         "account_id": account.id.to_string(),
@@ -1253,7 +1269,7 @@ async fn op_message_prepare_forward(pool: &SqlitePool, args: Value) -> Result<Va
         .into_iter()
         .map(|a| (a.id, a.filename, a.content_type, a.size_bytes))
         .collect();
-    let draft = crate::mail::reply::forward_draft(&message, &attachment_tuples);
+    let draft = crate::mail::reply::forward_draft(message_view(&message), &attachment_tuples);
     let attachments_json: Vec<Value> = draft
         .forwarded_attachments
         .iter()

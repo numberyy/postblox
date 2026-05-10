@@ -1,0 +1,19 @@
+From: sender@example.com
+To: recipient@example.com
+Subject: File Attached
+Message-ID: <attach001@example.com>
+Date: Tue, 9 Jan 2026 15:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mixedboundary"
+
+--mixedboundary
+Content-Type: text/plain; charset=utf-8
+
+Please see the attached file.
+--mixedboundary
+Content-Type: application/octet-stream; name="data.bin"
+Content-Disposition: attachment; filename="data.bin"
+Content-Transfer-Encoding: base64
+
+SGVsbG8gV29ybGQ=
+--mixedboundary--

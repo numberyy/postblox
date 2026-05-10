@@ -13,7 +13,7 @@
 //!    message landed inside the 7-day cutoff.
 //!
 //! No match → [`ThreadMatch::New`] and the caller mints a thread row.
-//! All inputs are pure values from [`crate::mail::parser::ParsedEmail`];
+//! All inputs are pure values from [`crate::parser::ParsedEmail`];
 //! no DB reads happen here.
 
 use std::borrow::Cow;
@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
-use crate::mail::parser::ParsedEmail;
+use crate::parser::ParsedEmail;
 
 pub struct ThreadRef {
     pub thread_id: Uuid,

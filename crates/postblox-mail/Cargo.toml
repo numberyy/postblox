@@ -1,0 +1,19 @@
+[package]
+name = "postblox-mail"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Framework-free email parsing, threading, reply, and MIME building for postblox."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+chrono = { workspace = true }
+mail-parser = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

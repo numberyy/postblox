@@ -1,5 +1,5 @@
 //! Reply / reply-all / forward draft construction. Pure functions:
-//! given a `Message` plus the responding account's email, produce the
+//! given a [`MessageView`] plus the responding account's email, produce the
 //! pre-filled headers, subject, and quoted body the composer should
 //! show. RFC 5322 §3.6.4 controls `In-Reply-To` / `References`.
 
@@ -7,12 +7,30 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::models::Message;
-
 /// Maximum number of message-ids retained when chaining `References`.
 /// Common practice is ~100; stop the chain growing without bound on
 /// long mailing-list threads.
 const REFERENCES_MESSAGE_ID_CAP: usize = 100;
+
+/// Borrowed message data needed to prepare reply and forward drafts.
+///
+/// The daemon owns the full stored message model. This crate only needs
+/// a framework-free, borrow-only view over the fields used to construct
+/// mail drafts.
+#[derive(Debug, Clone, Copy)]
+pub struct MessageView<'a> {
+    pub id: Uuid,
+    pub from_addr: &'a str,
+    pub reply_to: Option<&'a str>,
+    pub subject: Option<&'a str>,
+    pub message_id_header: Option<&'a str>,
+    pub references_header: Option<&'a str>,
+    pub to_addrs: &'a serde_json::Value,
+    pub cc_addrs: &'a serde_json::Value,
+    pub text_body: Option<&'a str>,
+    pub html_body: Option<&'a str>,
+    pub internal_date: chrono::DateTime<chrono::Utc>,
+}
 
 /// Pre-filled headers + body the composer should populate when
 /// replying.
@@ -53,18 +71,14 @@ pub struct ForwardAttachmentRef {
 /// `account_email` is the address replying. When `reply_all` is true
 /// the original `To` and `Cc` recipients are carried over to `Cc` with
 /// the responding address removed and the reply target deduped.
-pub fn reply_draft(message: &Message, account_email: &str, reply_all: bool) -> ReplyDraft {
+pub fn reply_draft(message: MessageView<'_>, account_email: &str, reply_all: bool) -> ReplyDraft {
     let reply_target = primary_reply_target(message);
-    let subject = re_prefix(message.subject.as_deref().unwrap_or(""));
+    let subject = re_prefix(message.subject.unwrap_or(""));
     let in_reply_to = message
         .message_id_header
-        .clone()
         .map(angle_wrap)
         .unwrap_or_default();
-    let references = build_references(
-        message.references_header.as_deref(),
-        message.message_id_header.as_deref(),
-    );
+    let references = build_references(message.references_header, message.message_id_header);
 
     let mut to: Vec<String> = if reply_target.is_empty() {
         Vec::new()
@@ -74,8 +88,8 @@ pub fn reply_draft(message: &Message, account_email: &str, reply_all: bool) -> R
     let mut cc: Vec<String> = Vec::new();
 
     if reply_all {
-        let to_addrs = json_array_of_strings(&message.to_addrs);
-        let cc_addrs = json_array_of_strings(&message.cc_addrs);
+        let to_addrs = json_array_of_strings(message.to_addrs);
+        let cc_addrs = json_array_of_strings(message.cc_addrs);
         let mut seen_lower: Vec<String> = Vec::new();
         for addr in to.iter().chain([account_email.to_string()].iter()) {
             push_lower(&mut seen_lower, addr);
@@ -113,10 +127,10 @@ pub fn reply_draft(message: &Message, account_email: &str, reply_all: bool) -> R
 /// can re-fetch bytes (locally or via IMAP) before opening the
 /// composer.
 pub fn forward_draft(
-    message: &Message,
+    message: MessageView<'_>,
     attachments: &[(Uuid, String, String, i64)],
 ) -> ForwardDraft {
-    let subject = fwd_prefix(message.subject.as_deref().unwrap_or(""));
+    let subject = fwd_prefix(message.subject.unwrap_or(""));
     let forwarded_body = forward_body(message);
     let forwarded_attachments = attachments
         .iter()
@@ -178,10 +192,9 @@ fn has_fwd_prefix(subject: &str) -> bool {
     lower.starts_with("fwd:") || lower.starts_with("fw:")
 }
 
-fn primary_reply_target(message: &Message) -> String {
+fn primary_reply_target(message: MessageView<'_>) -> String {
     message
         .reply_to
-        .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
@@ -246,7 +259,7 @@ fn contains_lower(seen: &[String], addr: &str) -> bool {
 }
 
 /// Build the `> `-prefixed quote block + attribution line.
-fn quote_body(message: &Message) -> String {
+fn quote_body(message: MessageView<'_>) -> String {
     let attribution = format!(
         "On {}, {} wrote:",
         format_rfc2822(message.internal_date),
@@ -261,9 +274,9 @@ fn quote_body(message: &Message) -> String {
 
 /// Forward body skeleton: a divider, the original headers, and the
 /// original body (or a placeholder when only HTML was present).
-fn forward_body(message: &Message) -> String {
-    let to_line = json_array_of_strings(&message.to_addrs).join(", ");
-    let subject = message.subject.as_deref().unwrap_or("");
+fn forward_body(message: MessageView<'_>) -> String {
+    let to_line = json_array_of_strings(message.to_addrs).join(", ");
+    let subject = message.subject.unwrap_or("");
     let mut out = String::new();
     out.push_str("---------- Forwarded message ----------\r\n");
     out.push_str(&format!("From: {}\r\n", message.from_addr));
@@ -278,16 +291,11 @@ fn forward_body(message: &Message) -> String {
     out
 }
 
-fn body_for_quote(message: &Message) -> String {
-    if let Some(text) = message.text_body.as_deref().filter(|s| !s.is_empty()) {
+fn body_for_quote(message: MessageView<'_>) -> String {
+    if let Some(text) = message.text_body.filter(|s| !s.is_empty()) {
         return text.replace("\r\n", "\n");
     }
-    if message
-        .html_body
-        .as_deref()
-        .map(|s| !s.is_empty())
-        .unwrap_or(false)
-    {
+    if message.html_body.map(|s| !s.is_empty()).unwrap_or(false) {
         return "[HTML body — quoted text unavailable]".to_string();
     }
     String::new()
@@ -320,30 +328,51 @@ mod tests {
     use chrono::TimeZone;
     use serde_json::json;
 
-    fn sample(subject: Option<&str>, from: &str) -> Message {
-        Message {
+    struct TestMessage {
+        id: Uuid,
+        from_addr: String,
+        reply_to: Option<String>,
+        subject: Option<String>,
+        message_id_header: Option<String>,
+        references_header: Option<String>,
+        to_addrs: Value,
+        cc_addrs: Value,
+        text_body: Option<String>,
+        html_body: Option<String>,
+        internal_date: DateTime<Utc>,
+    }
+
+    impl TestMessage {
+        fn view(&self) -> MessageView<'_> {
+            MessageView {
+                id: self.id,
+                from_addr: &self.from_addr,
+                reply_to: self.reply_to.as_deref(),
+                subject: self.subject.as_deref(),
+                message_id_header: self.message_id_header.as_deref(),
+                references_header: self.references_header.as_deref(),
+                to_addrs: &self.to_addrs,
+                cc_addrs: &self.cc_addrs,
+                text_body: self.text_body.as_deref(),
+                html_body: self.html_body.as_deref(),
+                internal_date: self.internal_date,
+            }
+        }
+    }
+
+    fn sample(subject: Option<&str>, from: &str) -> TestMessage {
+        TestMessage {
             id: Uuid::new_v4(),
-            account_id: Uuid::new_v4(),
-            folder_id: Uuid::new_v4(),
-            thread_id: None,
-            uid: 1,
             message_id_header: Some("orig@example.com".into()),
-            in_reply_to: None,
             references_header: None,
             from_addr: from.into(),
             to_addrs: json!([]),
             cc_addrs: json!([]),
-            bcc_addrs: json!([]),
             reply_to: None,
             subject: subject.map(str::to_string),
-            snippet: None,
             text_body: Some("Original line 1\nOriginal line 2".into()),
             html_body: None,
-            raw_size: 1,
-            flags: json!([]),
             internal_date: Utc.with_ymd_and_hms(2026, 5, 9, 10, 30, 0).unwrap(),
-            sent_at: None,
-            created_at: Utc.with_ymd_and_hms(2026, 5, 9, 10, 30, 0).unwrap(),
         }
     }
 
@@ -383,7 +412,7 @@ mod tests {
     #[test]
     fn test_reply_draft_in_reply_to_uses_message_id() {
         let msg = sample(Some("Hi"), "alice@x.com");
-        let draft = reply_draft(&msg, "me@x.com", false);
+        let draft = reply_draft(msg.view(), "me@x.com", false);
         assert_eq!(draft.in_reply_to, "<orig@example.com>");
         assert_eq!(draft.references, "<orig@example.com>");
         assert_eq!(draft.subject, "Re: Hi");
@@ -396,7 +425,7 @@ mod tests {
         let mut msg = sample(Some("Re: Hi"), "alice@x.com");
         msg.references_header = Some("<root@x>".into());
         msg.message_id_header = Some("orig@x".into());
-        let draft = reply_draft(&msg, "me@x.com", false);
+        let draft = reply_draft(msg.view(), "me@x.com", false);
         assert_eq!(draft.references, "<root@x> <orig@x>");
         assert_eq!(draft.subject, "Re: Hi"); // no double prefix
     }
@@ -405,7 +434,7 @@ mod tests {
     fn test_reply_draft_handles_missing_message_id_gracefully() {
         let mut msg = sample(Some("Hi"), "alice@x.com");
         msg.message_id_header = None;
-        let draft = reply_draft(&msg, "me@x.com", false);
+        let draft = reply_draft(msg.view(), "me@x.com", false);
         assert_eq!(draft.in_reply_to, "");
         assert_eq!(draft.references, "");
     }
@@ -414,7 +443,7 @@ mod tests {
     fn test_reply_draft_uses_reply_to_when_present() {
         let mut msg = sample(Some("Hi"), "alice@x.com");
         msg.reply_to = Some("alice-replies@x.com".into());
-        let draft = reply_draft(&msg, "me@x.com", false);
+        let draft = reply_draft(msg.view(), "me@x.com", false);
         assert_eq!(draft.to, vec!["alice-replies@x.com".to_string()]);
     }
 
@@ -423,7 +452,7 @@ mod tests {
         let mut msg = sample(Some("Hi"), "alice@x.com");
         msg.to_addrs = json!(["a@x.com", "b@x.com", "Me@x.com"]);
         msg.cc_addrs = json!(["c@x.com"]);
-        let draft = reply_draft(&msg, "me@x.com", true);
+        let draft = reply_draft(msg.view(), "me@x.com", true);
         assert_eq!(draft.to, vec!["alice@x.com".to_string()]);
         // me@x.com is dropped (case-insensitive). Original From and
         // every other recipient survives — alice is in To, so the
@@ -444,7 +473,7 @@ mod tests {
         // to the original From per common convention; document that.
         let mut msg = sample(Some("Hi"), "a@x.com");
         msg.to_addrs = json!(["b@x.com"]);
-        let draft = reply_draft(&msg, "a@x.com", true);
+        let draft = reply_draft(msg.view(), "a@x.com", true);
         assert_eq!(draft.to, vec!["a@x.com".to_string()]);
         assert_eq!(draft.cc, vec!["b@x.com".to_string()]);
     }
@@ -454,7 +483,7 @@ mod tests {
         let mut msg = sample(Some("Hi"), "alice@x.com");
         msg.to_addrs = json!(["B@X.COM", "alice@x.com"]);
         msg.cc_addrs = json!(["b@x.com"]);
-        let draft = reply_draft(&msg, "me@x.com", true);
+        let draft = reply_draft(msg.view(), "me@x.com", true);
         assert_eq!(draft.to, vec!["alice@x.com".to_string()]);
         assert_eq!(draft.cc, vec!["B@X.COM".to_string()]);
     }
@@ -462,7 +491,7 @@ mod tests {
     #[test]
     fn test_reply_quoted_body_contains_attribution_and_prefixed_lines() {
         let msg = sample(Some("Hi"), "alice@x.com");
-        let draft = reply_draft(&msg, "me@x.com", false);
+        let draft = reply_draft(msg.view(), "me@x.com", false);
         assert!(
             draft
                 .quoted_body
@@ -479,14 +508,14 @@ mod tests {
         let mut msg = sample(Some("Hi"), "alice@x.com");
         msg.text_body = None;
         msg.html_body = Some("<p>Hi</p>".into());
-        let draft = reply_draft(&msg, "me@x.com", false);
+        let draft = reply_draft(msg.view(), "me@x.com", false);
         assert!(draft.quoted_body.contains("> [HTML body"));
     }
 
     #[test]
     fn test_forward_draft_subject_and_body_shape() {
         let msg = sample(Some("Subject"), "alice@x.com");
-        let draft = forward_draft(&msg, &[]);
+        let draft = forward_draft(msg.view(), &[]);
         assert_eq!(draft.subject, "Fwd: Subject");
         assert!(draft.to.is_empty());
         assert!(draft
@@ -501,7 +530,7 @@ mod tests {
         let msg = sample(Some("S"), "alice@x.com");
         let attachment_id = Uuid::new_v4();
         let draft = forward_draft(
-            &msg,
+            msg.view(),
             &[(
                 attachment_id,
                 "report.pdf".to_string(),

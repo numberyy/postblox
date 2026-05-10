@@ -1,0 +1,10 @@
+From: chain@example.com
+To: thread@example.com
+Subject: Re: Re: Sprint Planning
+Message-ID: <chain003@example.com>
+In-Reply-To: <chain002@example.com>
+References: <chain001@example.com> <chain002@example.com>
+Date: Sat, 6 Jan 2026 11:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+Sounds good, let's meet at 2pm.
