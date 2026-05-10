@@ -1648,17 +1648,17 @@ async fn op_message_send(
         in_reply_to: draft.in_reply_to.as_deref(),
         references: draft.references_header.as_deref(),
     };
-    let mime = crate::mail::builder::build_mime_full(
-        &account.email,
-        &to,
-        &cc,
+    let mime = crate::mail::builder::build_mime_full(crate::mail::builder::MimeBuildOptions {
+        from: &account.email,
+        to: &to,
+        cc: &cc,
         subject,
-        draft.text_body.as_deref(),
-        draft.html_body.as_deref(),
-        &message_id,
-        &attachments,
-        &reply,
-    );
+        text_body: draft.text_body.as_deref(),
+        html_body: draft.html_body.as_deref(),
+        message_id: &message_id,
+        attachments: &attachments,
+        reply,
+    });
 
     smtp.submit(SmtpSubmitRequest {
         server: SmtpServer {

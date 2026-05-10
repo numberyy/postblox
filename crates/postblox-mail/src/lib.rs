@@ -7,8 +7,9 @@
 //! parsing throughput without spinning up a runtime.
 //!
 //! Submodules:
-//! - [`parser`] — [`parser::parse`] turns raw RFC 5322 bytes into
-//!   [`ParsedEmail`]. Hot path; see CLAUDE.md perf targets.
+//! - [`parser`] — [`parser::parse`] and [`parser::parse_with_options`]
+//!   turn raw RFC 5322 bytes into [`ParsedEmail`]. Hot path; see
+//!   CLAUDE.md perf targets.
 //! - [`builder`] — MIME assembly for outgoing messages.
 //! - [`threading`] — [`threading::assign_thread`] places a parsed
 //!   message into an existing thread or starts a new one.
@@ -30,6 +31,6 @@ pub mod reply;
 pub mod reply_extract;
 pub mod threading;
 
-pub use parser::{Disposition, ParsedAttachment, ParsedEmail};
+pub use parser::{Disposition, ParseOptions, ParsedAttachment, ParsedEmail};
 pub use reply::{forward_draft, fwd_prefix, re_prefix, reply_draft, ForwardDraft, ReplyDraft};
 pub use threading::{ThreadMatch, ThreadRef};

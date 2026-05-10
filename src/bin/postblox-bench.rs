@@ -121,7 +121,11 @@ fn bench_parse(n: usize) {
 
     // Warmup
     for raw in corpus.iter().take(16) {
-        let parsed = mail::parser::parse(black_box(raw.as_slice())).expect("warmup parse");
+        let parsed = mail::parser::parse_with_options(
+            black_box(raw.as_slice()),
+            mail::parser::ParseOptions::without_raw_headers(),
+        )
+        .expect("warmup parse");
         black_box(parsed);
     }
 
@@ -129,7 +133,11 @@ fn bench_parse(n: usize) {
     let mut parsed = 0u64;
     for i in 0..n {
         let raw = black_box(&corpus[i % corpus.len()]);
-        let email = mail::parser::parse(raw.as_slice()).expect("parse");
+        let email = mail::parser::parse_with_options(
+            raw.as_slice(),
+            mail::parser::ParseOptions::without_raw_headers(),
+        )
+        .expect("parse");
         black_box(email);
         parsed += 1;
     }

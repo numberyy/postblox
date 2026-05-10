@@ -11,7 +11,7 @@ use chrono::{TimeZone, Utc};
 use serde_json::json;
 use uuid::Uuid;
 
-use postblox_mail::builder::{build_mime_full, MimeAttachment, ReplyHeaders};
+use postblox_mail::builder::{build_mime_full, MimeAttachment, MimeBuildOptions, ReplyHeaders};
 use postblox_mail::parser::{parse, Disposition};
 use postblox_mail::reply::{forward_draft, reply_draft, MessageView};
 use postblox_mail::threading::{assign_thread, ThreadMatch, ThreadRef};
@@ -232,20 +232,20 @@ fn test_build_reply_emits_in_reply_to_and_references() {
 
     // Round-trip the draft headers through the MIME builder and confirm
     // the threading headers land on the wire.
-    let raw = build_mime_full(
-        "me@example.com",
-        &draft.to,
-        &draft.cc,
-        &draft.subject,
-        Some("Acknowledged.\r\n"),
-        None,
-        "<my-reply@postblox>",
-        &[],
-        &ReplyHeaders {
+    let raw = build_mime_full(MimeBuildOptions {
+        from: "me@example.com",
+        to: &draft.to,
+        cc: &draft.cc,
+        subject: &draft.subject,
+        text_body: Some("Acknowledged.\r\n"),
+        html_body: None,
+        message_id: "<my-reply@postblox>",
+        attachments: &[],
+        reply: ReplyHeaders {
             in_reply_to: Some(&draft.in_reply_to),
             references: Some(&draft.references),
         },
-    );
+    });
     let s = String::from_utf8(raw).expect("MIME output should be valid UTF-8");
     assert!(
         s.contains("In-Reply-To: <orig@example.com>\r\n"),
@@ -283,17 +283,17 @@ fn test_build_forward_does_not_emit_in_reply_to() {
     );
 
     // Build a MIME message for the forward; explicitly no ReplyHeaders.
-    let raw = build_mime_full(
-        "me@example.com",
-        &["new-recipient@example.com".to_string()],
-        &[],
-        &draft.subject,
-        Some(&draft.forwarded_body),
-        None,
-        "<my-fwd@postblox>",
-        &[],
-        &ReplyHeaders::default(),
-    );
+    let raw = build_mime_full(MimeBuildOptions {
+        from: "me@example.com",
+        to: &["new-recipient@example.com".to_string()],
+        cc: &[],
+        subject: &draft.subject,
+        text_body: Some(&draft.forwarded_body),
+        html_body: None,
+        message_id: "<my-fwd@postblox>",
+        attachments: &[],
+        reply: ReplyHeaders::default(),
+    });
     let s = String::from_utf8(raw).expect("MIME output should be valid UTF-8");
     assert!(
         !s.contains("In-Reply-To"),
@@ -317,22 +317,22 @@ fn test_parse_then_build_round_trip_preserves_attachment_bytes() {
     let parsed = parse(MULTIPART_WITH_ATTACHMENT).expect("parse multipart");
     let original = &parsed.attachments[0];
 
-    let raw = build_mime_full(
-        "me@example.com",
-        &["other@example.com".to_string()],
-        &[],
-        "Forwarding logs",
-        Some("See attached"),
-        None,
-        "<roundtrip@postblox>",
-        &[MimeAttachment {
+    let raw = build_mime_full(MimeBuildOptions {
+        from: "me@example.com",
+        to: &["other@example.com".to_string()],
+        cc: &[],
+        subject: "Forwarding logs",
+        text_body: Some("See attached"),
+        html_body: None,
+        message_id: "<roundtrip@postblox>",
+        attachments: &[MimeAttachment {
             filename: original.filename.clone(),
             content_type: original.content_type.clone(),
             data: original.data.clone(),
             content_id: None,
         }],
-        &ReplyHeaders::default(),
-    );
+        reply: ReplyHeaders::default(),
+    });
 
     let reparsed = parse(&raw).expect("rebuilt MIME should parse");
     assert_eq!(

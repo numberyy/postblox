@@ -25,7 +25,7 @@ use crate::auth::MailCredential;
 use crate::db;
 use crate::imap::ImapSync;
 use crate::ipc::{Hub, Topic};
-use crate::mail::parser::{parse, ParsedEmail};
+use crate::mail::parser::{parse_with_options, ParseOptions, ParsedEmail};
 use crate::mail::threading::{assign_thread, ThreadMatch, ThreadRef};
 use crate::models::{AccountId, Folder, FolderId, Message, ThreadId};
 
@@ -137,13 +137,14 @@ pub async fn reconcile_folder(
         if fetched.raw.is_empty() {
             continue;
         }
-        let mut parsed: ParsedEmail = match parse(&fetched.raw) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(uid, error = %e, "skip unparseable message");
-                continue;
-            }
-        };
+        let mut parsed: ParsedEmail =
+            match parse_with_options(&fetched.raw, ParseOptions::without_raw_headers()) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(uid, error = %e, "skip unparseable message");
+                    continue;
+                }
+            };
 
         let thread_id = match assign_thread(&parsed, &thread_refs) {
             ThreadMatch::Existing(id) => ThreadId::from(id),

@@ -1,9 +1,10 @@
 //! RFC 5322 / MIME parsing — raw bytes in, [`ParsedEmail`] out.
 //!
-//! Single entry point: [`parse`]. It pulls headers, normalises
+//! Default entry point: [`parse`]. It pulls headers, normalises
 //! recipient lists, picks `text/plain` and `text/html` body parts, and
 //! collects attachments into [`ParsedAttachment`] with a
-//! [`Disposition`] tag.
+//! [`Disposition`] tag. Hot paths that do not need `raw_headers` can
+//! use [`parse_with_options`] with [`ParseOptions::without_raw_headers`].
 //!
 //! This is the bench-gate hot path: [`parse`] runs on every inbound
 //! IMAP message and CLAUDE.md targets ≥ 5,000 msgs/sec for parsing
@@ -48,7 +49,36 @@ pub struct ParsedEmail {
     pub attachments: Vec<ParsedAttachment>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseOptions {
+    pub include_raw_headers: bool,
+}
+
+impl ParseOptions {
+    pub const fn with_raw_headers() -> Self {
+        Self {
+            include_raw_headers: true,
+        }
+    }
+
+    pub const fn without_raw_headers() -> Self {
+        Self {
+            include_raw_headers: false,
+        }
+    }
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self::with_raw_headers()
+    }
+}
+
 pub fn parse(raw: &[u8]) -> Result<ParsedEmail, MailError> {
+    parse_with_options(raw, ParseOptions::default())
+}
+
+pub fn parse_with_options(raw: &[u8], options: ParseOptions) -> Result<ParsedEmail, MailError> {
     let message = MessageParser::default()
         .parse(raw)
         .ok_or_else(|| MailError::Parse("completely unparseable message".into()))?;
@@ -85,7 +115,11 @@ pub fn parse(raw: &[u8]) -> Result<ParsedEmail, MailError> {
         .map(|s| s.into_owned())
         .filter(|s| !s.is_empty());
 
-    let raw_headers = build_raw_headers(&message);
+    let raw_headers = if options.include_raw_headers {
+        build_raw_headers(&message)
+    } else {
+        serde_json::Value::Null
+    };
 
     let mut attachments = Vec::with_capacity(message.parts.len().min(8));
     for (i, part) in message.parts.iter().enumerate() {
@@ -520,5 +554,17 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
         assert!(email.raw_headers.is_object());
         let obj = email.raw_headers.as_object().unwrap();
         assert!(obj.contains_key("From") || obj.contains_key("Subject"));
+    }
+
+    #[test]
+    fn test_parse_with_options_without_raw_headers_leaves_null() {
+        let raw = fixture("simple_text.eml");
+        let default_email = parse(&raw).unwrap();
+        let email = parse_with_options(&raw, ParseOptions::without_raw_headers()).unwrap();
+
+        assert!(default_email.raw_headers.is_object());
+        assert!(email.raw_headers.is_null());
+        assert_eq!(email.message_id, default_email.message_id);
+        assert_eq!(email.subject, default_email.subject);
     }
 }

@@ -1,19 +1,18 @@
 //! MIME assembly for outgoing messages.
 //!
 //! Concrete entry points (the function set has accreted as features
-//! landed; the most general form is [`build_mime_full`], which the
-//! thinner wrappers delegate to):
+//! landed; prefer [`build_mime_full`] once callers need attachments or
+//! reply headers because [`MimeBuildOptions`] keeps those fields named):
 //!
 //! - [`build_mime`] — text + optional HTML, no attachments.
-//! - [`build_mime_with_attachments`] — adds `multipart/mixed` parts.
-//! - [`build_mime_full`] — adds RFC 5322 §3.6.4 [`ReplyHeaders`]
-//!   (`In-Reply-To` / `References`) for threaded replies.
+//! - [`build_mime_with_attachments`] — deprecated compatibility wrapper
+//!   for `multipart/mixed` parts.
+//! - [`build_mime_full`] — adds attachments and RFC 5322 §3.6.4
+//!   [`ReplyHeaders`] (`In-Reply-To` / `References`) for threaded
+//!   replies through [`MimeBuildOptions`].
 //!
-//! `#[allow(clippy::too_many_arguments)]` is intentional on the build
-//! functions: the parameter list mirrors the SMTP envelope plus body
-//! parts, and grouping into an options struct would just shuffle the
-//! same fields without removing any. All header inputs are CRLF-
-//! stripped before they reach the wire to prevent header injection.
+//! All header inputs are CRLF-stripped before they reach the wire to
+//! prevent header injection.
 
 use std::fmt::Write;
 
@@ -36,7 +35,17 @@ pub fn build_mime(
     html_body: Option<&str>,
     message_id: &str,
 ) -> Vec<u8> {
-    build_mime_with_attachments(from, to, cc, subject, text_body, html_body, message_id, &[])
+    build_mime_full(MimeBuildOptions {
+        from,
+        to,
+        cc,
+        subject,
+        text_body,
+        html_body,
+        message_id,
+        attachments: &[],
+        reply: ReplyHeaders::default(),
+    })
 }
 
 pub struct MimeAttachment {
@@ -49,12 +58,30 @@ pub struct MimeAttachment {
 /// RFC 5322 §3.6.4 threading headers to thread an outgoing reply onto
 /// the original message. Both fields are optional so the same builder
 /// path serves new-thread sends.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct ReplyHeaders<'a> {
     pub in_reply_to: Option<&'a str>,
     pub references: Option<&'a str>,
 }
 
+/// Inputs for [`build_mime_full`].
+///
+/// Grouping the full MIME builder's inputs keeps call sites readable
+/// once attachments and reply-threading headers are involved.
+#[derive(Clone, Copy)]
+pub struct MimeBuildOptions<'a> {
+    pub from: &'a str,
+    pub to: &'a [String],
+    pub cc: &'a [String],
+    pub subject: &'a str,
+    pub text_body: Option<&'a str>,
+    pub html_body: Option<&'a str>,
+    pub message_id: &'a str,
+    pub attachments: &'a [MimeAttachment],
+    pub reply: ReplyHeaders<'a>,
+}
+
+#[deprecated(note = "use build_mime_full(MimeBuildOptions { .. })")]
 #[allow(clippy::too_many_arguments)]
 pub fn build_mime_with_attachments(
     from: &str,
@@ -66,7 +93,7 @@ pub fn build_mime_with_attachments(
     message_id: &str,
     attachments: &[MimeAttachment],
 ) -> Vec<u8> {
-    build_mime_full(
+    build_mime_full(MimeBuildOptions {
         from,
         to,
         cc,
@@ -75,22 +102,23 @@ pub fn build_mime_with_attachments(
         html_body,
         message_id,
         attachments,
-        &ReplyHeaders::default(),
-    )
+        reply: ReplyHeaders::default(),
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn build_mime_full(
-    from: &str,
-    to: &[String],
-    cc: &[String],
-    subject: &str,
-    text_body: Option<&str>,
-    html_body: Option<&str>,
-    message_id: &str,
-    attachments: &[MimeAttachment],
-    reply: &ReplyHeaders<'_>,
-) -> Vec<u8> {
+pub fn build_mime_full(options: MimeBuildOptions<'_>) -> Vec<u8> {
+    let MimeBuildOptions {
+        from,
+        to,
+        cc,
+        subject,
+        text_body,
+        html_body,
+        message_id,
+        attachments,
+        reply,
+    } = options;
+
     let mut msg = String::new();
     // write! to String is infallible — fmt::Write for String never returns Err.
     let _ = write!(msg, "From: {}\r\n", sanitize_header(from));
@@ -291,16 +319,17 @@ mod tests {
             data: b"PDF content here".to_vec(),
             content_id: None,
         }];
-        let s = String::from_utf8(build_mime_with_attachments(
-            "bot@example.com",
-            &["user@example.com".into()],
-            &[],
-            "With Attachment",
-            Some("Body text"),
-            None,
-            "<msg@postblox>",
-            &attachments,
-        ))
+        let s = String::from_utf8(build_mime_full(MimeBuildOptions {
+            from: "bot@example.com",
+            to: &["user@example.com".into()],
+            cc: &[],
+            subject: "With Attachment",
+            text_body: Some("Body text"),
+            html_body: None,
+            message_id: "<msg@postblox>",
+            attachments: &attachments,
+            reply: ReplyHeaders::default(),
+        }))
         .unwrap();
         assert!(s.contains("multipart/mixed"));
         assert!(s.contains("Body text"));
@@ -317,16 +346,17 @@ mod tests {
             data: data.to_vec(),
             content_id: None,
         }];
-        let s = String::from_utf8(build_mime_with_attachments(
-            "bot@example.com",
-            &["user@example.com".into()],
-            &[],
-            "Test",
-            Some("Body"),
-            None,
-            "<msg@postblox>",
-            &attachments,
-        ))
+        let s = String::from_utf8(build_mime_full(MimeBuildOptions {
+            from: "bot@example.com",
+            to: &["user@example.com".into()],
+            cc: &[],
+            subject: "Test",
+            text_body: Some("Body"),
+            html_body: None,
+            message_id: "<msg@postblox>",
+            attachments: &attachments,
+            reply: ReplyHeaders::default(),
+        }))
         .unwrap();
         let expected_b64 = base64::engine::general_purpose::STANDARD.encode(data);
         assert!(s.contains(&expected_b64));
@@ -340,16 +370,17 @@ mod tests {
             data: vec![0x89, 0x50, 0x4E, 0x47],
             content_id: None,
         }];
-        let s = String::from_utf8(build_mime_with_attachments(
-            "bot@example.com",
-            &["user@example.com".into()],
-            &[],
-            "Mixed",
-            Some("Text"),
-            Some("<b>HTML</b>"),
-            "<msg@postblox>",
-            &attachments,
-        ))
+        let s = String::from_utf8(build_mime_full(MimeBuildOptions {
+            from: "bot@example.com",
+            to: &["user@example.com".into()],
+            cc: &[],
+            subject: "Mixed",
+            text_body: Some("Text"),
+            html_body: Some("<b>HTML</b>"),
+            message_id: "<msg@postblox>",
+            attachments: &attachments,
+            reply: ReplyHeaders::default(),
+        }))
         .unwrap();
         assert!(s.contains("multipart/mixed"));
         assert!(s.contains("multipart/alternative"));
@@ -374,16 +405,17 @@ mod tests {
                 content_id: None,
             },
         ];
-        let s = String::from_utf8(build_mime_with_attachments(
-            "bot@example.com",
-            &["user@example.com".into()],
-            &[],
-            "Multi",
-            Some("Body"),
-            None,
-            "<msg@postblox>",
-            &attachments,
-        ))
+        let s = String::from_utf8(build_mime_full(MimeBuildOptions {
+            from: "bot@example.com",
+            to: &["user@example.com".into()],
+            cc: &[],
+            subject: "Multi",
+            text_body: Some("Body"),
+            html_body: None,
+            message_id: "<msg@postblox>",
+            attachments: &attachments,
+            reply: ReplyHeaders::default(),
+        }))
         .unwrap();
         assert!(s.contains("filename=\"a.txt\""));
         assert!(s.contains("filename=\"b.bin\""));
@@ -403,16 +435,17 @@ mod tests {
             None,
             "<msg@postblox>",
         );
-        let without = build_mime_with_attachments(
-            "bot@example.com",
-            &["user@example.com".into()],
-            &[],
-            "Hello",
-            Some("Body text"),
-            None,
-            "<msg@postblox>",
-            &[],
-        );
+        let without = build_mime_full(MimeBuildOptions {
+            from: "bot@example.com",
+            to: &["user@example.com".into()],
+            cc: &[],
+            subject: "Hello",
+            text_body: Some("Body text"),
+            html_body: None,
+            message_id: "<msg@postblox>",
+            attachments: &[],
+            reply: ReplyHeaders::default(),
+        });
         // Both should produce text/plain (no multipart/mixed)
         let s_with = String::from_utf8(with).unwrap();
         let s_without = String::from_utf8(without).unwrap();
@@ -430,16 +463,17 @@ mod tests {
             data: vec![0x89, 0x50, 0x4E, 0x47],
             content_id: Some("logo123@example.com".into()),
         }];
-        let s = String::from_utf8(build_mime_with_attachments(
-            "bot@example.com",
-            &["user@example.com".into()],
-            &[],
-            "CID Test",
-            Some("See image"),
-            Some("<html><img src=\"cid:logo123@example.com\"></html>"),
-            "<msg@postblox>",
-            &attachments,
-        ))
+        let s = String::from_utf8(build_mime_full(MimeBuildOptions {
+            from: "bot@example.com",
+            to: &["user@example.com".into()],
+            cc: &[],
+            subject: "CID Test",
+            text_body: Some("See image"),
+            html_body: Some("<html><img src=\"cid:logo123@example.com\"></html>"),
+            message_id: "<msg@postblox>",
+            attachments: &attachments,
+            reply: ReplyHeaders::default(),
+        }))
         .unwrap();
         assert!(s.contains("Content-ID: <logo123@example.com>"));
         assert!(s.contains("Content-Disposition: inline; filename=\"logo.png\""));
@@ -448,20 +482,20 @@ mod tests {
 
     #[test]
     fn test_build_mime_full_emits_in_reply_to_and_references_headers() {
-        let s = String::from_utf8(build_mime_full(
-            "me@example.com",
-            &["other@example.com".into()],
-            &[],
-            "Re: Hello",
-            Some("body"),
-            None,
-            "<reply@postblox>",
-            &[],
-            &ReplyHeaders {
+        let s = String::from_utf8(build_mime_full(MimeBuildOptions {
+            from: "me@example.com",
+            to: &["other@example.com".into()],
+            cc: &[],
+            subject: "Re: Hello",
+            text_body: Some("body"),
+            html_body: None,
+            message_id: "<reply@postblox>",
+            attachments: &[],
+            reply: ReplyHeaders {
                 in_reply_to: Some("<orig@example.com>"),
                 references: Some("<root@example.com> <orig@example.com>"),
             },
-        ))
+        }))
         .unwrap();
         assert!(s.contains("In-Reply-To: <orig@example.com>\r\n"));
         assert!(s.contains("References: <root@example.com> <orig@example.com>\r\n"));
@@ -469,17 +503,17 @@ mod tests {
 
     #[test]
     fn test_build_mime_full_omits_threading_when_absent() {
-        let s = String::from_utf8(build_mime_full(
-            "me@example.com",
-            &["other@example.com".into()],
-            &[],
-            "Hi",
-            Some("body"),
-            None,
-            "<msg@postblox>",
-            &[],
-            &ReplyHeaders::default(),
-        ))
+        let s = String::from_utf8(build_mime_full(MimeBuildOptions {
+            from: "me@example.com",
+            to: &["other@example.com".into()],
+            cc: &[],
+            subject: "Hi",
+            text_body: Some("body"),
+            html_body: None,
+            message_id: "<msg@postblox>",
+            attachments: &[],
+            reply: ReplyHeaders::default(),
+        }))
         .unwrap();
         assert!(!s.contains("In-Reply-To"));
         assert!(!s.contains("References"));
@@ -487,20 +521,20 @@ mod tests {
 
     #[test]
     fn test_build_mime_full_strips_crlf_from_reply_headers() {
-        let s = String::from_utf8(build_mime_full(
-            "me@example.com",
-            &["other@example.com".into()],
-            &[],
-            "Re: x",
-            Some("b"),
-            None,
-            "<r@postblox>",
-            &[],
-            &ReplyHeaders {
+        let s = String::from_utf8(build_mime_full(MimeBuildOptions {
+            from: "me@example.com",
+            to: &["other@example.com".into()],
+            cc: &[],
+            subject: "Re: x",
+            text_body: Some("b"),
+            html_body: None,
+            message_id: "<r@postblox>",
+            attachments: &[],
+            reply: ReplyHeaders {
                 in_reply_to: Some("<orig@x>\r\nBcc: attacker@evil"),
                 references: Some("<root@x>"),
             },
-        ))
+        }))
         .unwrap();
         assert!(!s.contains("\r\nBcc:"));
     }
@@ -521,16 +555,17 @@ mod tests {
                 content_id: None,
             },
         ];
-        let s = String::from_utf8(build_mime_with_attachments(
-            "bot@example.com",
-            &["user@example.com".into()],
-            &[],
-            "Mixed CID",
-            Some("Body"),
-            None,
-            "<msg@postblox>",
-            &attachments,
-        ))
+        let s = String::from_utf8(build_mime_full(MimeBuildOptions {
+            from: "bot@example.com",
+            to: &["user@example.com".into()],
+            cc: &[],
+            subject: "Mixed CID",
+            text_body: Some("Body"),
+            html_body: None,
+            message_id: "<msg@postblox>",
+            attachments: &attachments,
+            reply: ReplyHeaders::default(),
+        }))
         .unwrap();
         assert!(s.contains("Content-ID: <img1@mail>"));
         assert!(s.contains("Content-Disposition: inline; filename=\"logo.png\""));
