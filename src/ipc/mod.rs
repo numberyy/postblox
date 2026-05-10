@@ -33,7 +33,7 @@ pub fn default_socket_path() -> std::path::PathBuf {
 }
 
 #[cfg(test)]
-mod default_path_tests {
+mod tests {
     use super::*;
 
     #[test]

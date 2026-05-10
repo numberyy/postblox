@@ -64,13 +64,16 @@ pub enum ServerError {
 /// Hard cap on simultaneously connected clients. Beyond this we accept
 /// then immediately close — better than silently queueing.
 pub const MAX_CONNECTIONS: usize = 64;
+const _: () = assert!(MAX_CONNECTIONS == 64);
 
 /// Hard cap on subscriptions per connection. The TUI typically has
 /// 1-3 (mail.new, mail.updated, mcp.approval_requested).
 pub const MAX_SUBS_PER_CONN: usize = 32;
+const _: () = assert!(MAX_SUBS_PER_CONN == 32);
 
 /// Per-connection writer mailbox capacity. Bigger than typical TUI burst.
 pub const WRITER_MAILBOX: usize = 128;
+const _: () = assert!(WRITER_MAILBOX == 128);
 
 /// Handle to a running server. Drop or call `shutdown` to stop the
 /// accept loop and close the socket file.

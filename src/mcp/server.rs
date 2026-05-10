@@ -22,7 +22,9 @@ use super::tools::{self, ToolSpec};
 const NOTIFICATION_METHOD: &str = "notifications/postblox/event";
 const NOTIFICATION_ERROR_METHOD: &str = "notifications/postblox/error";
 const OUTPUT_MAILBOX: usize = 128;
+const _: () = assert!(OUTPUT_MAILBOX == 128);
 const SUBSCRIPTION_MAILBOX: usize = 256;
+const _: () = assert!(SUBSCRIPTION_MAILBOX == 256);
 const STDIO_MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Error)]

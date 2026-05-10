@@ -56,6 +56,7 @@ pub struct RpcError {
 }
 
 impl RpcError {
+    #[cold]
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
@@ -63,14 +64,17 @@ impl RpcError {
         }
     }
 
+    #[cold]
     pub fn unknown_op(op: &str) -> Self {
         Self::new("unknown_op", format!("unknown op '{op}'"))
     }
 
+    #[cold]
     pub fn bad_args(message: impl Into<String>) -> Self {
         Self::new("bad_args", message)
     }
 
+    #[cold]
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new("internal", message)
     }

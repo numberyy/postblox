@@ -30,6 +30,7 @@ use theme::ThemeName;
 /// to ride out a redraw or a brief async stall without dropping
 /// keystrokes; small enough that we can't grow unboundedly.
 const KEY_EVENT_CHANNEL_CAPACITY: usize = 64;
+const _: () = assert!(KEY_EVENT_CHANNEL_CAPACITY == 64);
 /// Tick cadence used to expire toasts.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 /// Bound for the blocking event poll inside the reader thread.

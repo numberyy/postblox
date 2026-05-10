@@ -86,6 +86,7 @@ impl FromStr for Topic {
 /// Default per-topic broadcast channel capacity. Bounded — a slow
 /// subscriber gets `Lagged(n)` rather than infinite buffering.
 pub const DEFAULT_TOPIC_CAPACITY: usize = 256;
+const _: () = assert!(DEFAULT_TOPIC_CAPACITY == 256);
 
 #[derive(Clone)]
 pub struct Hub {

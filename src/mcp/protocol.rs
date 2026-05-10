@@ -29,6 +29,7 @@ pub struct JsonRpcError {
 }
 
 impl JsonRpcError {
+    #[cold]
     pub fn parse_error(message: impl Into<String>) -> Self {
         Self {
             code: -32700,
@@ -37,6 +38,7 @@ impl JsonRpcError {
         }
     }
 
+    #[cold]
     pub fn invalid_request(message: impl Into<String>) -> Self {
         Self {
             code: -32600,
@@ -45,6 +47,7 @@ impl JsonRpcError {
         }
     }
 
+    #[cold]
     pub fn method_not_found(method: &str) -> Self {
         Self {
             code: -32601,
@@ -53,6 +56,7 @@ impl JsonRpcError {
         }
     }
 
+    #[cold]
     pub fn invalid_params(message: impl Into<String>) -> Self {
         Self {
             code: -32602,
@@ -61,6 +65,7 @@ impl JsonRpcError {
         }
     }
 
+    #[cold]
     pub fn internal(message: impl Into<String>) -> Self {
         Self {
             code: -32603,
@@ -69,6 +74,7 @@ impl JsonRpcError {
         }
     }
 
+    #[cold]
     pub fn server(code: impl Into<String>, message: impl Into<String>) -> Self {
         let code = code.into();
         Self {
