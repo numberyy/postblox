@@ -543,11 +543,11 @@ async fn op_attachment_preview(pool: &SqlitePool, args: Value) -> Result<Value, 
     let id = parse_id::<AttachmentId>(&args, "id")?;
     let attachment = db::attachments::get(pool, id)
         .await
-        .map_err(|e| RpcError::internal(format!("attachments::get: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("attachments::get", e))?
         .ok_or_else(|| RpcError::bad_args("unknown attachment id"))?;
     let preview = crate::attachments::preview_attachment(attachment)
         .await
-        .map_err(|e| RpcError::internal(format!("attachment preview: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("attachment preview", e))?;
     encode_one(&preview)
 }
 
@@ -602,24 +602,24 @@ async fn op_sql_query(read_pool: &SqlitePool, args: Value) -> Result<Value, RpcE
         .transpose()?
         .unwrap_or(crate::db::sql_query::DEFAULT_ROWS);
     match crate::db::sql_query::query(read_pool, sql, limit).await {
-        Ok(rows) => serde_json::to_value(rows)
-            .map_err(|e| RpcError::internal(format!("sql_query encode: {e}"))),
-        Err(crate::db::sql_query::SqlError::Rejected { reason }) => Err(RpcError::bad_args(reason)),
-        Err(crate::db::sql_query::SqlError::Sqlx(e)) => {
-            Err(RpcError::internal(format!("sql_query: {e}")))
+        Ok(rows) => {
+            serde_json::to_value(rows).map_err(|e| RpcError::internal_ctx("sql_query encode", e))
         }
+        Err(crate::db::sql_query::SqlError::Rejected { reason }) => Err(RpcError::bad_args(reason)),
+        Err(crate::db::sql_query::SqlError::Sqlx(e)) => Err(RpcError::internal_ctx("sql_query", e)),
     }
 }
 
 async fn op_sql_schema(read_pool: &SqlitePool) -> Result<Value, RpcError> {
     match crate::db::sql_query::schema(read_pool).await {
-        Ok(rows) => serde_json::to_value(rows)
-            .map_err(|e| RpcError::internal(format!("sql_schema encode: {e}"))),
+        Ok(rows) => {
+            serde_json::to_value(rows).map_err(|e| RpcError::internal_ctx("sql_schema encode", e))
+        }
         Err(crate::db::sql_query::SqlError::Sqlx(e)) => {
-            Err(RpcError::internal(format!("sql_schema: {e}")))
+            Err(RpcError::internal_ctx("sql_schema", e))
         }
         Err(crate::db::sql_query::SqlError::Rejected { reason }) => {
-            Err(RpcError::internal(format!("sql_schema rejected: {reason}")))
+            Err(RpcError::internal_ctx("sql_schema rejected", reason))
         }
     }
 }
@@ -662,7 +662,7 @@ async fn op_mcp_gate_create(pool: &SqlitePool, args: Value) -> Result<Value, Rpc
     let note = optional_str(&args, "note")?;
     let gate = db::mcp::create_gate(pool, tool, arg_pattern, action, note)
         .await
-        .map_err(|e| RpcError::internal(format!("mcp::create_gate: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("mcp::create_gate", e))?;
     audit_actor(
         pool,
         &actor,
@@ -679,7 +679,7 @@ async fn op_mcp_gate_delete(pool: &SqlitePool, args: Value) -> Result<Value, Rpc
     let id = parse_uuid(&args, "id")?;
     let removed = db::mcp::delete_gate(pool, id)
         .await
-        .map_err(|e| RpcError::internal(format!("mcp::delete_gate: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("mcp::delete_gate", e))?;
     audit_actor(
         pool,
         &actor,
@@ -702,7 +702,7 @@ async fn op_mcp_approval_create(
     let summary = parse_str(&args, "summary")?;
     let approval = db::mcp::create_approval(pool, tool, &approval_args, summary)
         .await
-        .map_err(|e| RpcError::internal(format!("mcp::create_approval: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("mcp::create_approval", e))?;
     audit_actor(
         pool,
         &actor,
@@ -764,7 +764,7 @@ async fn op_mcp_approval_decide(
         .unwrap_or(actor.as_str());
     let decided = db::mcp::decide(pool, id, state, decided_by)
         .await
-        .map_err(|e| RpcError::internal(format!("mcp::decide: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("mcp::decide", e))?;
     audit_actor(
         pool,
         &actor,
@@ -776,7 +776,7 @@ async fn op_mcp_approval_decide(
     if decided {
         if let Some(approval) = db::mcp::get_approval(pool, id)
             .await
-            .map_err(|e| RpcError::internal(format!("mcp::get_approval: {e}")))?
+            .map_err(|e| RpcError::internal_ctx("mcp::get_approval", e))?
         {
             hub.publish(
                 Topic::McpApprovalDecided,
@@ -800,7 +800,7 @@ async fn op_account_create(pool: &SqlitePool, args: Value) -> Result<Value, RpcE
         serde_json::from_value(args).map_err(|e| RpcError::bad_args(e.to_string()))?;
     let acc = db::accounts::create(pool, &new)
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::create: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("accounts::create", e))?;
     audit(
         pool,
         "account.create",
@@ -815,7 +815,7 @@ async fn op_account_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcE
     let id = parse_id::<AccountId>(&args, "id")?;
     let removed = db::accounts::delete(pool, id)
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::delete: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("accounts::delete", e))?;
     audit(pool, "account.delete", Some(&id.to_string()), &json!({})).await;
     Ok(json!({"removed": removed}))
 }
@@ -825,7 +825,7 @@ async fn op_folder_upsert(pool: &SqlitePool, args: Value) -> Result<Value, RpcEr
         serde_json::from_value(args).map_err(|e| RpcError::bad_args(e.to_string()))?;
     let folder = db::folders::upsert(pool, &new)
         .await
-        .map_err(|e| RpcError::internal(format!("folders::upsert: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("folders::upsert", e))?;
     encode_one(&folder)
 }
 
@@ -843,7 +843,7 @@ async fn op_message_set_flags(
         .and_then(parse_message_flags)?;
     let outcome = db::messages::set_flags(pool, id, &flags)
         .await
-        .map_err(|e| RpcError::internal(format!("messages::set_flags: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("messages::set_flags", e))?;
     if outcome.changed {
         audit_actor(
             pool,
@@ -872,7 +872,7 @@ async fn op_message_archive(pool: &SqlitePool, hub: &Hub, args: Value) -> Result
     }
     db::messages::set_folder(pool, id, archive.id)
         .await
-        .map_err(|e| RpcError::internal(format!("messages::set_folder: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("messages::set_folder", e))?;
     audit_actor(
         pool,
         &actor,
@@ -903,7 +903,7 @@ async fn op_message_delete(pool: &SqlitePool, hub: &Hub, args: Value) -> Result<
     }
     db::messages::set_folder(pool, id, trash.id)
         .await
-        .map_err(|e| RpcError::internal(format!("messages::set_folder: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("messages::set_folder", e))?;
     audit_actor(
         pool,
         &actor,
@@ -931,14 +931,14 @@ async fn op_message_move(pool: &SqlitePool, hub: &Hub, args: Value) -> Result<Va
     let message = require_message(pool, id).await?;
     let target = db::folders::get_by_name(pool, message.account_id, folder_name)
         .await
-        .map_err(|e| RpcError::internal(format!("folders::get_by_name: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("folders::get_by_name", e))?
         .ok_or_else(|| RpcError::bad_args(format!("unknown folder '{folder_name}'")))?;
     if message.folder_id == target.id {
         return Ok(json!({"ok": true, "folder_id": target.id.to_string()}));
     }
     db::messages::set_folder(pool, id, target.id)
         .await
-        .map_err(|e| RpcError::internal(format!("messages::set_folder: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("messages::set_folder", e))?;
     audit_actor(
         pool,
         &actor,
@@ -965,7 +965,7 @@ async fn require_message(
 ) -> Result<crate::models::Message, RpcError> {
     db::messages::get(pool, id)
         .await
-        .map_err(|e| RpcError::internal(format!("messages::get: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("messages::get", e))?
         .ok_or_else(|| RpcError::bad_args("unknown message id"))
 }
 
@@ -976,7 +976,7 @@ async fn require_role_folder(
 ) -> Result<crate::models::Folder, RpcError> {
     db::folders::list_by_account(pool, account_id)
         .await
-        .map_err(|e| RpcError::internal(format!("folders::list_by_account: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("folders::list_by_account", e))?
         .into_iter()
         .find(|f| f.role == role)
         .ok_or_else(|| RpcError::bad_args(format!("no '{}' folder for account", role.as_str())))
@@ -992,7 +992,7 @@ async fn op_draft_create(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
     let attachments = prepare_draft_attachments(attachment_specs).await?;
     let draft = db::drafts::create(pool, &new)
         .await
-        .map_err(|e| RpcError::internal(format!("drafts::create: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("drafts::create", e))?;
     if let Some(attachments) = attachments {
         if let Err(e) = replace_draft_attachments(pool, draft.id, attachments).await {
             // best-effort rollback so callers can retry cleanly if attachment persistence fails.
@@ -1045,10 +1045,10 @@ async fn op_draft_update(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
     let mut tx = pool
         .begin()
         .await
-        .map_err(|e| RpcError::internal(format!("begin draft update transaction: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("begin draft update transaction", e))?;
     let draft = db::drafts::update_tx(&mut tx, upd.id, &patch)
         .await
-        .map_err(|e| RpcError::internal(format!("drafts::update: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("drafts::update", e))?;
     // Only touch attachments when the caller explicitly supplied the
     // field; absence means "leave as-is" (matches the body/subject
     // partial-update contract).
@@ -1057,7 +1057,7 @@ async fn op_draft_update(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
     }
     tx.commit()
         .await
-        .map_err(|e| RpcError::internal(format!("commit draft update transaction: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("commit draft update transaction", e))?;
     audit_actor(
         pool,
         &actor,
@@ -1229,7 +1229,7 @@ async fn replace_draft_attachments(
 ) -> Result<(), RpcError> {
     db::draft_attachments::delete_all_for_draft(pool, draft_id)
         .await
-        .map_err(|e| RpcError::internal(format!("draft_attachments::delete_all: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("draft_attachments::delete_all", e))?;
     for attachment in attachments {
         db::draft_attachments::create(
             pool,
@@ -1241,7 +1241,7 @@ async fn replace_draft_attachments(
             },
         )
         .await
-        .map_err(|e| RpcError::internal(format!("draft_attachments::create: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("draft_attachments::create", e))?;
     }
     Ok(())
 }
@@ -1253,7 +1253,7 @@ async fn replace_draft_attachments_tx(
 ) -> Result<(), RpcError> {
     db::draft_attachments::delete_all_for_draft_tx(tx, draft_id)
         .await
-        .map_err(|e| RpcError::internal(format!("draft_attachments::delete_all: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("draft_attachments::delete_all", e))?;
     for attachment in attachments {
         db::draft_attachments::create_tx(
             tx,
@@ -1265,7 +1265,7 @@ async fn replace_draft_attachments_tx(
             },
         )
         .await
-        .map_err(|e| RpcError::internal(format!("draft_attachments::create: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("draft_attachments::create", e))?;
     }
     Ok(())
 }
@@ -1285,7 +1285,7 @@ async fn op_draft_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcErr
     let id = parse_id::<DraftId>(&args, "id")?;
     let removed = db::drafts::delete(pool, id)
         .await
-        .map_err(|e| RpcError::internal(format!("drafts::delete: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("drafts::delete", e))?;
     audit_actor(
         pool,
         &actor,
@@ -1311,18 +1311,18 @@ async fn op_draft_get(pool: &SqlitePool, args: Value) -> Result<Value, RpcError>
     let id = parse_id::<DraftId>(&args, "id")?;
     let draft = db::drafts::get(pool, id)
         .await
-        .map_err(|e| RpcError::internal(format!("drafts::get: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("drafts::get", e))?;
     let Some(draft) = draft else {
         return Ok(Value::Null);
     };
     let attachment_rows = db::draft_attachments::list_for_draft(pool, id)
         .await
-        .map_err(|e| RpcError::internal(format!("draft_attachments::list_for_draft: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("draft_attachments::list_for_draft", e))?;
     let mut attachments_json = Vec::with_capacity(attachment_rows.len());
     for row in attachment_rows {
         let content = db::draft_attachments::load_content(pool, row.id)
             .await
-            .map_err(|e| RpcError::internal(format!("draft_attachments::load_content: {e}")))?;
+            .map_err(|e| RpcError::internal_ctx("draft_attachments::load_content", e))?;
         let bytes = require_draft_attachment_content(row.id, content)?;
         attachments_json.push(json!({
             "id": row.id.to_string(),
@@ -1380,7 +1380,7 @@ async fn op_message_prepare_reply(pool: &SqlitePool, args: Value) -> Result<Valu
     let message = require_message(pool, message_id).await?;
     let account = db::accounts::get(pool, message.account_id)
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("accounts::get", e))?
         .ok_or_else(|| RpcError::bad_args("unknown account for message"))?;
     let draft = crate::mail::reply::reply_draft(message_view(&message), &account.email, reply_all);
     Ok(json!({
@@ -1402,11 +1402,11 @@ async fn op_message_prepare_forward(pool: &SqlitePool, args: Value) -> Result<Va
     let message = require_message(pool, message_id).await?;
     let account = db::accounts::get(pool, message.account_id)
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("accounts::get", e))?
         .ok_or_else(|| RpcError::bad_args("unknown account for message"))?;
     let attachments = db::attachments::list_for_message(pool, message.id)
         .await
-        .map_err(|e| RpcError::internal(format!("attachments::list_for_message: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("attachments::list_for_message", e))?;
     let attachment_tuples: Vec<(uuid::Uuid, String, String, i64)> = attachments
         .into_iter()
         .map(|a| (a.id.into_inner(), a.filename, a.content_type, a.size_bytes))
@@ -1440,7 +1440,7 @@ async fn op_attachment_export(pool: &SqlitePool, args: Value) -> Result<Value, R
     let destination_path = parse_str(&args, "destination_path")?;
     let attachment = db::attachments::get(pool, id)
         .await
-        .map_err(|e| RpcError::internal(format!("attachments::get: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("attachments::get", e))?
         .ok_or_else(|| RpcError::bad_args("unknown attachment id"))?;
     let exported = crate::attachments::export_attachment(&attachment, Path::new(destination_path))
         .await
@@ -1471,7 +1471,7 @@ async fn op_attachment_fetch_for_forward(
     let attachment_id = parse_id::<AttachmentId>(&args, "attachment_id")?;
     let attachment = db::attachments::get(pool, attachment_id)
         .await
-        .map_err(|e| RpcError::internal(format!("attachments::get: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("attachments::get", e))?
         .ok_or_else(|| RpcError::bad_args("unknown attachment id"))?;
 
     if let Ok(bytes) = tokio::fs::read(&attachment.storage_path).await {
@@ -1505,7 +1505,7 @@ async fn op_attachment_fetch_for_forward_batch(
     let message = require_message(pool, message_id).await?;
     let message_attachments = db::attachments::list_for_message(pool, message_id)
         .await
-        .map_err(|e| RpcError::internal(format!("attachments::list_for_message: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("attachments::list_for_message", e))?;
     let mut message_attachments: HashMap<AttachmentId, Attachment> = message_attachments
         .into_iter()
         .map(|attachment| (attachment.id, attachment))
@@ -1574,7 +1574,7 @@ async fn forward_parent_message(
 ) -> Result<Message, RpcError> {
     db::messages::get(pool, message_id)
         .await
-        .map_err(|e| RpcError::internal(format!("messages::get: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("messages::get", e))?
         .ok_or_else(|| {
             RpcError::new(
                 "unavailable_offline",
@@ -1594,7 +1594,7 @@ async fn refetch_forward_attachments(
         db::folders::get(pool, message.folder_id),
         db::accounts::get(pool, message.account_id),
     )
-    .map_err(|e| RpcError::internal(format!("folders/accounts::get: {e}")))?;
+    .map_err(|e| RpcError::internal_ctx("folders/accounts::get", e))?;
     let folder = folder.ok_or_else(|| {
         RpcError::new(
             "unavailable_offline",
@@ -1712,7 +1712,7 @@ fn map_attachment_export_error(err: std::io::Error) -> RpcError {
         std::io::ErrorKind::AlreadyExists => RpcError::bad_args(err.to_string()),
         std::io::ErrorKind::NotFound => RpcError::bad_args(err.to_string()),
         std::io::ErrorKind::InvalidInput => RpcError::bad_args(err.to_string()),
-        _ => RpcError::internal(format!("attachment export: {err}")),
+        _ => RpcError::internal_ctx("attachment export", err),
     }
 }
 
@@ -1729,11 +1729,11 @@ async fn op_message_send(
 
     let account = db::accounts::get(pool, account_id)
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("accounts::get", e))?
         .ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
     let draft = db::drafts::get(pool, draft_id)
         .await
-        .map_err(|e| RpcError::internal(format!("drafts::get: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("drafts::get", e))?
         .ok_or_else(|| RpcError::bad_args("unknown draft_id"))?;
     if draft.account_id != account_id {
         return Err(RpcError::bad_args("draft does not belong to account"));
@@ -1817,12 +1817,12 @@ async fn load_draft_mime_attachments(
 ) -> Result<Vec<crate::mail::builder::MimeAttachment>, RpcError> {
     let rows = db::draft_attachments::list_for_draft(pool, draft_id)
         .await
-        .map_err(|e| RpcError::internal(format!("draft_attachments::list_for_draft: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("draft_attachments::list_for_draft", e))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let bytes = db::draft_attachments::load_content(pool, row.id)
             .await
-            .map_err(|e| RpcError::internal(format!("draft_attachments::load_content: {e}")))?
+            .map_err(|e| RpcError::internal_ctx("draft_attachments::load_content", e))?
             .ok_or_else(|| {
                 RpcError::internal(format!("draft attachment {} disappeared mid-send", row.id))
             })?;
@@ -1892,7 +1892,7 @@ async fn op_account_test_login(
 
     let account = db::accounts::get(pool, account_id)
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("accounts::get", e))?
         .ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
     let credential = match account.auth_kind {
         AuthKind::Password => {
@@ -1987,7 +1987,7 @@ async fn op_account_sync_folder(
 
     let account = db::accounts::get(pool, account_id)
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("accounts::get", e))?
         .ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
     let credential = credential_for_account(secrets, oauth, &account).await?;
 
@@ -2059,7 +2059,7 @@ async fn op_account_start_sync(
 
     let account = db::accounts::get(pool, account_id)
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("accounts::get", e))?
         .ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
     let credential = credential_for_account(secrets, oauth, &account).await?;
 
@@ -2105,14 +2105,14 @@ async fn ensure_account_folder(
 ) -> Result<(), RpcError> {
     let account = db::accounts::get(pool, account_id)
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("accounts::get", e))?;
     if account.is_none() {
         return Err(RpcError::bad_args("unknown account_id"));
     }
 
     let folder = db::folders::get_by_name(pool, account_id, folder_name)
         .await
-        .map_err(|e| RpcError::internal(format!("folders::get_by_name: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("folders::get_by_name", e))?;
     if folder.is_none() {
         return Err(RpcError::bad_args(format!(
             "unknown folder '{folder_name}'"
@@ -2142,7 +2142,7 @@ async fn op_account_set_secret(
     // a typo'd UUID would silently store an orphan entry.
     let account = db::accounts::get(pool, account_id)
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("accounts::get", e))?;
     let account = account.ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
     if account.auth_kind != AuthKind::Password {
         return Err(RpcError::bad_args(
@@ -2153,10 +2153,10 @@ async fn op_account_set_secret(
     secrets
         .put(account_id, zeroize::Zeroizing::new(password.to_string()))
         .await
-        .map_err(|e| RpcError::internal(format!("secrets::put: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("secrets::put", e))?;
     db::accounts::set_secret_ref(pool, account_id, Some(&secrets.secret_ref(account_id)))
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::set_secret_ref: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("accounts::set_secret_ref", e))?;
 
     audit(
         pool,
@@ -2177,10 +2177,10 @@ async fn op_account_delete_secret(
     secrets
         .delete(account_id)
         .await
-        .map_err(|e| RpcError::internal(format!("secrets::delete: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("secrets::delete", e))?;
     db::accounts::set_secret_ref(pool, account_id, None)
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::set_secret_ref: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("accounts::set_secret_ref", e))?;
     audit(
         pool,
         "account.delete_secret",
@@ -2246,7 +2246,7 @@ async fn op_oauth_google_complete(
         .map_err(map_oauth_error)?;
     db::accounts::set_secret_ref(pool, account_id, Some(&secrets.secret_ref(account_id)))
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::set_secret_ref: {e}")))?;
+        .map_err(|e| RpcError::internal_ctx("accounts::set_secret_ref", e))?;
 
     audit(
         pool,
@@ -2264,7 +2264,7 @@ async fn ensure_oauth_google_account(
 ) -> Result<(), RpcError> {
     let account = db::accounts::get(pool, account_id)
         .await
-        .map_err(|e| RpcError::internal(format!("accounts::get: {e}")))?
+        .map_err(|e| RpcError::internal_ctx("accounts::get", e))?
         .ok_or_else(|| RpcError::bad_args("unknown account_id"))?;
     if account.auth_kind != AuthKind::OAuth2Google {
         return Err(RpcError::bad_args(
@@ -2320,7 +2320,7 @@ async fn credential_for_account(
             let secret = secrets
                 .get(account.id)
                 .await
-                .map_err(|e| RpcError::internal(format!("secrets::get: {e}")))?
+                .map_err(|e| RpcError::internal_ctx("secrets::get", e))?
                 .ok_or_else(|| RpcError::new("missing_secret", "no stored secret for account"))?;
             Ok(MailCredential::password_secret(secret))
         }
@@ -2357,9 +2357,9 @@ fn map_oauth_error(err: GoogleOAuthError) -> RpcError {
             "oauth_failed",
             format!("OAuth token endpoint returned status {status}"),
         ),
-        GoogleOAuthError::Http(err) => RpcError::internal(format!("oauth http: {err}")),
-        GoogleOAuthError::Secret(err) => RpcError::internal(format!("oauth secrets: {err}")),
-        GoogleOAuthError::Decode(err) => RpcError::internal(format!("oauth decode: {err}")),
+        GoogleOAuthError::Http(err) => RpcError::internal_ctx("oauth http", err),
+        GoogleOAuthError::Secret(err) => RpcError::internal_ctx("oauth secrets", err),
+        GoogleOAuthError::Decode(err) => RpcError::internal_ctx("oauth decode", err),
     }
 }
 
@@ -2369,12 +2369,12 @@ fn encode<T: serde::Serialize>(
     res: Result<T, db::DbError>,
     ctx: &'static str,
 ) -> Result<Value, RpcError> {
-    let v = res.map_err(|e| RpcError::internal(format!("{ctx}: {e}")))?;
-    serde_json::to_value(v).map_err(|e| RpcError::internal(format!("{ctx} encode: {e}")))
+    let v = res.map_err(|e| RpcError::internal_ctx(ctx, e))?;
+    serde_json::to_value(v).map_err(|e| RpcError::internal_ctx(format!("{ctx} encode"), e))
 }
 
 fn encode_one<T: serde::Serialize>(v: &T) -> Result<Value, RpcError> {
-    serde_json::to_value(v).map_err(|e| RpcError::internal(format!("encode: {e}")))
+    serde_json::to_value(v).map_err(|e| RpcError::internal_ctx("encode", e))
 }
 
 fn parse_uuid(args: &Value, key: &str) -> Result<uuid::Uuid, RpcError> {

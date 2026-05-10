@@ -78,6 +78,14 @@ impl RpcError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new("internal", message)
     }
+
+    /// Build an `internal` error with the conventional `"<context>: <err>"`
+    /// message — folds the boilerplate that otherwise repeats at every
+    /// `.map_err(|e| RpcError::internal(format!("op: {e}")))?` call site.
+    #[cold]
+    pub fn internal_ctx(context: impl std::fmt::Display, err: impl std::fmt::Display) -> Self {
+        Self::new("internal", format!("{context}: {err}"))
+    }
 }
 
 /// Wire frame: one of the three shapes above. Matched by required keys,
