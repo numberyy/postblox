@@ -1,0 +1,4 @@
+[advisories]
+# SQLx 0.8 locks sqlx-mysql/rsa through weak optional macro/json deps even though
+# postblox enables SQLite only; `cargo tree -i rsa` has no active dependency path.
+ignore = ["RUSTSEC-2023-0071"]
