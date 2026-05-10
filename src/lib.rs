@@ -16,8 +16,6 @@
 //!
 //! - [`mail`] — framework-free MIME parsing, reply extraction, threading,
 //!   and message building.
-//! - [`embeddings`] — framework-free `EmbeddingProvider` trait plus an
-//!   OpenAI-compatible HTTP client.
 //! - [`db`] — SQLite layer split per entity (accounts, folders, threads,
 //!   messages, attachments, drafts, MCP state, audit log, search).
 //! - [`daemon`] — `DaemonDispatcher` mapping IPC op strings to db calls
@@ -54,7 +52,6 @@ pub mod auth;
 pub mod config;
 pub mod daemon;
 pub mod db;
-pub mod embeddings;
 pub mod imap;
 pub mod ipc;
 pub mod mail;
