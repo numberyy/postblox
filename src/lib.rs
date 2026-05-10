@@ -48,6 +48,7 @@
 #![deny(clippy::correctness)]
 #![warn(clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
 #![warn(clippy::undocumented_unsafe_blocks)]
+#![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod attachments;

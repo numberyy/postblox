@@ -1,6 +1,14 @@
+//! `postblox` — thin TUI launcher.
+//!
+//! Loads the TOML config, resolves the daemon socket path, and hands
+//! control to [`postblox::tui::run_with_theme`]. The real daemon entry
+//! point is [`postbloxd`](../postbloxd/index.html); this binary only
+//! runs the client.
+
 #![deny(clippy::correctness)]
 #![warn(clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
 #![warn(clippy::undocumented_unsafe_blocks)]
+#![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::path::PathBuf;

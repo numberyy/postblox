@@ -1,6 +1,15 @@
+//! `postblox-mcp` — MCP bridge binary.
+//!
+//! Speaks JSON-RPC over stdio to an AI agent and forwards calls to the
+//! local `postbloxd` daemon over its Unix socket. All bridge logic
+//! lives in [`postblox::mcp`]; this binary only configures tracing,
+//! resolves the socket path, and hands off to
+//! [`postblox::mcp::run_stdio`].
+
 #![deny(clippy::correctness)]
 #![warn(clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
 #![warn(clippy::undocumented_unsafe_blocks)]
+#![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::path::PathBuf;
