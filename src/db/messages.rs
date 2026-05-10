@@ -38,6 +38,12 @@ pub struct NewMessage {
     pub sent_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetFlagsOutcome {
+    pub found: bool,
+    pub changed: bool,
+}
+
 // Column list shared by every `SELECT` against `messages`. Defined as a
 // `macro_rules!` so each query string can `concat!` it at compile time
 // instead of `format!`-ing the same prefix on every call.
@@ -92,6 +98,8 @@ const FIND_BY_MSGID_HEADER_QUERY: &str = concat!(
 
 const EXISTING_UIDS_PREFIX: &str = "SELECT uid FROM messages WHERE folder_id = ? AND uid IN (";
 const EXISTING_UIDS_SUFFIX: &str = ")";
+const SET_FLAGS_QUERY: &str = "UPDATE messages SET flags = ? WHERE id = ? AND flags <> ?";
+const MESSAGE_EXISTS_QUERY: &str = "SELECT 1 FROM messages WHERE id = ? LIMIT 1";
 
 /// Insert a message row and return the persisted record. The FTS5
 /// trigger reindexes the message synchronously.
@@ -272,24 +280,41 @@ pub async fn set_thread(
     Ok(())
 }
 
-/// Replace the flag list for a message. Triggers FTS reindex via the
-/// `AFTER UPDATE` trigger.
+/// Replace the flag list for a message. Reports whether a row was
+/// found and whether the stored flags actually changed. Only changed
+/// rows are updated, avoiding the `AFTER UPDATE` FTS reindex trigger
+/// for no-op flag writes.
 ///
 /// # Errors
 ///
-/// Returns [`DbError::Sqlx`] if the update fails. A missing id is a
-/// silent no-op.
+/// Returns [`DbError::Sqlx`] if the update or existence check fails. A
+/// missing id is reported as `found: false`, not an error.
 pub async fn set_flags(
     pool: &SqlitePool,
     id: MessageId,
     flags: &serde_json::Value,
-) -> Result<(), DbError> {
-    sqlx::query("UPDATE messages SET flags = ? WHERE id = ?")
+) -> Result<SetFlagsOutcome, DbError> {
+    let r = sqlx::query(SET_FLAGS_QUERY)
         .bind(flags)
         .bind(id)
+        .bind(flags)
         .execute(pool)
         .await?;
-    Ok(())
+    if r.rows_affected() > 0 {
+        return Ok(SetFlagsOutcome {
+            found: true,
+            changed: true,
+        });
+    }
+    let found = sqlx::query_scalar::<_, i64>(MESSAGE_EXISTS_QUERY)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .is_some();
+    Ok(SetFlagsOutcome {
+        found,
+        changed: false,
+    })
 }
 
 /// Reassign a message to a different folder. Returns true when a row
@@ -558,11 +583,62 @@ mod tests {
         let got = get(&c.pool, m.id).await.unwrap().unwrap();
         assert_eq!(got.thread_id, Some(other.id));
 
-        set_flags(&c.pool, m.id, &json!(["\\Seen", "\\Flagged"]))
+        let outcome = set_flags(&c.pool, m.id, &json!(["\\Seen", "\\Flagged"]))
             .await
             .unwrap();
+        assert_eq!(
+            outcome,
+            SetFlagsOutcome {
+                found: true,
+                changed: true,
+            }
+        );
         let got = get(&c.pool, m.id).await.unwrap().unwrap();
         assert_eq!(got.flags, json!(["\\Seen", "\\Flagged"]));
+    }
+
+    #[tokio::test]
+    async fn test_set_flags_repeated_same_value_reports_unchanged() {
+        let c = ctx().await;
+        let m = create(&c.pool, &sample(&c, 1)).await.unwrap();
+        let flags = json!(["\\Seen", "\\Flagged"]);
+
+        let changed = set_flags(&c.pool, m.id, &flags).await.unwrap();
+        assert_eq!(
+            changed,
+            SetFlagsOutcome {
+                found: true,
+                changed: true,
+            }
+        );
+        let changes_after_first = total_changes(&c.pool).await;
+
+        let unchanged = set_flags(&c.pool, m.id, &flags).await.unwrap();
+        assert_eq!(
+            unchanged,
+            SetFlagsOutcome {
+                found: true,
+                changed: false,
+            }
+        );
+        assert_eq!(total_changes(&c.pool).await, changes_after_first);
+
+        let missing = set_flags(&c.pool, MessageId::new(), &flags).await.unwrap();
+        assert_eq!(
+            missing,
+            SetFlagsOutcome {
+                found: false,
+                changed: false,
+            }
+        );
+        assert_eq!(total_changes(&c.pool).await, changes_after_first);
+    }
+
+    async fn total_changes(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT total_changes()")
+            .fetch_one(pool)
+            .await
+            .unwrap()
     }
 
     #[tokio::test]

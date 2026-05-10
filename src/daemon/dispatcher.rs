@@ -829,22 +829,24 @@ async fn op_message_set_flags(
         .get("flags")
         .cloned()
         .ok_or_else(|| RpcError::bad_args("missing 'flags'"))?;
-    db::messages::set_flags(pool, id, &flags)
+    let outcome = db::messages::set_flags(pool, id, &flags)
         .await
         .map_err(|e| RpcError::internal(format!("messages::set_flags: {e}")))?;
-    audit_actor(
-        pool,
-        &actor,
-        "message.set_flags",
-        Some(&id.to_string()),
-        &json!({"flags": &flags}),
-    )
-    .await;
-    hub.publish(
-        Topic::MailUpdated,
-        json!({"message_id": id.to_string(), "flags": flags}),
-    )
-    .await;
+    if outcome.changed {
+        audit_actor(
+            pool,
+            &actor,
+            "message.set_flags",
+            Some(&id.to_string()),
+            &json!({"flags": &flags}),
+        )
+        .await;
+        hub.publish(
+            Topic::MailUpdated,
+            json!({"message_id": id.to_string(), "flags": flags}),
+        )
+        .await;
+    }
     Ok(json!({"ok": true}))
 }
 
@@ -1136,7 +1138,7 @@ async fn prepare_draft_attachments(
         let content_type = spec
             .content_type
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| guess_content_type(&path));
+            .unwrap_or_else(|| crate::attachments::guess_content_type_for_path(&path));
         pending.push(PendingDraftAttachment {
             path,
             original_path: spec.path,
@@ -1268,13 +1270,6 @@ fn map_attachment_read_error(path: &str, err: std::io::Error) -> RpcError {
         }
         _ => RpcError::bad_args(format!("cannot read {path}: {err}")),
     }
-}
-
-fn guess_content_type(path: &Path) -> String {
-    mime_guess::from_path(path)
-        .first()
-        .map(|m| m.essence_str().to_string())
-        .unwrap_or_else(|| "application/octet-stream".to_string())
 }
 
 async fn op_draft_delete(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
@@ -2276,11 +2271,7 @@ fn encode_one<T: serde::Serialize>(v: &T) -> Result<Value, RpcError> {
 }
 
 fn parse_uuid(args: &Value, key: &str) -> Result<uuid::Uuid, RpcError> {
-    let s = args
-        .get(key)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| RpcError::bad_args(format!("missing '{key}'")))?;
-    uuid::Uuid::parse_str(s).map_err(|e| RpcError::bad_args(format!("bad '{key}': {e}")))
+    parse_id::<uuid::Uuid>(args, key)
 }
 
 fn parse_id<T>(args: &Value, key: &str) -> Result<T, RpcError>

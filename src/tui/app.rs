@@ -2957,15 +2957,6 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Resolve the content-type for a path by extension; falls back to
-/// `application/octet-stream` for unknown types.
-pub fn guess_content_type_for_path(path: &Path) -> String {
-    mime_guess::from_path(path)
-        .first()
-        .map(|m| m.essence_str().to_string())
-        .unwrap_or_else(|| "application/octet-stream".to_string())
-}
-
 /// Probe a candidate attachment path: returns metadata + content-type
 /// or a structured error suitable for toast surfacing.
 pub async fn probe_attachment(path: &Path) -> Result<ComposerAttachment, AttachError> {
@@ -2994,7 +2985,7 @@ pub async fn probe_attachment(path: &Path) -> Result<ComposerAttachment, AttachE
         path: path.to_path_buf(),
         filename,
         size_bytes: size,
-        content_type: guess_content_type_for_path(path),
+        content_type: crate::attachments::guess_content_type_for_path(path),
     })
 }
 

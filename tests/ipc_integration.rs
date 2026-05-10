@@ -515,11 +515,43 @@ async fn message_set_flags_publishes_mail_updated() {
         .unwrap();
     assert!(audit.ok);
     let entries = audit.data.as_array().unwrap();
+    let set_flags_count = entries
+        .iter()
+        .filter(|e| e["action"] == "message.set_flags" && e["target"] == msg.id.to_string())
+        .count();
     assert!(
-        entries
-            .iter()
-            .any(|e| e["action"] == "message.set_flags" && e["target"] == msg.id.to_string()),
+        set_flags_count > 0,
         "expected audit entry for set_flags, got {entries:?}"
+    );
+
+    let repeat = c
+        .request(
+            "message.set_flags",
+            json!({"id": msg.id.to_string(), "flags": ["\\Seen"]}),
+        )
+        .await
+        .unwrap();
+    assert!(repeat.ok, "{:?}", repeat.error);
+    assert!(
+        timeout(Duration::from_millis(100), c.next_event())
+            .await
+            .is_err(),
+        "no-op set_flags unexpectedly published mail.updated"
+    );
+
+    let audit = c
+        .request("audit.list_recent", json!({"limit": 10}))
+        .await
+        .unwrap();
+    assert!(audit.ok);
+    let entries = audit.data.as_array().unwrap();
+    let repeat_set_flags_count = entries
+        .iter()
+        .filter(|e| e["action"] == "message.set_flags" && e["target"] == msg.id.to_string())
+        .count();
+    assert_eq!(
+        repeat_set_flags_count, set_flags_count,
+        "no-op set_flags unexpectedly created an audit entry: {entries:?}"
     );
 }
 

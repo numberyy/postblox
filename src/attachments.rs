@@ -50,6 +50,13 @@ pub struct AttachmentExport {
     pub bytes_copied: u64,
 }
 
+pub(crate) fn guess_content_type_for_path(path: &Path) -> String {
+    mime_guess::from_path(path)
+        .first_raw()
+        .unwrap_or("application/octet-stream")
+        .to_string()
+}
+
 pub async fn persist_parsed_for_message(
     pool: &SqlitePool,
     message_id: MessageId,
@@ -347,6 +354,18 @@ mod tests {
         assert!(is_text_like("image/svg+xml"));
         assert!(!is_text_like("image/png"));
         assert!(!is_text_like("application/octet-stream"));
+    }
+
+    #[test]
+    fn test_guess_content_type_for_path_uses_extension_and_fallback() {
+        assert_eq!(
+            guess_content_type_for_path(Path::new("message.txt")),
+            "text/plain"
+        );
+        assert_eq!(
+            guess_content_type_for_path(Path::new("message.unknown-extension")),
+            "application/octet-stream"
+        );
     }
 
     #[tokio::test]
