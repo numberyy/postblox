@@ -63,8 +63,8 @@ pub async fn list_recent(
     Ok(sqlx::query_as::<_, AuditEntry>(&format!(
         "SELECT {COLS} FROM audit_log ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?"
     ))
-    .bind(limit)
-    .bind(offset)
+    .bind(limit.clamp(1, 500))
+    .bind(offset.max(0))
     .fetch_all(pool)
     .await?)
 }
@@ -84,7 +84,7 @@ pub async fn list_by_actor(
          ORDER BY created_at DESC, rowid DESC LIMIT ?"
     ))
     .bind(actor)
-    .bind(limit)
+    .bind(limit.clamp(1, 500))
     .fetch_all(pool)
     .await?)
 }
@@ -128,6 +128,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_list_recent_negative_limit_clamps_to_one() {
+        let pool = test_pool().await;
+        for i in 0..3 {
+            record(&pool, &entry("user", &format!("a{i}")))
+                .await
+                .unwrap();
+        }
+        let page = list_recent(&pool, -1, 0).await.unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].action, "a2");
+    }
+
+    #[tokio::test]
+    async fn test_list_recent_oversized_limit_clamps_to_cap() {
+        let pool = test_pool().await;
+        for i in 0..501 {
+            record(&pool, &entry("user", &format!("a{i}")))
+                .await
+                .unwrap();
+        }
+        let page = list_recent(&pool, 1_000, 0).await.unwrap();
+        assert_eq!(page.len(), 500);
+        assert_eq!(page[0].action, "a500");
+        assert_eq!(page[499].action, "a1");
+    }
+
+    #[tokio::test]
+    async fn test_list_recent_negative_offset_behaves_as_zero() {
+        let pool = test_pool().await;
+        for i in 0..3 {
+            record(&pool, &entry("user", &format!("a{i}")))
+                .await
+                .unwrap();
+        }
+        let negative_offset = list_recent(&pool, 2, -10).await.unwrap();
+        let zero_offset = list_recent(&pool, 2, 0).await.unwrap();
+        let negative_actions: Vec<_> = negative_offset
+            .iter()
+            .map(|entry| entry.action.as_str())
+            .collect();
+        let zero_actions: Vec<_> = zero_offset
+            .iter()
+            .map(|entry| entry.action.as_str())
+            .collect();
+        assert_eq!(negative_actions, zero_actions);
+    }
+
+    #[tokio::test]
     async fn test_list_by_actor_filters() {
         let pool = test_pool().await;
         record(&pool, &entry("user", "send")).await.unwrap();
@@ -135,5 +183,18 @@ mod tests {
         let user_only = list_by_actor(&pool, "user", 10).await.unwrap();
         assert_eq!(user_only.len(), 1);
         assert_eq!(user_only[0].actor, "user");
+    }
+
+    #[tokio::test]
+    async fn test_list_by_actor_negative_limit_clamps_to_one() {
+        let pool = test_pool().await;
+        for i in 0..3 {
+            record(&pool, &entry("user", &format!("a{i}")))
+                .await
+                .unwrap();
+        }
+        let user_only = list_by_actor(&pool, "user", -1).await.unwrap();
+        assert_eq!(user_only.len(), 1);
+        assert_eq!(user_only[0].action, "a2");
     }
 }

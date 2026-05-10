@@ -1,7 +1,7 @@
 //! MCP bridge for AI agents.
 //!
 //! Speaks newline-delimited JSON-RPC 2.0 over stdio and forwards the
-//! twelve postblox tools to the daemon over the existing IPC socket.
+//! postblox MCP tools to the daemon over the existing IPC socket.
 
 mod gates;
 mod protocol;

@@ -1,9 +1,15 @@
 use serde_json::{json, Map, Value};
+use uuid::Uuid;
+
+use crate::daemon::Op;
+use crate::db::sql_query::MAX_ROWS;
+
+const SEARCH_MAX_ROWS: i64 = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolSpec {
     pub name: &'static str,
-    pub op: &'static str,
+    pub op: Op,
     pub description: &'static str,
     pub dangerous: bool,
     required: &'static [&'static str],
@@ -24,63 +30,63 @@ enum FieldKind {
 pub const TOOLS: [ToolSpec; 14] = [
     ToolSpec {
         name: "postblox_account_list",
-        op: "account.list",
+        op: Op::AccountList,
         description: "List configured postblox email accounts.",
         dangerous: false,
         required: &[],
     },
     ToolSpec {
         name: "postblox_folder_list",
-        op: "folder.list",
+        op: Op::FolderList,
         description: "List folders for one account.",
         dangerous: false,
         required: &["account_id"],
     },
     ToolSpec {
         name: "postblox_thread_list",
-        op: "thread.list",
+        op: Op::ThreadList,
         description: "List recent threads for one account.",
         dangerous: false,
         required: &["account_id"],
     },
     ToolSpec {
         name: "postblox_message_list_by_folder",
-        op: "message.list_by_folder",
+        op: Op::MessageListByFolder,
         description: "List messages in a folder.",
         dangerous: false,
         required: &["folder_id"],
     },
     ToolSpec {
         name: "postblox_message_list_by_thread",
-        op: "message.list_by_thread",
+        op: Op::MessageListByThread,
         description: "List messages in a thread.",
         dangerous: false,
         required: &["thread_id"],
     },
     ToolSpec {
         name: "postblox_message_get",
-        op: "message.get",
+        op: Op::MessageGet,
         description: "Fetch one message by id.",
         dangerous: false,
         required: &["id"],
     },
     ToolSpec {
         name: "postblox_search",
-        op: "search",
+        op: Op::Search,
         description: "Search local indexed email with optional account/folder/thread/date/sender/flag filters.",
         dangerous: false,
         required: &["q"],
     },
     ToolSpec {
         name: "postblox_draft_create",
-        op: "draft.create",
+        op: Op::DraftCreate,
         description: "Create an email draft.",
         dangerous: true,
         required: &["account_id", "to_addrs", "cc_addrs", "bcc_addrs"],
     },
     ToolSpec {
         name: "postblox_draft_update",
-        op: "draft.update",
+        op: Op::DraftUpdate,
         description: "Update an email draft.",
         dangerous: true,
         required: &[
@@ -95,37 +101,37 @@ pub const TOOLS: [ToolSpec; 14] = [
     },
     ToolSpec {
         name: "postblox_draft_delete",
-        op: "draft.delete",
+        op: Op::DraftDelete,
         description: "Delete an email draft.",
         dangerous: true,
         required: &["id"],
     },
     ToolSpec {
         name: "postblox_message_set_flags",
-        op: "message.set_flags",
+        op: Op::MessageSetFlags,
         description: "Replace flags on one message.",
         dangerous: true,
         required: &["id", "flags"],
     },
     ToolSpec {
         name: "postblox_message_send",
-        op: "message.send",
+        op: Op::MessageSend,
         description: "Send an existing draft through the account SMTP settings.",
         dangerous: true,
         required: &["account_id", "draft_id"],
     },
     ToolSpec {
         name: "postblox_sql_query",
-        op: "sql.query",
+        op: Op::SqlQuery,
         description: "Run a read-only SQL query against the local postblox database. \
                       Only SELECT statements are accepted; DDL and DML are rejected. \
-                      Returns up to `limit` rows (default 200, hard max 1000) as JSON objects.",
+                      Returns up to `limit` rows as JSON objects.",
         dangerous: true,
         required: &["sql"],
     },
     ToolSpec {
         name: "postblox_sql_schema",
-        op: "sql.schema",
+        op: Op::SqlSchema,
         description: "Return CREATE statements for every table, view, index, and \
                       trigger in the postblox database. Use this before issuing \
                       ad-hoc queries via postblox_sql_query.",
@@ -206,11 +212,15 @@ fn field_kind(tool: &ToolSpec, field: &str) -> Option<FieldKind> {
         | ("postblox_draft_update", "subject")
         | ("postblox_draft_update", "text_body")
         | ("postblox_draft_update", "html_body") => Some(FieldKind::NullableString),
-        ("postblox_thread_list", "limit")
-        | ("postblox_message_list_by_folder", "limit")
-        | ("postblox_search", "limit") => Some(FieldKind::Integer {
+        ("postblox_thread_list", "limit") | ("postblox_message_list_by_folder", "limit") => {
+            Some(FieldKind::Integer {
+                minimum: 1,
+                maximum: 500,
+            })
+        }
+        ("postblox_search", "limit") => Some(FieldKind::Integer {
             minimum: 1,
-            maximum: 500,
+            maximum: SEARCH_MAX_ROWS,
         }),
         ("postblox_thread_list", "offset")
         | ("postblox_message_list_by_folder", "offset")
@@ -221,7 +231,7 @@ fn field_kind(tool: &ToolSpec, field: &str) -> Option<FieldKind> {
         ("postblox_sql_query", "sql") => Some(FieldKind::String),
         ("postblox_sql_query", "limit") => Some(FieldKind::Integer {
             minimum: 1,
-            maximum: 1000,
+            maximum: MAX_ROWS as i64,
         }),
         _ => None,
     }
@@ -229,19 +239,38 @@ fn field_kind(tool: &ToolSpec, field: &str) -> Option<FieldKind> {
 
 fn validate_field(field: &str, value: &Value, kind: FieldKind) -> Result<(), String> {
     match kind {
-        FieldKind::String | FieldKind::UuidString => {
+        FieldKind::String => {
             if value.is_string() {
                 Ok(())
             } else {
                 Err(format!("{field} must be a string"))
             }
         }
-        FieldKind::NullableString | FieldKind::NullableUuidString => {
+        FieldKind::NullableString => {
             if value.is_string() || value.is_null() {
                 Ok(())
             } else {
                 Err(format!("{field} must be a string or null"))
             }
+        }
+        FieldKind::UuidString => {
+            let value = value
+                .as_str()
+                .ok_or_else(|| format!("{field} must be a string"))?;
+            Uuid::parse_str(value)
+                .map(|_| ())
+                .map_err(|_| format!("{field} must be a uuid string"))
+        }
+        FieldKind::NullableUuidString => {
+            if value.is_null() {
+                return Ok(());
+            }
+            let value = value
+                .as_str()
+                .ok_or_else(|| format!("{field} must be a string or null"))?;
+            Uuid::parse_str(value)
+                .map(|_| ())
+                .map_err(|_| format!("{field} must be a uuid string or null"))
         }
         FieldKind::NullableRfc3339 => {
             if value.is_null() {
@@ -319,7 +348,7 @@ fn input_schema(tool: &ToolSpec) -> Value {
             nullable_string("to_addr", "Substring match against the recipients."),
             boolean("has_attachments", "Filter by presence of attachments."),
             boolean("unread", "Filter by read state (true = unread)."),
-            integer("limit", 1, 500, "Maximum rows to return."),
+            integer("limit", 1, SEARCH_MAX_ROWS, "Maximum rows to return."),
             integer("offset", 0, i64::MAX, "Rows to skip."),
         ]),
         "postblox_draft_create" => fields(&[
@@ -355,8 +384,8 @@ fn input_schema(tool: &ToolSpec) -> Value {
             integer(
                 "limit",
                 1,
-                1000,
-                "Maximum rows to return (default 200, hard cap 1000).",
+                MAX_ROWS as i64,
+                "Maximum rows to return; omitted limits use the daemon default.",
             ),
         ]),
         "postblox_sql_schema" => Map::new(),
@@ -474,6 +503,27 @@ mod tests {
                 "postblox_sql_schema",
             ]
         );
+
+        let ops = TOOLS.iter().map(|tool| tool.op).collect::<Vec<_>>();
+        assert_eq!(
+            ops,
+            vec![
+                Op::AccountList,
+                Op::FolderList,
+                Op::ThreadList,
+                Op::MessageListByFolder,
+                Op::MessageListByThread,
+                Op::MessageGet,
+                Op::Search,
+                Op::DraftCreate,
+                Op::DraftUpdate,
+                Op::DraftDelete,
+                Op::MessageSetFlags,
+                Op::MessageSend,
+                Op::SqlQuery,
+                Op::SqlSchema,
+            ]
+        );
     }
 
     #[test]
@@ -499,11 +549,16 @@ mod tests {
             tools[11]["inputSchema"]["required"],
             json!(["account_id", "draft_id"])
         );
+        assert_eq!(tools[6]["name"], "postblox_search");
+        assert_eq!(
+            tools[6]["inputSchema"]["properties"]["limit"]["maximum"],
+            json!(SEARCH_MAX_ROWS)
+        );
         assert_eq!(tools[12]["name"], "postblox_sql_query");
         assert_eq!(tools[12]["inputSchema"]["required"], json!(["sql"]));
         assert_eq!(
             tools[12]["inputSchema"]["properties"]["limit"]["maximum"],
-            json!(1000)
+            json!(MAX_ROWS as i64)
         );
         assert_eq!(tools[13]["name"], "postblox_sql_schema");
         assert_eq!(tools[13]["inputSchema"]["required"], json!([]));
@@ -545,10 +600,51 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_arguments_rejects_malformed_uuid_string() {
+        let tool = find_tool("postblox_message_get").unwrap();
+        let err = validate_arguments(tool, json!({"id": "not-a-uuid"})).unwrap_err();
+        assert_eq!(err, "id must be a uuid string");
+    }
+
+    #[test]
+    fn test_validate_arguments_rejects_malformed_nullable_uuid_string() {
+        let tool = find_tool("postblox_search").unwrap();
+        let err =
+            validate_arguments(tool, json!({"q": "mail", "account_id": "not-a-uuid"})).unwrap_err();
+        assert_eq!(err, "account_id must be a uuid string or null");
+    }
+
+    #[test]
+    fn test_validate_arguments_accepts_nullable_uuid_null() {
+        let tool = find_tool("postblox_search").unwrap();
+        let args = validate_arguments(tool, json!({"q": "mail", "account_id": null})).unwrap();
+        assert!(args["account_id"].is_null());
+    }
+
+    #[test]
     fn test_validate_arguments_rejects_bad_integer_bounds() {
         let tool = find_tool("postblox_search").unwrap();
         let err = validate_arguments(tool, json!({"q": "mail", "limit": 0})).unwrap_err();
-        assert_eq!(err, "limit must be between 1 and 500");
+        assert_eq!(err, "limit must be between 1 and 200");
+    }
+
+    #[test]
+    fn test_validate_arguments_accepts_search_limit_at_daemon_cap() {
+        let tool = find_tool("postblox_search").unwrap();
+        let args =
+            validate_arguments(tool, json!({"q": "mail", "limit": SEARCH_MAX_ROWS})).unwrap();
+        assert_eq!(args["limit"], SEARCH_MAX_ROWS);
+    }
+
+    #[test]
+    fn test_validate_arguments_rejects_search_limit_over_daemon_cap() {
+        let tool = find_tool("postblox_search").unwrap();
+        let err = validate_arguments(tool, json!({"q": "mail", "limit": SEARCH_MAX_ROWS + 1}))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            format!("limit must be between 1 and {SEARCH_MAX_ROWS}")
+        );
     }
 
     #[test]
@@ -613,16 +709,21 @@ mod tests {
     #[test]
     fn test_validate_arguments_accepts_sql_query_limit() {
         let tool = find_tool("postblox_sql_query").unwrap();
-        let args = validate_arguments(tool, json!({"sql": "SELECT 1", "limit": 1000})).unwrap();
+        let args =
+            validate_arguments(tool, json!({"sql": "SELECT 1", "limit": MAX_ROWS as i64})).unwrap();
         assert_eq!(args["sql"], "SELECT 1");
-        assert_eq!(args["limit"], 1000);
+        assert_eq!(args["limit"], MAX_ROWS as i64);
     }
 
     #[test]
     fn test_validate_arguments_rejects_sql_query_limit_over_max() {
         let tool = find_tool("postblox_sql_query").unwrap();
-        let err = validate_arguments(tool, json!({"sql": "SELECT 1", "limit": 1001})).unwrap_err();
-        assert_eq!(err, "limit must be between 1 and 1000");
+        let err = validate_arguments(
+            tool,
+            json!({"sql": "SELECT 1", "limit": (MAX_ROWS + 1) as i64}),
+        )
+        .unwrap_err();
+        assert_eq!(err, format!("limit must be between 1 and {MAX_ROWS}"));
     }
 
     #[test]

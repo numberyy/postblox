@@ -237,7 +237,7 @@ impl McpBridge {
 
     async fn call_tool(&self, tool: &ToolSpec, arguments: Value) -> Result<Value, BridgeError> {
         if !tool.dangerous {
-            return self.daemon.request(tool.op, arguments).await;
+            return self.daemon.request(tool.op.as_str(), arguments).await;
         }
 
         match self.gate_decision(tool, &arguments).await? {
@@ -404,7 +404,7 @@ impl McpBridge {
         if let Value::Object(object) = &mut arguments {
             object.insert("_actor".into(), json!(format!("mcp:{}", tool.name)));
         }
-        self.daemon.request(tool.op, arguments).await
+        self.daemon.request(tool.op.as_str(), arguments).await
     }
 }
 

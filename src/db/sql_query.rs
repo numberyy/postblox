@@ -9,6 +9,8 @@
 use base64::Engine;
 use serde_json::{Map, Value};
 use sqlx::{Column, Row, SqlitePool, TypeInfo, ValueRef};
+use std::time::Duration;
+use tokio::time::timeout;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SqlError {
@@ -22,6 +24,15 @@ pub enum SqlError {
 pub const MAX_ROWS: usize = 1000;
 /// Default cap when the caller doesn't pass a `limit`.
 pub const DEFAULT_ROWS: usize = 200;
+/// Maximum size of the submitted SQL string, in bytes.
+pub const MAX_SQL_BYTES: usize = 16 * 1024;
+/// Maximum raw bytes accepted for a single TEXT or BLOB cell.
+pub const MAX_CELL_BYTES: usize = 64 * 1024;
+/// Maximum approximate JSON payload bytes across returned cell values.
+pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// Best-effort timeout around query execution at the async future boundary.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Statement-level rejection list (case-insensitive tokens).
 const FORBIDDEN_KEYWORDS: &[&str] = &[
@@ -59,6 +70,15 @@ const FORBIDDEN_KEYWORDS: &[&str] = &[
 /// with `SELECT` or `WITH`, or contains a forbidden keyword as a
 /// standalone identifier-shaped token.
 pub fn validate_query(sql: &str) -> Result<(), SqlError> {
+    if sql.len() > MAX_SQL_BYTES {
+        return Err(SqlError::Rejected {
+            reason: format!(
+                "sql string is {} bytes, exceeds {MAX_SQL_BYTES} byte limit",
+                sql.len()
+            ),
+        });
+    }
+
     let sql = trim_one_trailing_semicolon(sql);
     if sql.is_empty() {
         return Err(SqlError::Rejected {
@@ -108,20 +128,26 @@ pub async fn query(
     sql: &str,
     limit: usize,
 ) -> Result<Vec<Map<String, Value>>, SqlError> {
-    let sql = trim_one_trailing_semicolon(sql);
     validate_query(sql)?;
+    let sql = trim_one_trailing_semicolon(sql);
     let cap = limit.clamp(1, MAX_ROWS);
     let capped_sql = format!("SELECT * FROM ({sql}) AS postblox_agent_query LIMIT ?");
-    let rows = sqlx::query(&capped_sql)
-        .bind(cap as i64)
-        .fetch_all(pool)
-        .await?;
+    let rows = timeout(
+        QUERY_TIMEOUT,
+        sqlx::query(&capped_sql).bind(cap as i64).fetch_all(pool),
+    )
+    .await
+    .map_err(|_| SqlError::Rejected {
+        reason: format!("query timed out after {} ms", QUERY_TIMEOUT.as_millis()),
+    })??;
     let mut out = Vec::with_capacity(rows.len());
+    let mut budget = ResponseBudget::default();
     for row in rows {
         let mut obj = Map::new();
         for (i, col) in row.columns().iter().enumerate() {
             let name = col.name().to_string();
-            let value = sqlite_value_to_json(&row, i)?;
+            let value = sqlite_value_to_json(&row, i, &name)?;
+            budget.account(json_value_bytes(&value))?;
             obj.insert(name, value);
         }
         out.push(obj);
@@ -145,14 +171,46 @@ pub async fn schema(pool: &SqlitePool) -> Result<Vec<Map<String, Value>>, SqlErr
     for row in rows {
         let mut obj = Map::new();
         for (i, col) in row.columns().iter().enumerate() {
-            obj.insert(col.name().to_string(), sqlite_value_to_json(&row, i)?);
+            obj.insert(
+                col.name().to_string(),
+                sqlite_value_to_json(&row, i, col.name())?,
+            );
         }
         out.push(obj);
     }
     Ok(out)
 }
 
-fn sqlite_value_to_json(row: &sqlx::sqlite::SqliteRow, idx: usize) -> Result<Value, SqlError> {
+#[derive(Default)]
+struct ResponseBudget {
+    used_bytes: usize,
+}
+
+impl ResponseBudget {
+    fn account(&mut self, cell_bytes: usize) -> Result<(), SqlError> {
+        self.used_bytes =
+            self.used_bytes
+                .checked_add(cell_bytes)
+                .ok_or_else(|| SqlError::Rejected {
+                    reason: format!("query response exceeds {MAX_RESPONSE_BYTES} byte limit"),
+                })?;
+        if self.used_bytes > MAX_RESPONSE_BYTES {
+            return Err(SqlError::Rejected {
+                reason: format!(
+                    "query response is {} bytes, exceeds {MAX_RESPONSE_BYTES} byte limit",
+                    self.used_bytes
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn sqlite_value_to_json(
+    row: &sqlx::sqlite::SqliteRow,
+    idx: usize,
+    column_name: &str,
+) -> Result<Value, SqlError> {
     let raw = row.try_get_raw(idx)?;
     if raw.is_null() {
         return Ok(Value::Null);
@@ -167,20 +225,71 @@ fn sqlite_value_to_json(row: &sqlx::sqlite::SqliteRow, idx: usize) -> Result<Val
             .try_get::<Option<f64>, _>(idx)?
             .and_then(|f| serde_json::Number::from_f64(f).map(Value::Number))
             .unwrap_or(Value::Null),
-        "TEXT" => row
-            .try_get::<Option<String>, _>(idx)?
-            .map_or(Value::Null, Value::String),
-        "BLOB" => row
-            .try_get::<Option<Vec<u8>>, _>(idx)?
-            .map_or(Value::Null, |bytes| {
+        "TEXT" => match row.try_get::<Option<&str>, _>(idx)? {
+            Some(text) => {
+                ensure_cell_bytes(column_name, "text", text.len())?;
+                Value::String(text.to_owned())
+            }
+            None => Value::Null,
+        },
+        "BLOB" => match row.try_get::<Option<&[u8]>, _>(idx)? {
+            Some(bytes) => {
+                ensure_cell_bytes(column_name, "blob", bytes.len())?;
                 Value::String(base64::engine::general_purpose::STANDARD.encode(bytes))
-            }),
+            }
+            None => Value::Null,
+        },
         // Unknown / NULL-typed columns: try generic serde via String fallback.
-        _ => row
-            .try_get::<Option<String>, _>(idx)?
-            .map_or(Value::Null, Value::String),
+        _ => match row.try_get::<Option<&str>, _>(idx)? {
+            Some(text) => {
+                ensure_cell_bytes(column_name, "text", text.len())?;
+                Value::String(text.to_owned())
+            }
+            None => Value::Null,
+        },
     };
     Ok(v)
+}
+
+fn ensure_cell_bytes(column_name: &str, value_kind: &str, bytes: usize) -> Result<(), SqlError> {
+    if bytes > MAX_CELL_BYTES {
+        return Err(SqlError::Rejected {
+            reason: format!(
+                "{value_kind} cell '{column_name}' is {bytes} bytes, exceeds {MAX_CELL_BYTES} byte limit"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn json_value_bytes(value: &Value) -> usize {
+    match value {
+        Value::Null => 4,
+        Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(number) => number.to_string().len(),
+        Value::String(text) => json_string_bytes(text),
+        Value::Array(values) => values
+            .iter()
+            .map(json_value_bytes)
+            .fold(2, |sum, bytes| sum.saturating_add(bytes).saturating_add(1)),
+        Value::Object(map) => map.iter().fold(2, |sum, (key, value)| {
+            sum.saturating_add(json_string_bytes(key))
+                .saturating_add(json_value_bytes(value))
+                .saturating_add(2)
+        }),
+    }
+}
+
+fn json_string_bytes(text: &str) -> usize {
+    text.chars().fold(2, |sum, ch| {
+        sum.saturating_add(match ch {
+            '"' | '\\' => 2,
+            '\u{08}' | '\u{0C}' | '\n' | '\r' | '\t' => 2,
+            '\u{00}'..='\u{1F}' => 6,
+            ch => ch.len_utf8(),
+        })
+    })
 }
 
 fn trim_one_trailing_semicolon(sql: &str) -> &str {
@@ -294,6 +403,85 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["id"], Value::String(id));
         assert_eq!(rows[0]["email"], Value::String("a@b.com".into()));
+    }
+
+    #[tokio::test]
+    async fn test_query_overlong_sql_rejected() {
+        let pool = test_pool().await;
+        let sql = format!("SELECT 1 AS one{}", " ".repeat(MAX_SQL_BYTES + 1));
+        let err = query(&pool, &sql, 10).await.unwrap_err();
+        assert!(
+            matches!(err, SqlError::Rejected { ref reason } if reason.contains("sql string")),
+            "expected sql length rejection, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_oversized_text_rejected() {
+        let pool = test_pool().await;
+        let sql = format!(
+            "SELECT hex(zeroblob({})) AS big_text",
+            (MAX_CELL_BYTES / 2) + 1
+        );
+        let err = query(&pool, &sql, 10).await.unwrap_err();
+        assert!(
+            matches!(err, SqlError::Rejected { ref reason } if reason.contains("text cell 'big_text'")),
+            "expected text cell rejection, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_oversized_blob_rejected() {
+        let pool = test_pool().await;
+        let sql = format!("SELECT zeroblob({}) AS big_blob", MAX_CELL_BYTES + 1);
+        let err = query(&pool, &sql, 10).await.unwrap_err();
+        assert!(
+            matches!(err, SqlError::Rejected { ref reason } if reason.contains("blob cell 'big_blob'")),
+            "expected blob cell rejection, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_total_response_cap_rejected() {
+        let pool = test_pool().await;
+        let rows_needed = (MAX_RESPONSE_BYTES / MAX_CELL_BYTES) + 1;
+        let sql = format!(
+            "WITH RECURSIVE n(x) AS ( \
+                 VALUES(1) \
+                 UNION ALL \
+                 SELECT x + 1 FROM n WHERE x < {rows_needed} \
+             ) \
+             SELECT hex(zeroblob({})) AS chunk \
+             FROM n",
+            MAX_CELL_BYTES / 2
+        );
+        let err = query(&pool, &sql, rows_needed).await.unwrap_err();
+        assert!(
+            matches!(err, SqlError::Rejected { ref reason } if reason.contains("query response")),
+            "expected total response rejection, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_query_small_values_encode() {
+        let pool = test_pool().await;
+        let rows = query(
+            &pool,
+            "SELECT 'hello' AS text_value, X'000102' AS blob_value, \
+                    42 AS int_value, 1.5 AS real_value, NULL AS null_value",
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["text_value"], Value::String("hello".into()));
+        assert_eq!(rows[0]["blob_value"], Value::String("AAEC".into()));
+        assert_eq!(rows[0]["int_value"], Value::Number(42.into()));
+        assert_eq!(
+            rows[0]["real_value"],
+            Value::Number(serde_json::Number::from_f64(1.5).unwrap())
+        );
+        assert_eq!(rows[0]["null_value"], Value::Null);
     }
 
     #[tokio::test]
