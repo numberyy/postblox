@@ -26,24 +26,37 @@ use super::hub::Topic;
 use super::protocol::{Event, Frame, Request, Response, RpcError};
 use super::wire::{read_frame, WireError, MAX_FRAME_BYTES};
 
+/// Error returned by [`Client`] operations.
 #[derive(Debug, Error)]
 pub enum ClientError {
+    /// Underlying socket I/O failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// Wire-frame codec rejected a frame (oversized or malformed).
     #[error("wire: {0}")]
     Wire(#[from] WireError),
+    /// JSON encode/decode failed.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    /// Reader task exited or the daemon closed the connection.
     #[error("connection closed")]
     Closed,
+    /// Daemon's success response was missing an expected field.
     #[error("rpc returned no data: {0}")]
     EmptyResponse(String),
+    /// Daemon returned a structured RPC error.
     #[error("server returned error: {code}: {message}")]
-    Server { code: String, message: String },
+    Server {
+        /// Machine-readable error code returned by the daemon.
+        code: String,
+        /// Human-readable error message returned by the daemon.
+        message: String,
+    },
 }
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
 
+/// Client handle for talking to the daemon over a Unix-domain socket.
 pub struct Client {
     writer: OwnedWriteHalf,
     next_id: AtomicU64,

@@ -12,15 +12,21 @@ use zeroize::Zeroizing;
 
 use crate::secrets::Secret;
 
+/// Kind of credential carried by [`MailCredential`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialKind {
+    /// Username + password (`AUTH PLAIN` / `AUTH LOGIN`).
     Password,
+    /// OAuth2 bearer token (`XOAUTH2`).
     OAuth2Bearer,
 }
 
+/// Credential carrier shared by the IMAP and SMTP clients.
 #[derive(Clone)]
 pub enum MailCredential {
+    /// Password credential.
     Password(Secret),
+    /// OAuth2 bearer-token credential.
     OAuth2Bearer(Secret),
 }
 
@@ -34,18 +40,22 @@ impl std::fmt::Debug for MailCredential {
 }
 
 impl MailCredential {
+    /// Construct a password credential from a plain string.
     pub fn password(secret: impl Into<String>) -> Self {
         Self::Password(Zeroizing::new(secret.into()))
     }
 
+    /// Construct a password credential from an existing [`Secret`].
     pub fn password_secret(secret: Secret) -> Self {
         Self::Password(secret)
     }
 
+    /// Construct an OAuth2 bearer-token credential.
     pub fn oauth2_bearer(access_token: impl Into<String>) -> Self {
         Self::OAuth2Bearer(Zeroizing::new(access_token.into()))
     }
 
+    /// Return the variant tag without exposing the secret.
     pub fn kind(&self) -> CredentialKind {
         match self {
             Self::Password(_) => CredentialKind::Password,
@@ -53,12 +63,14 @@ impl MailCredential {
         }
     }
 
+    /// Borrow the secret payload as a `&str`.
     pub fn secret(&self) -> &str {
         match self {
             Self::Password(secret) | Self::OAuth2Bearer(secret) => secret.as_str(),
         }
     }
 
+    /// `true` when the underlying secret is empty.
     pub fn is_empty(&self) -> bool {
         self.secret().is_empty()
     }

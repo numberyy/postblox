@@ -11,17 +11,23 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// out-of-band channel (file path / attachment fetch).
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
+/// Error returned by the wire-level frame codec.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum WireError {
+    /// Underlying transport I/O failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// Frame exceeded [`MAX_FRAME_BYTES`].
     #[error("frame too large: {0} bytes (max 4 MiB)")]
     FrameTooLarge(usize),
+    /// JSON encode/decode failed.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    /// Length prefix announced a zero-byte payload.
     #[error("empty frame payload")]
     EmptyPayload,
+    /// Peer closed the connection cleanly before sending a frame.
     #[error("connection closed")]
     Closed,
 }

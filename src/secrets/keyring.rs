@@ -11,35 +11,56 @@ use crate::models::AccountId;
 
 use super::{sealed, Secret, SecretError, SecretStore};
 
+/// Default `service` name registered with the OS keyring.
 pub const DEFAULT_SERVICE: &str = "postblox";
 
+/// Error returned by [`KeyringSecretStore`] operations.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum KeyringSecretError {
+    /// OS keyring reported an unspecified platform failure.
     #[error("platform failure: {0}")]
     Platform(String),
 
+    /// OS keyring storage is not currently available.
     #[error("storage unavailable: {0}")]
     StorageUnavailable(String),
 
+    /// Requested entry does not exist in the keyring.
     #[error("entry not found")]
     NotFound,
 
+    /// Stored secret was not valid UTF-8.
     #[error("secret was not UTF-8")]
     BadEncoding,
 
+    /// Attribute exceeded the platform's length limit.
     #[error("attribute '{name}' exceeded platform limit {limit}")]
-    TooLong { name: String, limit: u32 },
+    TooLong {
+        /// Name of the offending attribute.
+        name: String,
+        /// Maximum length permitted by the platform.
+        limit: u32,
+    },
 
+    /// Attribute was rejected for being structurally invalid.
     #[error("attribute '{name}' is invalid: {reason}")]
-    Invalid { name: String, reason: String },
+    Invalid {
+        /// Name of the offending attribute.
+        name: String,
+        /// Reason the platform rejected the value.
+        reason: String,
+    },
 
+    /// More than one keyring entry matched the lookup.
     #[error("multiple matching entries")]
     Ambiguous,
 
+    /// Blocking keyring task panicked or was cancelled.
     #[error("keyring task failed: {0}")]
     Task(String),
 }
 
+/// OS-keyring–backed [`SecretStore`]. Cheap to clone (`Arc` inside).
 #[derive(Debug, Clone)]
 pub struct KeyringSecretStore {
     service: String,
@@ -53,6 +74,8 @@ impl Default for KeyringSecretStore {
 }
 
 impl KeyringSecretStore {
+    /// Construct a store that uses `service` as the OS keyring's
+    /// `service` attribute for every entry.
     pub fn new(service: impl Into<String>) -> Self {
         Self {
             service: service.into(),
@@ -60,14 +83,17 @@ impl KeyringSecretStore {
         }
     }
 
+    /// Service name this store registers entries under.
     pub fn service(&self) -> &str {
         &self.service
     }
 
+    /// Per-account key used as the keyring entry's `account` attribute.
     pub fn account_key(account_id: AccountId) -> String {
         account_id.to_string()
     }
 
+    /// Stable reference string written to `accounts.secret_ref`.
     pub fn keyring_ref(&self, account_id: AccountId) -> String {
         format!("keyring:{}:{}", self.service, Self::account_key(account_id))
     }

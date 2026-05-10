@@ -12,10 +12,16 @@ use sqlx::{Column, Row, SqlitePool, TypeInfo, ValueRef};
 use std::time::Duration;
 use tokio::time::timeout;
 
+/// Error returned by the agent-facing read-only SQL surface.
 #[derive(Debug, thiserror::Error)]
 pub enum SqlError {
+    /// Query was rejected by the static safety filter before execution.
     #[error("query rejected: {reason}")]
-    Rejected { reason: String },
+    Rejected {
+        /// Human-readable reason the statement was refused.
+        reason: String,
+    },
+    /// Underlying SQLite or SQLx error during execution.
     #[error("sqlite error: {0}")]
     Sqlx(#[from] sqlx::Error),
 }

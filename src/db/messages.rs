@@ -16,33 +16,60 @@ use crate::models::{
     AccountId, AddressList, FolderId, Message, MessageFlags, MessageId, MessageSummary, ThreadId,
 };
 
+/// Input record for [`create`]: every column needed to insert a new
+/// row into the `messages` table.
 #[derive(Debug, Clone)]
 pub struct NewMessage {
+    /// Account this message belongs to.
     pub account_id: AccountId,
+    /// Folder this message belongs to.
     pub folder_id: FolderId,
+    /// Optional thread association.
     pub thread_id: Option<ThreadId>,
+    /// IMAP UID within the folder.
     pub uid: i64,
+    /// `Message-Id` header value, if present.
     pub message_id_header: Option<String>,
+    /// `In-Reply-To` header value, if present.
     pub in_reply_to: Option<String>,
+    /// `References` header value verbatim, if present.
     pub references_header: Option<String>,
+    /// `From` address as a single rendered string.
     pub from_addr: String,
+    /// `To` recipients.
     pub to_addrs: AddressList,
+    /// `Cc` recipients.
     pub cc_addrs: AddressList,
+    /// `Bcc` recipients, if locally retained.
     pub bcc_addrs: AddressList,
+    /// `Reply-To` address, if present.
     pub reply_to: Option<String>,
+    /// `Subject` header value.
     pub subject: Option<String>,
+    /// Short preview snippet derived from the body.
     pub snippet: Option<String>,
+    /// Plain-text body, if available.
     pub text_body: Option<String>,
+    /// HTML body, if available.
     pub html_body: Option<String>,
+    /// Raw RFC 5322 message size in bytes.
     pub raw_size: i64,
+    /// IMAP flags currently set on the message.
     pub flags: MessageFlags,
+    /// Server-assigned `INTERNALDATE`.
     pub internal_date: DateTime<Utc>,
+    /// `Date` header timestamp, if parseable.
     pub sent_at: Option<DateTime<Utc>>,
 }
 
+/// Result of [`set_flags`]: whether the message was found and whether
+/// the stored flags actually changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetFlagsOutcome {
+    /// `true` if the message id exists in the table.
     pub found: bool,
+    /// `true` if the flags column was rewritten (i.e. the new value
+    /// differed from the previously stored value).
     pub changed: bool,
 }
 

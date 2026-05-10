@@ -16,8 +16,11 @@ use serde::{Deserialize, Serialize};
 /// Client → daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Request {
+    /// Caller-assigned correlation id; reused in the matching [`Response`].
     pub id: u64,
+    /// Operation name (e.g. `"ping"`, `"account.list"`).
     pub op: String,
+    /// Operation-specific argument payload; defaults to JSON `null`.
     #[serde(default)]
     pub args: serde_json::Value,
 }
@@ -25,10 +28,14 @@ pub struct Request {
 /// Daemon → client (in reply to a Request with the matching `id`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Response {
+    /// Correlation id copied from the originating [`Request`].
     pub id: u64,
+    /// `true` for successful responses, `false` when `error` is set.
     pub ok: bool,
+    /// Operation-specific success payload; omitted on the wire when null.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub data: serde_json::Value,
+    /// Failure payload when `ok` is `false`; omitted on success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<RpcError>,
 }
@@ -41,8 +48,12 @@ pub struct Response {
 /// `event.topic.as_str()` without lifetime bounds.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Event {
+    /// Subscription handle identifying which client subscription this
+    /// event belongs to.
     pub sub: u64,
+    /// Topic name (e.g. `"mail.new"`).
     pub topic: String,
+    /// Topic-specific event payload.
     #[serde(default)]
     pub data: serde_json::Value,
 }
@@ -51,7 +62,9 @@ pub struct Event {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub struct RpcError {
+    /// Machine-readable error code (e.g. `"unknown_op"`, `"bad_args"`).
     pub code: String,
+    /// Human-readable error message.
     pub message: String,
 }
 

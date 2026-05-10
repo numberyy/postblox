@@ -14,14 +14,23 @@ use crate::models::{Attachment, AttachmentDisposition, AttachmentId, MessageId};
 const COLS: &str = "id, message_id, filename, content_type, content_id, size_bytes, \
     disposition, storage_path, created_at";
 
+/// Input record for [`create`]: every column needed to insert a new
+/// row into the `attachments` table.
 #[derive(Debug, Clone)]
 pub struct NewAttachment {
+    /// Message this attachment belongs to.
     pub message_id: MessageId,
+    /// Filename reported by the sender.
     pub filename: String,
+    /// MIME `Content-Type` of the attachment.
     pub content_type: String,
+    /// `Content-Id` for inline parts referenced by HTML bodies.
     pub content_id: Option<String>,
+    /// Size of the payload on disk in bytes.
     pub size_bytes: i64,
+    /// MIME `Content-Disposition` (inline vs attachment).
     pub disposition: AttachmentDisposition,
+    /// Filesystem path where the payload is stored.
     pub storage_path: String,
 }
 

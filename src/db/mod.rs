@@ -19,10 +19,13 @@ pub mod search;
 pub mod sql_query;
 pub mod threads;
 
+/// Error type returned by every function in the `db::*` modules.
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
+    /// Underlying SQLite or SQLx error.
     #[error("sqlite error: {0}")]
     Sqlx(#[from] sqlx::Error),
+    /// Migration apply failed (e.g. schema mismatch on an existing file).
     #[error("migration error: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
 }

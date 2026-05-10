@@ -15,11 +15,17 @@ pub const MAX_DRAFT_ATTACHMENT_BYTES: i64 = 25 * 1024 * 1024;
 
 const COLS: &str = "id, draft_id, filename, content_type, size_bytes, created_at";
 
+/// Input record for [`create`] / [`create_tx`]: metadata plus the
+/// inline content bytes to persist alongside the draft.
 #[derive(Debug, Clone)]
 pub struct NewDraftAttachment {
+    /// Draft this attachment belongs to.
     pub draft_id: DraftId,
+    /// Filename presented to the recipient.
     pub filename: String,
+    /// MIME `Content-Type` of the attachment.
     pub content_type: String,
+    /// Raw bytes to store inline.
     pub content: Vec<u8>,
 }
 

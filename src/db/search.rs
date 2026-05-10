@@ -97,10 +97,15 @@ pub async fn search_scoped(
 /// to keep call sites brief.
 #[derive(Default, Debug, Clone)]
 pub struct SearchFilters {
+    /// Limit results to a single account.
     pub account_id: Option<AccountId>,
+    /// Limit results to a single folder.
     pub folder_id: Option<FolderId>,
+    /// Limit results to a single thread.
     pub thread_id: Option<ThreadId>,
+    /// Lower bound (inclusive) on the message date.
     pub date_from: Option<DateTime<Utc>>,
+    /// Upper bound (inclusive) on the message date.
     pub date_to: Option<DateTime<Utc>>,
     /// Substring match against `messages.from_addr` (case-insensitive
     /// via SQLite default `LIKE` semantics).

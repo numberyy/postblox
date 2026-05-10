@@ -11,9 +11,12 @@ use thiserror::Error;
 
 use crate::tui::theme::ThemeName;
 
+/// Daemon configuration loaded from `postblox.toml`.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Config {
+    /// Secret-storage configuration.
     pub secrets: SecretsConfig,
+    /// TUI-specific configuration.
     pub tui: TuiConfig,
 }
 
@@ -26,6 +29,7 @@ impl fmt::Debug for Config {
     }
 }
 
+/// TUI-specific configuration block.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct TuiConfig {
     /// Override the startup theme. `None` means the TUI uses
@@ -33,9 +37,12 @@ pub struct TuiConfig {
     pub theme: Option<ThemeName>,
 }
 
+/// Secret-storage configuration block.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretsConfig {
+    /// Storage backend used by the daemon.
     pub backend: SecretsBackend,
+    /// Passphrase required when `backend = "file"`.
     pub passphrase: Option<String>,
     /// Optional override for where the encrypted secrets file lives.
     /// Defaults to `<data_dir>/secrets.bin`.
@@ -62,10 +69,13 @@ impl fmt::Debug for SecretsConfig {
     }
 }
 
+/// Backend selector for [`SecretsConfig::backend`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretsBackend {
+    /// Use the OS keyring backend.
     Keyring,
+    /// Use the encrypted-file backend.
     File,
 }
 
@@ -111,14 +121,18 @@ impl fmt::Debug for RawSecretsConfig {
     }
 }
 
+/// Error returned by [`load`].
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    /// Filesystem I/O failed while reading the config file.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
+    /// File contents are not valid TOML or use unknown fields.
     #[error("toml: {0}")]
     Toml(#[from] toml::de::Error),
 
+    /// Parsed config is internally inconsistent.
     #[error("invalid config: {0}")]
     Invalid(String),
 }

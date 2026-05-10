@@ -40,8 +40,11 @@ const KEY_LEN: usize = 32;
 /// stays under a second.
 #[derive(Debug, Clone, Copy)]
 pub struct KdfParams {
+    /// Argon2 memory cost, in KiB.
     pub mem_kib: u32,
+    /// Argon2 time cost (number of passes).
     pub iterations: u32,
+    /// Argon2 parallelism (number of lanes).
     pub parallelism: u32,
 }
 
@@ -102,6 +105,7 @@ impl FileSecretStore {
         Self::with_params(path, passphrase, KdfParams::default())
     }
 
+    /// Construct a store with explicit Argon2 KDF parameters.
     pub fn with_params(
         path: impl Into<PathBuf>,
         passphrase: impl Into<String>,
@@ -117,6 +121,7 @@ impl FileSecretStore {
         }
     }
 
+    /// Filesystem path of the backing store.
     pub fn path(&self) -> &Path {
         &self.inner.path
     }

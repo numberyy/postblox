@@ -19,34 +19,59 @@ use crate::db::{self, DbError};
 use crate::mail::parser::{Disposition, ParsedAttachment};
 use crate::models::{Attachment, AttachmentDisposition, AttachmentId, MessageId};
 
+/// Maximum bytes returned in an inline attachment preview.
 pub const PREVIEW_LIMIT_BYTES: usize = 16 * 1024;
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 
+/// Error returned by attachment persistence, preview, and export
+/// helpers.
 #[derive(Debug, Error)]
 pub enum AttachmentError {
+    /// Attachment exceeded the per-attachment size limit.
     #[error("attachment '{filename}' exceeds {limit} byte limit")]
-    TooLarge { filename: String, limit: usize },
+    TooLarge {
+        /// Name of the offending attachment.
+        filename: String,
+        /// Configured byte limit.
+        limit: usize,
+    },
+    /// Computed storage path could not be resolved on the filesystem.
     #[error("invalid attachment path: {}", path.display())]
-    BadPath { path: PathBuf },
+    BadPath {
+        /// Path that failed to resolve.
+        path: PathBuf,
+    },
+    /// Underlying database error.
     #[error("db: {0}")]
     Db(#[from] DbError),
+    /// Underlying filesystem I/O error.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
 
+/// Bounded, agent-friendly preview of an attachment's contents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentPreview {
+    /// Database row describing the previewed attachment.
     pub attachment: Attachment,
+    /// Inline UTF-8 text payload, when one could be rendered.
     pub inline_text: Option<String>,
+    /// Human-readable summary message for the preview.
     pub message: String,
+    /// Whether the inline text was truncated to fit the preview cap.
     pub truncated: bool,
+    /// Number of bytes returned in `inline_text`.
     pub preview_bytes: usize,
 }
 
+/// Result of an attachment export to a caller-supplied destination.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentExport {
+    /// Identifier of the exported attachment.
     pub attachment_id: AttachmentId,
+    /// Filesystem path the bytes were written to.
     pub destination_path: String,
+    /// Number of bytes copied.
     pub bytes_copied: u64,
 }
 

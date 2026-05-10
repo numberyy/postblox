@@ -15,17 +15,29 @@ use sqlx::SqlitePool;
 use crate::db::DbError;
 use crate::models::{Account, AccountId, AuthKind, SyncStatus};
 
+/// Input record for [`create`]: every column needed to insert a new
+/// row into the `accounts` table.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewAccount {
+    /// Primary email address used as the account's login identity.
     pub email: String,
+    /// Optional display name (e.g. `"Alice Example"`).
     pub display_name: Option<String>,
+    /// Authentication mechanism used for IMAP and SMTP.
     pub auth_kind: AuthKind,
+    /// IMAP server hostname.
     pub imap_host: String,
+    /// IMAP server port.
     pub imap_port: i64,
+    /// Whether IMAP uses implicit TLS on connect.
     pub imap_use_tls: bool,
+    /// SMTP submission server hostname.
     pub smtp_host: String,
+    /// SMTP submission server port.
     pub smtp_port: i64,
+    /// Whether SMTP uses implicit TLS on connect.
     pub smtp_use_tls: bool,
+    /// Whether SMTP issues `STARTTLS` after connect.
     pub smtp_starttls: bool,
 }
 

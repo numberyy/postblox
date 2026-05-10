@@ -1,15 +1,29 @@
+//! CRUD for the `folders` table.
+//!
+//! One row per IMAP mailbox node belonging to an account. Tracks the
+//! server's hierarchy delimiter, the inferred [`FolderRole`], and the
+//! UID-state triple (`uid_validity`, `uid_next`, `last_seen_uid`) the
+//! sync layer uses to drive incremental fetches.
+
 use serde::Deserialize;
 use sqlx::SqlitePool;
 
 use crate::db::DbError;
 use crate::models::{AccountId, Folder, FolderId, FolderRole};
 
+/// Input record for [`create`] / [`upsert`]: every column needed to
+/// insert a new row into the `folders` table.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewFolder {
+    /// Account this folder belongs to.
     pub account_id: AccountId,
+    /// Server-reported folder name (e.g. `"INBOX"`).
     pub name: String,
+    /// IMAP hierarchy delimiter reported by the server.
     pub delimiter: String,
+    /// Inferred semantic role for the folder.
     pub role: FolderRole,
+    /// Whether the folder can be `SELECT`ed (versus a container-only node).
     pub selectable: bool,
 }
 

@@ -14,18 +14,30 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 use crate::db::DbError;
 use crate::models::{AccountId, AddressList, Draft, DraftId, FolderId, MessageId};
 
+/// Input record for [`create`]: every column needed to insert a new
+/// row into the `drafts` table.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewDraft {
+    /// Account the draft will be sent from.
     pub account_id: AccountId,
+    /// Local message this draft replies to, if any.
     pub in_reply_to_msg: Option<MessageId>,
+    /// `To` recipients.
     pub to_addrs: AddressList,
+    /// `Cc` recipients.
     pub cc_addrs: AddressList,
+    /// `Bcc` recipients.
     pub bcc_addrs: AddressList,
+    /// `Subject` header value.
     pub subject: Option<String>,
+    /// Plain-text body.
     pub text_body: Option<String>,
+    /// HTML body.
     pub html_body: Option<String>,
+    /// `In-Reply-To` header for outbound threading.
     #[serde(default)]
     pub in_reply_to: Option<String>,
+    /// `References` header for outbound threading.
     #[serde(default)]
     pub references_header: Option<String>,
 }
@@ -66,13 +78,20 @@ pub async fn create(pool: &SqlitePool, new: &NewDraft) -> Result<Draft, DbError>
         .await?)
 }
 
+/// Borrowed patch applied by [`update`] and [`update_tx`].
 #[derive(Debug, Clone)]
 pub struct DraftPatch<'a> {
+    /// New `To` recipients.
     pub to_addrs: &'a AddressList,
+    /// New `Cc` recipients.
     pub cc_addrs: &'a AddressList,
+    /// New `Bcc` recipients.
     pub bcc_addrs: &'a AddressList,
+    /// New `Subject`, or `None` to clear.
     pub subject: Option<&'a str>,
+    /// New plain-text body, or `None` to clear.
     pub text_body: Option<&'a str>,
+    /// New HTML body, or `None` to clear.
     pub html_body: Option<&'a str>,
 }
 

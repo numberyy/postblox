@@ -25,20 +25,26 @@ mod sealed {
 /// is wiped on drop.
 pub type Secret = Zeroizing<String>;
 
+/// Error returned by [`SecretStore`] operations.
 #[derive(Debug, Error)]
 pub enum SecretError {
+    /// Underlying filesystem I/O failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
+    /// Cryptographic operation failed (key derivation or AEAD).
     #[error("crypto: {0}")]
     Crypto(String),
 
+    /// On-disk payload could not be parsed.
     #[error("decode: {0}")]
     Decode(String),
 
+    /// Backend is unavailable or rejected the call (e.g. unconfigured).
     #[error("backend: {0}")]
     Backend(String),
 
+    /// OS keyring backend reported a platform-level error.
     #[error("keyring: {0}")]
     Keyring(#[from] keyring::KeyringSecretError),
 }
@@ -106,11 +112,15 @@ pub trait SecretStore: sealed::Sealed + Send + Sync {
     ///   unavailable (e.g. `UnconfiguredSecretStore`).
     async fn delete(&self, account_id: AccountId) -> Result<(), SecretError>;
 
+    /// Stable reference string the daemon stores in `accounts.secret_ref`
+    /// for the given account. Defaults to the canonical
+    /// `account:<uuid>` form returned by [`account_secret_ref`].
     fn secret_ref(&self, account_id: AccountId) -> String {
         account_secret_ref(account_id)
     }
 }
 
+/// Canonical secret-reference string used by every backend.
 pub fn account_secret_ref(account_id: AccountId) -> String {
     format!("account:{account_id}")
 }

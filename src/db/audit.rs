@@ -16,11 +16,17 @@ use crate::models::AuditEntry;
 
 const COLS: &str = "id, actor, action, target, details, created_at";
 
+/// Input record for [`record`]: every column needed to insert a new
+/// row into the `audit_log` table.
 #[derive(Debug, Clone)]
 pub struct NewAuditEntry {
+    /// Actor identifier (e.g. `"user"`, `"mcp:send"`).
     pub actor: String,
+    /// Logical action name (e.g. `"message.delete"`).
     pub action: String,
+    /// Optional identifier of the entity acted upon.
     pub target: Option<String>,
+    /// JSON detail payload describing the action.
     pub details: Value,
 }
 
