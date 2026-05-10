@@ -343,6 +343,33 @@ pub struct Message {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct MessageSummary {
+    pub id: MessageId,
+    pub account_id: AccountId,
+    pub folder_id: FolderId,
+    pub thread_id: Option<ThreadId>,
+    pub uid: i64,
+    pub message_id_header: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references_header: Option<String>,
+    pub from_addr: String,
+    pub to_addrs: serde_json::Value,
+    pub cc_addrs: serde_json::Value,
+    pub bcc_addrs: serde_json::Value,
+    pub reply_to: Option<String>,
+    pub subject: Option<String>,
+    pub snippet: Option<String>,
+    pub raw_size: i64,
+    pub flags: serde_json::Value,
+    pub internal_date: DateTime<Utc>,
+    pub sent_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+const _: () = assert!(std::mem::size_of::<Message>() <= 640);
+const _: () = assert!(std::mem::size_of::<MessageSummary>() <= 576);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Attachment {
     pub id: AttachmentId,

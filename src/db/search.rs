@@ -7,9 +7,9 @@
 use chrono::{DateTime, Utc};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
-use crate::db::messages::message_cols;
+use crate::db::messages::message_summary_cols;
 use crate::db::DbError;
-use crate::models::{AccountId, FolderId, Message, ThreadId};
+use crate::models::{AccountId, FolderId, MessageSummary, ThreadId};
 
 /// `\Seen` marks a message as read; absence means unread. Stored as a
 /// JSON-array entry in `messages.flags`.
@@ -36,16 +36,16 @@ pub async fn search(
     fts_query: &str,
     limit: i64,
     offset: i64,
-) -> Result<Vec<Message>, DbError> {
+) -> Result<Vec<MessageSummary>, DbError> {
     search_scoped(pool, fts_query, None, limit, offset).await
 }
 
 #[cfg(test)]
-const SEARCH_COLS: &str = message_cols!("m.");
+const SEARCH_COLS: &str = message_summary_cols!("m.");
 
 const SEARCH_BY_ACCOUNT_QUERY: &str = concat!(
     "SELECT ",
-    message_cols!("m."),
+    message_summary_cols!("m."),
     " FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
      WHERE messages_fts MATCH ? AND m.account_id = ? \
      ORDER BY rank LIMIT ? OFFSET ?"
@@ -53,7 +53,7 @@ const SEARCH_BY_ACCOUNT_QUERY: &str = concat!(
 
 const SEARCH_ALL_QUERY: &str = concat!(
     "SELECT ",
-    message_cols!("m."),
+    message_summary_cols!("m."),
     " FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
      WHERE messages_fts MATCH ? \
      ORDER BY rank LIMIT ? OFFSET ?"
@@ -72,7 +72,7 @@ pub async fn search_scoped(
     account_id: Option<AccountId>,
     limit: i64,
     offset: i64,
-) -> Result<Vec<Message>, DbError> {
+) -> Result<Vec<MessageSummary>, DbError> {
     let limit = limit.clamp(1, 500);
     let offset = offset.max(0);
     match account_id {
@@ -127,12 +127,12 @@ pub async fn search_filtered(
     filters: &SearchFilters,
     limit: i64,
     offset: i64,
-) -> Result<Vec<Message>, DbError> {
+) -> Result<Vec<MessageSummary>, DbError> {
     let limit = limit.clamp(1, 500);
     let offset = offset.max(0);
 
     let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT ");
-    qb.push(message_cols!("m."));
+    qb.push(message_summary_cols!("m."));
     qb.push(
         " FROM messages_fts f JOIN messages m ON m.rowid = f.rowid \
          WHERE messages_fts MATCH ",
@@ -193,7 +193,10 @@ pub async fn search_filtered(
     qb.push(" OFFSET ");
     qb.push_bind(offset);
 
-    Ok(qb.build_query_as::<Message>().fetch_all(pool).await?)
+    Ok(qb
+        .build_query_as::<MessageSummary>()
+        .fetch_all(pool)
+        .await?)
 }
 
 /// Wrap a user-supplied substring as a SQL `LIKE` pattern, escaping the
@@ -317,6 +320,40 @@ mod tests {
         let hits = search(&pool, &quote_term("invoice"), 50, 0).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].uid, 1);
+    }
+
+    #[tokio::test]
+    async fn test_search_summary_excludes_bodies_and_maps_fields() {
+        let (pool, a, f) = seed().await;
+        let message = crate::db::messages::create(
+            &pool,
+            &msg(
+                a,
+                f,
+                1,
+                "Quarterly invoice",
+                "confidential body",
+                "alice@acme.com",
+            ),
+        )
+        .await
+        .unwrap();
+
+        let hits = search(&pool, &quote_term("invoice"), 50, 0).await.unwrap();
+
+        assert!(!SEARCH_ALL_QUERY.contains("text_body"));
+        assert!(!SEARCH_ALL_QUERY.contains("html_body"));
+        assert!(!SEARCH_BY_ACCOUNT_QUERY.contains("text_body"));
+        assert!(!SEARCH_BY_ACCOUNT_QUERY.contains("html_body"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, message.id);
+        assert_eq!(hits[0].account_id, a);
+        assert_eq!(hits[0].folder_id, f);
+        assert_eq!(hits[0].uid, 1);
+        assert_eq!(hits[0].from_addr, "alice@acme.com");
+        assert_eq!(hits[0].subject.as_deref(), Some("Quarterly invoice"));
+        assert_eq!(hits[0].snippet.as_deref(), Some("confidential body"));
+        assert_eq!(hits[0].created_at, message.created_at);
     }
 
     #[tokio::test]
@@ -480,8 +517,6 @@ mod tests {
                 "m.reply_to",
                 "m.subject",
                 "m.snippet",
-                "m.text_body",
-                "m.html_body",
                 "m.raw_size",
                 "m.flags",
                 "m.internal_date",
@@ -489,6 +524,8 @@ mod tests {
                 "m.created_at",
             ]
         );
+        assert!(!cols.contains(&"m.text_body"));
+        assert!(!cols.contains(&"m.html_body"));
     }
 
     #[tokio::test]

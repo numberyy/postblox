@@ -2990,6 +2990,126 @@ async fn search_op_filters_by_account_id_when_scoped() {
 }
 
 #[tokio::test]
+async fn message_summary_ops_omit_bodies_but_message_get_includes_them() {
+    let h = make_harness().await;
+    let acc = accounts::create(
+        &h.pool,
+        &accounts::NewAccount {
+            email: "summary@x.com".into(),
+            display_name: None,
+            auth_kind: AuthKind::Password,
+            imap_host: "i".into(),
+            imap_port: 993,
+            imap_use_tls: true,
+            smtp_host: "s".into(),
+            smtp_port: 465,
+            smtp_use_tls: true,
+            smtp_starttls: false,
+        },
+    )
+    .await
+    .unwrap();
+    let folder = folders::upsert(
+        &h.pool,
+        &folders::NewFolder {
+            account_id: acc.id,
+            name: "INBOX".into(),
+            delimiter: "/".into(),
+            role: FolderRole::Inbox,
+            selectable: true,
+        },
+    )
+    .await
+    .unwrap();
+    let thread = threads::create(&h.pool, acc.id, None, Some("Unique Summary Marker"))
+        .await
+        .unwrap();
+    let message = messages::create(
+        &h.pool,
+        &messages::NewMessage {
+            account_id: acc.id,
+            folder_id: folder.id,
+            thread_id: Some(thread.id),
+            uid: 77,
+            message_id_header: Some("<summary@x>".into()),
+            in_reply_to: None,
+            references_header: None,
+            from_addr: "sender@example.com".into(),
+            to_addrs: json!(["reader@example.com"]),
+            cc_addrs: json!([]),
+            bcc_addrs: json!([]),
+            reply_to: None,
+            subject: Some("Unique Summary Marker".into()),
+            snippet: Some("preview only".into()),
+            text_body: Some("full text body must stay detail-only".into()),
+            html_body: Some("<p>full html body must stay detail-only</p>".into()),
+            raw_size: 2048,
+            flags: json!(["\\Seen"]),
+            internal_date: chrono::Utc::now(),
+            sent_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut c = Client::connect(&h.sock).await.unwrap();
+    let list = c
+        .request(
+            "message.list_by_folder",
+            json!({"folder_id": folder.id.to_string(), "limit": 10}),
+        )
+        .await
+        .unwrap();
+    assert!(list.ok, "{:?}", list.error);
+    let list_row = list.data.as_array().unwrap()[0].as_object().unwrap();
+    assert_eq!(list_row["id"], message.id.to_string());
+    assert_eq!(list_row["subject"], "Unique Summary Marker");
+    assert!(!list_row.contains_key("text_body"));
+    assert!(!list_row.contains_key("html_body"));
+
+    let thread_list = c
+        .request(
+            "message.list_by_thread",
+            json!({"thread_id": thread.id.to_string()}),
+        )
+        .await
+        .unwrap();
+    assert!(thread_list.ok, "{:?}", thread_list.error);
+    let thread_row = thread_list.data.as_array().unwrap()[0].as_object().unwrap();
+    assert_eq!(thread_row["id"], message.id.to_string());
+    assert!(!thread_row.contains_key("text_body"));
+    assert!(!thread_row.contains_key("html_body"));
+
+    let search = c.request("search", json!({"q": "unique"})).await.unwrap();
+    assert!(search.ok, "{:?}", search.error);
+    let search_row = search
+        .data
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == message.id.to_string())
+        .unwrap()
+        .as_object()
+        .unwrap();
+    assert!(!search_row.contains_key("text_body"));
+    assert!(!search_row.contains_key("html_body"));
+
+    let detail = c
+        .request("message.get", json!({"id": message.id.to_string()}))
+        .await
+        .unwrap();
+    assert!(detail.ok, "{:?}", detail.error);
+    assert_eq!(
+        detail.data["text_body"],
+        "full text body must stay detail-only"
+    );
+    assert_eq!(
+        detail.data["html_body"],
+        "<p>full html body must stay detail-only</p>"
+    );
+}
+
+#[tokio::test]
 async fn search_op_empty_query_returns_bad_args() {
     let h = make_harness().await;
     let mut c = Client::connect(&h.sock).await.unwrap();

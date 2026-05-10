@@ -5,14 +5,14 @@
 //! that lets the sync layer reconcile remote state. Address lists and
 //! flags are stored as `serde_json::Value` columns so the daemon can
 //! round-trip MIME shapes without a sidecar table. The shared
-//! `message_cols!` macro keeps the `SELECT` projection in one place;
+//! projection macros keep full and summary `SELECT` lists in one place;
 //! all access is via the daemon's [`SqlitePool`].
 
 use chrono::{DateTime, Utc};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 
 use crate::db::DbError;
-use crate::models::{AccountId, FolderId, Message, MessageId, ThreadId};
+use crate::models::{AccountId, FolderId, Message, MessageId, MessageSummary, ThreadId};
 
 #[derive(Debug, Clone)]
 pub struct NewMessage {
@@ -91,12 +91,57 @@ macro_rules! message_cols {
         message_cols!(@columns aliased $prefix)
     };
 }
-pub(crate) use message_cols;
+
+macro_rules! message_summary_cols {
+    (@columns $mode:ident $($prefix:literal)?) => {
+        message_summary_cols!(
+            @$mode
+            $($prefix,)?
+            id,
+            account_id,
+            folder_id,
+            thread_id,
+            uid,
+            message_id_header,
+            in_reply_to,
+            references_header,
+            from_addr,
+            to_addrs,
+            cc_addrs,
+            bcc_addrs,
+            reply_to,
+            subject,
+            snippet,
+            raw_size,
+            flags,
+            internal_date,
+            sent_at,
+            created_at,
+        )
+    };
+    (@unaliased $first:ident $(, $rest:ident)* $(,)?) => {
+        concat!(stringify!($first) $(, ", ", stringify!($rest))*)
+    };
+    (@aliased $prefix:literal, $first:ident $(, $rest:ident)* $(,)?) => {
+        concat!($prefix, stringify!($first) $(, ", ", $prefix, stringify!($rest))*)
+    };
+    () => {
+        message_summary_cols!(@columns unaliased)
+    };
+    ($prefix:literal) => {
+        message_summary_cols!(@columns aliased $prefix)
+    };
+}
+pub(crate) use message_summary_cols;
 
 #[cfg(test)]
 const MESSAGE_COLS: &str = message_cols!();
 #[cfg(test)]
 const MESSAGE_COLS_ALIASED_M: &str = message_cols!("m.");
+#[cfg(test)]
+const MESSAGE_SUMMARY_COLS: &str = message_summary_cols!();
+#[cfg(test)]
+const MESSAGE_SUMMARY_COLS_ALIASED_M: &str = message_summary_cols!("m.");
 
 const INSERT_RETURNING_QUERY: &str = concat!(
     "INSERT INTO messages \
@@ -117,14 +162,14 @@ const GET_BY_FOLDER_UID_QUERY: &str = concat!(
 
 const LIST_BY_FOLDER_QUERY: &str = concat!(
     "SELECT ",
-    message_cols!(),
+    message_summary_cols!(),
     " FROM messages WHERE folder_id = ? \
      ORDER BY internal_date DESC LIMIT ? OFFSET ?"
 );
 
 const LIST_BY_THREAD_QUERY: &str = concat!(
     "SELECT ",
-    message_cols!(),
+    message_summary_cols!(),
     " FROM messages WHERE thread_id = ? ORDER BY internal_date"
 );
 
@@ -218,7 +263,7 @@ pub async fn list_by_folder(
     folder_id: FolderId,
     limit: i64,
     offset: i64,
-) -> Result<Vec<Message>, DbError> {
+) -> Result<Vec<MessageSummary>, DbError> {
     Ok(sqlx::query_as(LIST_BY_FOLDER_QUERY)
         .bind(folder_id)
         .bind(limit.clamp(1, 500))
@@ -235,7 +280,7 @@ pub async fn list_by_folder(
 pub async fn list_by_thread(
     pool: &SqlitePool,
     thread_id: ThreadId,
-) -> Result<Vec<Message>, DbError> {
+) -> Result<Vec<MessageSummary>, DbError> {
     Ok(sqlx::query_as(LIST_BY_THREAD_QUERY)
         .bind(thread_id)
         .fetch_all(pool)
@@ -594,6 +639,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_list_by_folder_summary_excludes_bodies_and_maps_fields() {
+        let c = ctx().await;
+        let mut new = sample(&c, 42);
+        new.html_body = Some("<p>secret html</p>".into());
+        let created = create(&c.pool, &new).await.unwrap();
+
+        let listed = list_by_folder(&c.pool, c.folder_id, 50, 0).await.unwrap();
+
+        assert!(!LIST_BY_FOLDER_QUERY.contains("text_body"));
+        assert!(!LIST_BY_FOLDER_QUERY.contains("html_body"));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, created.id);
+        assert_eq!(listed[0].account_id, c.account_id);
+        assert_eq!(listed[0].folder_id, c.folder_id);
+        assert_eq!(listed[0].thread_id, Some(c.thread_id));
+        assert_eq!(listed[0].uid, 42);
+        assert_eq!(listed[0].message_id_header.as_deref(), Some("<42@x>"));
+        assert_eq!(listed[0].from_addr, "alice@x.com");
+        assert_eq!(listed[0].to_addrs, json!(["bob@x.com"]));
+        assert_eq!(listed[0].subject.as_deref(), Some("subject 42"));
+        assert_eq!(listed[0].snippet.as_deref(), Some("hi"));
+        assert_eq!(listed[0].raw_size, 1234);
+        assert_eq!(listed[0].flags, json!(["\\Seen"]));
+        assert_eq!(listed[0].internal_date, created.internal_date);
+        assert_eq!(listed[0].created_at, created.created_at);
+    }
+
+    #[tokio::test]
     async fn test_list_by_thread_orders_oldest_first() {
         let c = ctx().await;
         let mut a = sample(&c, 1);
@@ -605,6 +678,8 @@ mod tests {
         let listed = list_by_thread(&c.pool, c.thread_id).await.unwrap();
         assert_eq!(listed[0].uid, 1);
         assert_eq!(listed[1].uid, 2);
+        assert!(!LIST_BY_THREAD_QUERY.contains("text_body"));
+        assert!(!LIST_BY_THREAD_QUERY.contains("html_body"));
     }
 
     #[tokio::test]
@@ -881,6 +956,73 @@ mod tests {
                 "m.created_at",
             ]
         );
+    }
+
+    #[test]
+    fn test_message_summary_cols_const_excludes_body_columns() {
+        let cols: Vec<&str> = MESSAGE_SUMMARY_COLS.split(',').map(|s| s.trim()).collect();
+        assert_eq!(
+            cols,
+            vec![
+                "id",
+                "account_id",
+                "folder_id",
+                "thread_id",
+                "uid",
+                "message_id_header",
+                "in_reply_to",
+                "references_header",
+                "from_addr",
+                "to_addrs",
+                "cc_addrs",
+                "bcc_addrs",
+                "reply_to",
+                "subject",
+                "snippet",
+                "raw_size",
+                "flags",
+                "internal_date",
+                "sent_at",
+                "created_at",
+            ]
+        );
+        assert!(!cols.contains(&"text_body"));
+        assert!(!cols.contains(&"html_body"));
+    }
+
+    #[test]
+    fn test_message_summary_cols_const_excludes_body_columns_aliased() {
+        let cols: Vec<&str> = MESSAGE_SUMMARY_COLS_ALIASED_M
+            .split(',')
+            .map(|s| s.trim())
+            .collect();
+        assert_eq!(
+            cols,
+            vec![
+                "m.id",
+                "m.account_id",
+                "m.folder_id",
+                "m.thread_id",
+                "m.uid",
+                "m.message_id_header",
+                "m.in_reply_to",
+                "m.references_header",
+                "m.from_addr",
+                "m.to_addrs",
+                "m.cc_addrs",
+                "m.bcc_addrs",
+                "m.reply_to",
+                "m.subject",
+                "m.snippet",
+                "m.raw_size",
+                "m.flags",
+                "m.internal_date",
+                "m.sent_at",
+                "m.created_at",
+            ]
+        );
+        assert!(!cols.contains(&"m.text_body"));
+        assert!(!cols.contains(&"m.html_body"));
     }
 
     #[tokio::test]

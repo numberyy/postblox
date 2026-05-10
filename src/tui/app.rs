@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::models::{
     Account, AccountId, Attachment, AttachmentId, Draft, DraftId, Folder, FolderId, Message,
-    MessageId, ThreadId,
+    MessageId, MessageSummary, ThreadId,
 };
 
 use super::theme::ThemeName;
@@ -219,6 +219,23 @@ impl From<Message> for MessageItem {
     }
 }
 
+impl From<MessageSummary> for MessageItem {
+    fn from(message: MessageSummary) -> Self {
+        let subject = text_or_default(message.subject.as_deref(), "(no subject)");
+        let snippet = text_or_default(message.snippet.as_deref(), "");
+        let flags = flags_from_value(&message.flags);
+        Self {
+            id: message.id,
+            thread_id: message.thread_id,
+            subject,
+            from: message.from_addr,
+            date: message.internal_date.format("%Y-%m-%d %H:%M").to_string(),
+            snippet,
+            flags,
+        }
+    }
+}
+
 impl MessageItem {
     pub fn has_flag(&self, flag: &str) -> bool {
         has_flag(&self.flags, flag)
@@ -363,6 +380,22 @@ pub struct SearchHit {
 
 impl From<Message> for SearchHit {
     fn from(message: Message) -> Self {
+        let subject = text_or_default(message.subject.as_deref(), "(no subject)");
+        let snippet = text_or_default(message.snippet.as_deref(), "");
+        Self {
+            message_id: message.id,
+            account_id: message.account_id,
+            folder_id: message.folder_id,
+            subject,
+            from: message.from_addr,
+            snippet,
+            date: message.internal_date.format("%Y-%m-%d %H:%M").to_string(),
+        }
+    }
+}
+
+impl From<MessageSummary> for SearchHit {
+    fn from(message: MessageSummary) -> Self {
         let subject = text_or_default(message.subject.as_deref(), "(no subject)");
         let snippet = text_or_default(message.snippet.as_deref(), "");
         Self {

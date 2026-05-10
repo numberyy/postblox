@@ -19,7 +19,7 @@ use crate::ipc::client::{Client, ClientError};
 use crate::ipc::{Event, Response, RpcError, Topic};
 use crate::models::{
     Account, AccountId, Attachment, AttachmentId, Draft, DraftId, Folder, FolderId, Message,
-    MessageId,
+    MessageId, MessageSummary,
 };
 
 use super::app::{
@@ -179,7 +179,7 @@ impl MailboxClient {
                 json!({ "folder_id": folder_id, "limit": 100, "offset": 0 }),
             )
             .await?;
-        let messages: Vec<Message> = decode_response("message.list_by_folder", response)?;
+        let messages: Vec<MessageSummary> = decode_response("message.list_by_folder", response)?;
         Ok(messages.into_iter().map(MessageItem::from).collect())
     }
 
@@ -390,7 +390,7 @@ impl MailboxClient {
         let response = self
             .request("search", search_args(query, account_id))
             .await?;
-        let hits: Vec<Message> = decode_response("search", response)?;
+        let hits: Vec<MessageSummary> = decode_response("search", response)?;
         Ok(hits.into_iter().map(SearchHit::from).collect())
     }
 
@@ -639,7 +639,8 @@ mod tests {
     fn test_decode_response_preserves_server_error() {
         let response = Response::err(1, RpcError::bad_args("missing folder_id"));
 
-        let err = decode_response::<Vec<Message>>("message.list_by_folder", response).unwrap_err();
+        let err =
+            decode_response::<Vec<MessageSummary>>("message.list_by_folder", response).unwrap_err();
 
         assert!(err.to_string().contains("bad_args"));
         assert!(err.to_string().contains("missing folder_id"));
@@ -649,7 +650,8 @@ mod tests {
     fn test_decode_response_reports_malformed_data() {
         let response = Response::ok(1, json!({ "not": "an array" }));
 
-        let err = decode_response::<Vec<Message>>("message.list_by_folder", response).unwrap_err();
+        let err =
+            decode_response::<Vec<MessageSummary>>("message.list_by_folder", response).unwrap_err();
 
         assert!(err.to_string().contains("malformed data"));
     }
