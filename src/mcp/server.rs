@@ -64,7 +64,27 @@ impl From<ClientError> for BridgeError {
 
 #[async_trait::async_trait]
 pub trait DaemonBridge: Send + Sync + 'static {
+    /// Send an IPC request `op` with the given JSON `args` and return the
+    /// daemon's data payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`BridgeError::Daemon`] if the daemon answered with an `error`
+    ///   payload (`{ ok: false, error: { code, message } }`).
+    /// - [`BridgeError::Ipc`] if the underlying socket transport fails
+    ///   (connect, write, framing, or read).
+    /// - [`BridgeError::BadDaemonResponse`] if the daemon returns a
+    ///   well-formed but structurally unexpected payload.
     async fn request(&self, op: &str, args: Value) -> Result<Value, BridgeError>;
+
+    /// Subscribe to a daemon broadcast topic and return a receiver of
+    /// [`Event`]s.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::Ipc`] if the bridge cannot establish or
+    /// register the subscription on the IPC socket.
     async fn subscribe(&self, topic: Topic) -> Result<mpsc::Receiver<Event>, BridgeError>;
 }
 
@@ -74,6 +94,14 @@ pub struct IpcDaemon {
 }
 
 impl IpcDaemon {
+    /// Connect to a running `postbloxd` instance over its Unix domain
+    /// socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BridgeError::Ipc`] if the socket is missing, not a Unix
+    /// socket, or the daemon refuses the handshake — surfaced through
+    /// [`ClientError`](crate::ipc::client::ClientError).
     pub async fn connect(socket_path: PathBuf) -> Result<Self, BridgeError> {
         let client = Client::connect(&socket_path).await?;
         Ok(Self {
@@ -410,11 +438,30 @@ impl McpBridge {
     }
 }
 
+/// Connect to the daemon at `socket_path` and run the MCP bridge over the
+/// process stdin/stdout for the lifetime of the conversation.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`BridgeError::Ipc`] if the initial daemon connect fails (see
+///   [`IpcDaemon::connect`]).
+/// - [`BridgeError::Io`] if reading stdin or writing stdout fails once
+///   the bridge starts running.
+/// - [`BridgeError::Json`] if outbound JSON-RPC frames cannot be encoded.
 pub async fn run_stdio(socket_path: PathBuf) -> Result<(), BridgeError> {
     let daemon = Arc::new(IpcDaemon::connect(socket_path).await?);
     serve_stdio(McpBridge::new(daemon, BridgeConfig::default())).await
 }
 
+/// Run an already-constructed [`McpBridge`] over the process stdin/stdout.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`BridgeError::Io`] if reading stdin or writing stdout fails.
+/// - [`BridgeError::Json`] if outbound JSON-RPC frames cannot be encoded.
+/// - [`BridgeError::Ipc`] if the writer task panics or is cancelled.
 pub async fn serve_stdio(bridge: McpBridge) -> Result<(), BridgeError> {
     serve_stdio_io_with_limit(
         bridge,

@@ -184,12 +184,43 @@ pub enum GoogleOAuthError {
 
 #[async_trait::async_trait]
 pub trait GoogleOAuth: Send + Sync {
+    /// Exchange an authorization `code` for a fresh access/refresh token pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`GoogleOAuthError::InvalidInput`] if `config` is missing
+    ///   `client_id`/`client_secret`/`redirect_uri`, declares a non-Gmail
+    ///   scope, or `code` is empty, or the token endpoint returns a
+    ///   non-positive `expires_in`.
+    /// - [`GoogleOAuthError::HttpStatus`] if Google's token endpoint
+    ///   responds with a non-2xx HTTP status.
+    /// - [`GoogleOAuthError::Http`] if the request itself fails (network,
+    ///   TLS, timeout, JSON decode).
+    /// - [`GoogleOAuthError::MissingRefreshToken`] if the response omits a
+    ///   refresh token (Google requires `prompt=consent` + `access_type=offline`).
     async fn exchange_code(
         &self,
         config: &GoogleOAuthConfig,
         code: &str,
     ) -> Result<GoogleOAuthToken, GoogleOAuthError>;
 
+    /// Exchange an existing refresh token for a fresh access token, reusing
+    /// the prior refresh token if Google omits a new one.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`GoogleOAuthError::InvalidInput`] if `config` is missing
+    ///   `client_id`/`client_secret`/`redirect_uri`, declares a non-Gmail
+    ///   scope, or `token.refresh_token` is empty, or the token endpoint
+    ///   returns a non-positive `expires_in`.
+    /// - [`GoogleOAuthError::HttpStatus`] if Google's token endpoint
+    ///   responds with a non-2xx HTTP status (e.g. revoked refresh token).
+    /// - [`GoogleOAuthError::Http`] if the request itself fails (network,
+    ///   TLS, timeout, JSON decode).
+    /// - [`GoogleOAuthError::MissingRefreshToken`] if neither the response
+    ///   nor the previous token carry a non-empty refresh token.
     async fn refresh_token(
         &self,
         config: &GoogleOAuthConfig,
@@ -350,6 +381,13 @@ fn shared_http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| bounded_http_client(DEFAULT_REQUEST_TIMEOUT))
 }
 
+/// Build the Google OAuth2 authorization URL for the configured Gmail flow.
+///
+/// # Errors
+///
+/// Returns [`GoogleOAuthError::InvalidInput`] if `config.client_id` or
+/// `config.redirect_uri` is empty, `state` is empty, or the configured
+/// scopes are anything other than the single Gmail scope.
 pub fn authorization_url(
     config: &GoogleOAuthConfig,
     state: &str,
@@ -377,6 +415,17 @@ pub fn xoauth2_sasl_string(username: &str, access_token: &str) -> String {
     format!("user={username}\x01auth=Bearer {access_token}\x01\x01")
 }
 
+/// Load a previously stored Gmail OAuth bundle from the [`SecretStore`].
+///
+/// Returns `Ok(None)` if no entry exists for `account_id`.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`GoogleOAuthError::Secret`] if the secret backend cannot read the
+///   stored value (see [`SecretError`]).
+/// - [`GoogleOAuthError::Decode`] if the stored payload is not valid
+///   [`StoredGoogleOAuth`] JSON.
 pub async fn load_stored_oauth(
     secrets: &dyn SecretStore,
     account_id: AccountId,
@@ -389,6 +438,16 @@ pub async fn load_stored_oauth(
         .map_err(|e| GoogleOAuthError::Decode(format!("stored oauth json: {e}")))
 }
 
+/// Persist a Gmail OAuth bundle into the [`SecretStore`], overwriting any
+/// prior value for `account_id`.
+///
+/// # Errors
+///
+/// Returns:
+/// - [`GoogleOAuthError::Decode`] if `stored` cannot be serialised to
+///   JSON (treated as an encoding failure since the type is `Serialize`).
+/// - [`GoogleOAuthError::Secret`] if the secret backend rejects the
+///   write (see [`SecretError`]).
 pub async fn store_stored_oauth(
     secrets: &dyn SecretStore,
     account_id: AccountId,

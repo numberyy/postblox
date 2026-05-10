@@ -150,6 +150,20 @@ pub fn list_tools() -> Value {
     })
 }
 
+/// Validate `arguments` against the input schema of `tool`, returning the
+/// arguments unchanged on success.
+///
+/// # Errors
+///
+/// Returns a human-readable error message (intended to be wrapped in
+/// [`JsonRpcError::invalid_params`](super::protocol::JsonRpcError::invalid_params))
+/// when:
+/// - `arguments` is neither `null` nor a JSON object;
+/// - a field declared in `tool.required` is absent;
+/// - an unknown field is present (no schema entry for `(tool, field)`);
+/// - a field's value does not match its declared kind — wrong primitive
+///   type, malformed UUID, malformed RFC-3339 timestamp, non-string array
+///   element, or integer outside the schema's `[minimum, maximum]` range.
 pub fn validate_arguments(tool: &ToolSpec, arguments: Value) -> Result<Value, String> {
     let object = match arguments {
         Value::Null => Map::new(),

@@ -85,12 +85,35 @@ impl JsonRpcError {
     }
 }
 
+/// Parse a single newline-delimited JSON-RPC frame into an [`Incoming`]
+/// message.
+///
+/// # Errors
+///
+/// Returns a fully serialisable JSON-RPC error response (`Value`) ready
+/// to write back to stdout. The `error.code` field is one of:
+/// - `-32700` ([`JsonRpcError::parse_error`]) if `line` is not valid JSON.
+/// - `-32600` ([`JsonRpcError::invalid_request`]) if the JSON is not a
+///   JSON-RPC 2.0 request, notification, or response (missing/invalid
+///   `jsonrpc`, `method`, or `id` fields).
 pub fn parse_line(line: &str) -> Result<Incoming, Value> {
     let value: Value = serde_json::from_str(line)
         .map_err(|e| error_response(Value::Null, JsonRpcError::parse_error(e.to_string())))?;
     parse_value(value).map_err(|(id, err)| error_response(id.unwrap_or(Value::Null), err))
 }
 
+/// Validate a parsed JSON [`Value`] against the JSON-RPC 2.0 framing rules
+/// and classify it as a request, notification, or response.
+///
+/// # Errors
+///
+/// Returns the offending `id` (if present) plus a [`JsonRpcError`] with
+/// `code = -32600` ([`JsonRpcError::invalid_request`]) when:
+/// - the value is not a JSON object;
+/// - the `jsonrpc` field is missing or not exactly `"2.0"`;
+/// - the `method` field is missing or empty (and the value is not a
+///   response carrying `result`/`error`);
+/// - the `id` field is present but not a string, number, or null.
 pub fn parse_value(value: Value) -> Result<Incoming, (Option<Value>, JsonRpcError)> {
     let object = value.as_object().ok_or_else(|| {
         (
@@ -178,6 +201,13 @@ pub fn initialize_result(client_protocol: Option<&str>) -> Value {
     })
 }
 
+/// Coerce JSON-RPC `params` into an object [`Map`], treating `null` as an
+/// empty object.
+///
+/// # Errors
+///
+/// Returns [`JsonRpcError::invalid_params`] (code `-32602`) if `params` is
+/// neither `null` nor a JSON object (e.g. an array or scalar).
 pub fn object_params(params: Value) -> Result<Map<String, Value>, JsonRpcError> {
     match params {
         Value::Null => Ok(Map::new()),
