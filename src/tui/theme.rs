@@ -1,3 +1,11 @@
+//! TUI colour palettes and the [`ThemeName`] cycle.
+//!
+//! Three built-in themes — `light`, `dark`, `high-contrast` — each
+//! resolved to a flat [`Theme`] of [`ratatui::style::Style`] slots
+//! used by [`super::render`]. [`ThemeName::next`] drives the
+//! `Ctrl-T` rotation and the `:theme` command. Parsing is sync and
+//! infallible per CLAUDE.md's "async is for real I/O only" rule.
+
 use std::fmt;
 use std::str::FromStr;
 

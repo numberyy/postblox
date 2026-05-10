@@ -1,3 +1,13 @@
+//! Attachment persistence, preview, and export helpers.
+//!
+//! Bridges the parser output ([`crate::mail::parser::ParsedAttachment`])
+//! and the on-disk attachment store rooted under the configured data
+//! directory. Persists rows through [`crate::db::attachments`], enforces
+//! the 25 MiB per-attachment limit from `CLAUDE.md`, and renders bounded
+//! UTF-8 previews capped at [`PREVIEW_LIMIT_BYTES`]. Filenames are
+//! sanitised before they touch the filesystem so untrusted MIME headers
+//! cannot escape the storage root.
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};

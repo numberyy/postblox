@@ -1,3 +1,12 @@
+//! Append-only audit log for user/agent actions.
+//!
+//! Records who (`actor` — `user`, `mcp:<tool>`, …) did what
+//! (`action`) to which target, plus a free-form JSON `details`
+//! payload. Pagination uses `(created_at DESC, rowid DESC)` so
+//! same-millisecond inserts still produce a deterministic order.
+//! Writes never block the caller's hot path — the daemon records
+//! after the underlying op succeeds.
+
 use serde_json::Value;
 use sqlx::SqlitePool;
 use uuid::Uuid;

@@ -1,3 +1,12 @@
+//! Pure rendering of [`super::app::AppState`] onto a ratatui [`Frame`].
+//!
+//! The single entry point is [`render`]. It chooses between the normal
+//! four-pane layout (accounts / folders / threads / messages) and the
+//! full-screen composer view, then delegates to per-pane helpers.
+//! Rendering is read-only: it never mutates the app or talks to the
+//! daemon. Theme styling comes from [`super::theme::Theme`]; no colour
+//! literals leak into this module.
+
 use std::fmt::Write as _;
 
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};

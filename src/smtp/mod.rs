@@ -1,3 +1,14 @@
+//! SMTP submission per account.
+//!
+//! [`SmtpSubmitter`] is the trait the daemon depends on; the concrete
+//! [`LettreSmtpSubmitter`] backs it with `lettre`'s async transport.
+//! TLS handling is explicit: implicit TLS via `smtp_use_tls` and
+//! STARTTLS via `smtp_starttls` are mutually exclusive and validated
+//! up-front. Both `AUTH PLAIN`/`LOGIN` and `XOAUTH2` SASL flows are
+//! supported, picked from [`crate::auth::CredentialKind`]. Errors
+//! collapse `lettre` failures into a small [`SmtpError`] taxonomy so
+//! the daemon can decide retry vs. surface-to-user.
+
 use std::time::Duration;
 
 use lettre::address::{Address, Envelope};

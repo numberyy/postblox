@@ -1,3 +1,13 @@
+//! Thin RPC layer between [`super::app::AppState`] and `postbloxd`.
+//!
+//! Wraps [`crate::ipc::client::Client`] to give the TUI strongly
+//! typed list/CRUD/send/search calls plus the response decoders for
+//! reply, forward, and draft fetches. Attachment payloads cross the
+//! socket as base64 (the wire stays JSON-friendly); the typed result
+//! structs decode them on the TUI side. All daemon traffic in the
+//! TUI flows through this module — [`super::app::AppState`] never
+//! touches the socket directly.
+
 use std::path::Path;
 
 use serde::de::DeserializeOwned;

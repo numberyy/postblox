@@ -1,3 +1,13 @@
+//! CRUD for the `drafts` table.
+//!
+//! Backs the TUI composer and the MCP `draft.*` tools: in-progress
+//! messages persist between restarts and can be remote-anchored
+//! (`remote_folder_id` / `remote_uid`) once IMAP `APPEND` succeeds.
+//! `in_reply_to_msg` links replies to the source message; the raw
+//! `In-Reply-To` and `References` headers ride alongside so the
+//! eventual MIME builder can emit RFC 5322 §3.6.4 threading without
+//! re-deriving them.
+
 use serde::Deserialize;
 use sqlx::SqlitePool;
 use uuid::Uuid;

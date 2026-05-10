@@ -1,3 +1,13 @@
+//! Auth state shared by the IMAP and SMTP clients.
+//!
+//! [`MailCredential`] is the single carrier type: either a password or
+//! an OAuth2 bearer token, both wrapped in [`zeroize::Zeroizing`] so
+//! the secret bytes are scrubbed on drop. The hand-rolled `Debug` impl
+//! prints `<redacted>` for the secret payload so tracing and panic
+//! backtraces can never leak credentials. [`CredentialKind`] lets the
+//! transport layer pick the right SASL mechanism (`AUTH PLAIN`/`LOGIN`
+//! vs. `XOAUTH2`) without re-inspecting the secret.
+
 use zeroize::Zeroizing;
 
 use crate::secrets::Secret;

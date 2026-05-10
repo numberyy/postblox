@@ -1,3 +1,12 @@
+//! Parser and tab-completion for the TUI's `:`-mode command bar.
+//!
+//! [`parse_command`] turns a `:`-line into a [`Command`] enum that
+//! [`super::app::AppState`] dispatches. Vim-style aliases (`:w` for
+//! `Write`) keep muscle memory intact. [`COMMAND_NAMES`] is the
+//! sorted source of truth for tab completion — keeping it sorted
+//! gives deterministic match ordering. Errors are flat, lowercase
+//! [`CommandError`] variants per AGENTS.md.
+
 use thiserror::Error;
 
 use super::theme::ThemeName;

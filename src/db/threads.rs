@@ -1,3 +1,12 @@
+//! CRUD for the `threads` table.
+//!
+//! A thread groups messages that share an `external_id` per account
+//! (or are stitched together by [`crate::mail::threading`]). Each row
+//! tracks `last_message_at` and `message_count` so list views can
+//! sort and badge without a join. `(account_id, external_id)` is
+//! unique; inserts collide on that constraint. All access is via the
+//! daemon's shared [`SqlitePool`].
+
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use uuid::Uuid;

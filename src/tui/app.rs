@@ -1,3 +1,17 @@
+//! ratatui-based TUI app state machine that talks to the daemon over
+//! the IPC socket.
+//!
+//! [`AppState`] is the single source of truth for what the four-pane
+//! mail client is showing: accounts, folders, threads, messages, plus
+//! the search/attachments/composer overlays and the toast queue.
+//! Keystrokes drive state transitions, and the command bar (`:`-mode)
+//! routes through [`super::command`]. All daemon I/O — list ops,
+//! write-throughs, event subscriptions — is funnelled through
+//! [`super::ipc`]; this module never touches `tokio::net` directly.
+//! Bounds (`MAX_TOASTS`, `MAX_COMMAND_CHARS`, `MAX_COMPOSE_*`) match
+//! the daemon-side limits so the UI rejects oversize inputs before
+//! round-tripping.
+
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

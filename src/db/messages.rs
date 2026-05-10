@@ -1,3 +1,13 @@
+//! CRUD for the `messages` table.
+//!
+//! Holds the canonical row for every IMAP message the daemon has
+//! seen: headers, snippet, body parts, flags JSON, and the IMAP UID
+//! that lets the sync layer reconcile remote state. Address lists and
+//! flags are stored as `serde_json::Value` columns so the daemon can
+//! round-trip MIME shapes without a sidecar table. The shared
+//! `message_cols!` macro keeps the `SELECT` projection in one place;
+//! all access is via the daemon's [`SqlitePool`].
+
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use uuid::Uuid;

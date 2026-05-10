@@ -1,3 +1,11 @@
+//! CRUD for the `attachments` table.
+//!
+//! One row per MIME part that was persisted to the on-disk store by
+//! [`crate::attachments`]. Stores the originating message id, MIME
+//! metadata, [`AttachmentDisposition`] (inline vs. attachment), and
+//! the absolute `storage_path` the daemon serves bytes from. FK
+//! cascades on `message_id` keep orphan rows out of the table.
+
 use sqlx::SqlitePool;
 use uuid::Uuid;
 

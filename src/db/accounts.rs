@@ -1,3 +1,13 @@
+//! CRUD for the `accounts` table.
+//!
+//! One row per configured mailbox: IMAP/SMTP endpoints, auth kind,
+//! sync status, and the keyring `secret_ref` that points at the
+//! [`crate::secrets::SecretStore`] entry. All functions take a shared
+//! [`SqlitePool`] (the daemon owns the only pool — see CLAUDE.md's
+//! "no module creates its own DB connection" rule) and return
+//! [`crate::models::Account`] rows. Errors funnel through
+//! [`DbError::Sqlx`].
+
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sqlx::SqlitePool;
