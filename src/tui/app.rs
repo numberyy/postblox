@@ -66,14 +66,22 @@ pub(crate) const ICON_ERROR: &str = "!";
 /// account's status icon.
 pub(crate) const MAX_SELECTED_ERROR_CHARS: usize = 60;
 
+/// Pane that currently has keyboard focus in the TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivePane {
+    /// Accounts list (top-left).
     Accounts,
+    /// Folders list for the active account.
     Folders,
+    /// Threads list for the active folder.
     Threads,
+    /// Messages list for the active thread.
     Messages,
+    /// Message detail / preview pane.
     Details,
+    /// Attachments list for the selected message.
     Attachments,
+    /// Quick-search results pane.
     Search,
 }
 
@@ -103,26 +111,40 @@ impl ActivePane {
     }
 }
 
+/// Top-level input mode the TUI is currently in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
+    /// Default mode — vim-style keybindings are active.
     Normal,
+    /// `:`-mode command bar is active.
     Command,
+    /// Composer is open and accepting field edits.
     Compose,
+    /// Composer is prompting for an attachment path.
     ComposeAttachPath,
+    /// Modal asking the user to confirm discarding the current draft.
     ConfirmDiscard,
+    /// Modal asking the user to confirm permanent deletion.
     ConfirmDelete,
+    /// `/`-mode quick-search input is active.
     QuickSearch,
 }
 
 /// Maximum chars accepted in the `/` quick-search input.
 pub(crate) const MAX_SEARCH_CHARS: usize = 256;
 
+/// Field currently focused in the composer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposeField {
+    /// `To:` recipients.
     To,
+    /// `Cc:` recipients.
     Cc,
+    /// `Bcc:` recipients.
     Bcc,
+    /// `Subject:` line.
     Subject,
+    /// Message body.
     Body,
 }
 
@@ -148,11 +170,16 @@ impl ComposeField {
     }
 }
 
+/// Account row rendered in the accounts pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountItem {
+    /// Stable account identifier.
     pub id: AccountId,
+    /// Display label (display name when set, otherwise email).
     pub label: String,
+    /// Account email address.
     pub email: String,
+    /// Wire-format `SyncStatus` string for status badges.
     pub status: String,
 }
 
@@ -174,10 +201,14 @@ impl From<Account> for AccountItem {
     }
 }
 
+/// Folder row rendered in the folders pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderItem {
+    /// Stable folder identifier.
     pub id: FolderId,
+    /// IMAP folder name (e.g. `INBOX`, `Archive`).
     pub name: String,
+    /// Wire-format `FolderRole` string (`inbox`, `archive`, `other`, ...).
     pub role: String,
 }
 
@@ -191,6 +222,7 @@ impl From<Folder> for FolderItem {
     }
 }
 
+/// Message row rendered in the messages pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageItem {
     pub(crate) id: MessageId,
@@ -246,6 +278,7 @@ impl MessageItem {
     }
 }
 
+/// Thread row rendered in the threads pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadItem {
     pub(crate) key: Uuid,
@@ -257,6 +290,7 @@ pub struct ThreadItem {
     pub(crate) flagged: bool,
 }
 
+/// Decoded message body and headers for the detail pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageDetail {
     pub(crate) id: MessageId,
@@ -340,6 +374,7 @@ impl From<crate::tui::ipc::DraftGetResult> for DraftSummary {
     }
 }
 
+/// Draft attachment payload re-shaped for the composer reopen path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftAttachmentBytes {
     pub(crate) filename: String,
@@ -410,6 +445,7 @@ impl From<MessageSummary> for SearchHit {
     }
 }
 
+/// In-progress quick-search query and its current hits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchState {
     pub(crate) query: String,
@@ -438,6 +474,7 @@ impl SearchState {
     }
 }
 
+/// Attachment row rendered in the attachments pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentItem {
     pub(crate) id: AttachmentId,
@@ -463,6 +500,7 @@ impl From<Attachment> for AttachmentItem {
     }
 }
 
+/// Inline-decoded preview of an attachment for the attachments pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentPreviewItem {
     pub(crate) attachment_id: AttachmentId,
@@ -493,6 +531,7 @@ pub struct MessageListSnapshot {
     selected_message: usize,
 }
 
+/// One attachment staged in the composer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerAttachment {
     pub(crate) path: PathBuf,
@@ -501,6 +540,7 @@ pub struct ComposerAttachment {
     pub(crate) content_type: String,
 }
 
+/// Snapshot of the composer state used by save / send / discard paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerDraft {
     pub(crate) account_id: AccountId,
@@ -537,11 +577,27 @@ pub struct ComposerPrefill {
 /// rejected. Surfaces concise toast text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachError {
+    /// Path does not exist on disk.
     NotFound(PathBuf),
+    /// Path exists but is not a regular file.
     NotAFile(PathBuf),
-    TooLarge { size: u64 },
-    AggregateTooLarge { total: u64 },
-    Io { path: PathBuf, message: String },
+    /// File exceeds the per-attachment size cap.
+    TooLarge {
+        /// Size of the rejected attachment in bytes.
+        size: u64,
+    },
+    /// Total attachment size for the draft exceeds the daemon-wide cap.
+    AggregateTooLarge {
+        /// Combined size of all attachments in bytes.
+        total: u64,
+    },
+    /// Reading the file failed for some other reason.
+    Io {
+        /// Path that triggered the failure.
+        path: PathBuf,
+        /// Lowercase IO error message.
+        message: String,
+    },
 }
 
 impl AttachError {
@@ -709,6 +765,7 @@ impl TextLineCache {
     }
 }
 
+/// Mutable composer state owned by [`AppState`] while the composer is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerState {
     pub(crate) account_id: AccountId,
@@ -798,6 +855,7 @@ impl ComposerState {
         state
     }
 
+    /// Attachments staged in the composer in insertion order.
     pub fn attachments(&self) -> &[ComposerAttachment] {
         &self.attachments
     }
@@ -863,6 +921,7 @@ impl ComposerState {
         }
     }
 
+    /// Cursor offset within the currently focused composer field, clamped to its length.
     pub fn focused_cursor(&self) -> usize {
         match self.focused {
             ComposeField::To => self.to_cursor.min(char_count(&self.to)),
@@ -873,6 +932,7 @@ impl ComposerState {
         }
     }
 
+    /// Cached line slices of the composer body for the body renderer.
     pub fn body_lines(&self) -> Vec<&str> {
         self.body_line_cache.lines(&self.body)
     }
@@ -1152,11 +1212,16 @@ impl ComposerState {
     }
 }
 
+/// Severity classification driving toast colour and TTL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToastKind {
+    /// Neutral informational toast.
     Info,
+    /// Confirmation that a user-initiated action succeeded.
     Success,
+    /// Non-fatal warning surfaced to the user.
     Warn,
+    /// Action failed; toast stays visible longer.
     Error,
 }
 
@@ -1169,10 +1234,14 @@ impl ToastKind {
     }
 }
 
+/// Transient bottom-of-screen notification with a finite lifetime.
 #[derive(Debug, Clone)]
 pub struct Toast {
+    /// Monotonic identifier used by the renderer to dedup updates.
     pub id: u64,
+    /// Severity classification.
     pub kind: ToastKind,
+    /// Toast body text.
     pub text: String,
     pub(crate) expires_at: Instant,
 }
@@ -1181,18 +1250,24 @@ pub struct Toast {
 /// the tui module doesn't pull crate-internal types into its surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncStateUi {
+    /// Account is idle — no active sync activity.
     Idle,
+    /// Periodic poll for new mail in progress.
     Polling,
+    /// Full reconcile / sync currently running.
     Syncing,
+    /// Last sync attempt failed; `AccountStatus::last_error` carries detail.
     Error,
 }
 
+/// Per-account sync indicator displayed in the accounts pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountStatus {
     pub(crate) state: SyncStateUi,
     pub(crate) last_error: Option<String>,
 }
 
+/// Top-level TUI state — the single source of truth for the renderer.
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub(crate) active: ActivePane,
@@ -1234,6 +1309,7 @@ pub struct AppState {
     pub(crate) error: Option<String>,
     pub(crate) theme: ThemeName,
     pub(crate) composer: Option<ComposerState>,
+    /// Live toast queue rendered at the bottom of the screen.
     pub toasts: VecDeque<Toast>,
     pub(crate) next_toast_id: u64,
     pub(crate) account_states: HashMap<AccountId, AccountStatus>,
@@ -1392,6 +1468,7 @@ impl AppState {
         }
     }
 
+    /// Replace the accounts list and reset all dependent panes.
     pub fn apply_accounts(&mut self, accounts: Vec<AccountItem>) {
         self.accounts = accounts;
         clamp_index(&mut self.selected_account, self.accounts.len());
@@ -1408,6 +1485,7 @@ impl AppState {
         self.normalize_active_pane();
     }
 
+    /// Replace the folders list for the active account and reset dependent state.
     pub fn apply_folders(&mut self, folders: Vec<FolderItem>) {
         self.folders = folders;
         clamp_index(&mut self.selected_folder, self.folders.len());
@@ -1421,6 +1499,7 @@ impl AppState {
         self.normalize_active_pane();
     }
 
+    /// Replace the messages list for the active thread and clear detail caches.
     pub fn apply_messages(&mut self, messages: Vec<MessageItem>) {
         self.messages = messages;
         clamp_index(&mut self.selected_message, self.messages.len());
@@ -1453,6 +1532,7 @@ impl AppState {
         self.drafts.get(self.selected_draft).map(|d| d.id)
     }
 
+    /// Currently selected draft row, if any.
     pub fn selected_draft(&self) -> Option<&DraftItem> {
         self.drafts.get(self.selected_draft)
     }
@@ -1756,6 +1836,7 @@ impl AppState {
         }
     }
 
+    /// Cached message-detail body lines for the detail pane renderer.
     pub fn detail_lines(&self) -> Vec<String> {
         self.detail_text_cache
             .as_ref()
@@ -2869,6 +2950,8 @@ impl AppState {
         Some(removed.filename)
     }
 
+    /// Move the composer's attachment cursor by `delta` rows. Returns true
+    /// when the selection actually changed.
     pub fn move_compose_attachment_selection(&mut self, delta: isize) -> bool {
         let Some(composer) = &mut self.composer else {
             return false;
@@ -2883,6 +2966,7 @@ impl AppState {
         )
     }
 
+    /// Currently highlighted composer attachment, if any.
     pub fn selected_compose_attachment(&self) -> Option<&ComposerAttachment> {
         let composer = self.composer.as_ref()?;
         composer.attachments.get(composer.selected_attachment)

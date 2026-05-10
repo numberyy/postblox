@@ -35,6 +35,7 @@ pub enum Topic {
 }
 
 impl Topic {
+    /// Wire-format string for this topic (snake-case dotted form).
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::MailNew => "mail.new",
@@ -46,6 +47,7 @@ impl Topic {
         }
     }
 
+    /// Parse a wire-format topic string, returning `None` on unknown input.
     // Kept for the lone caller in `src/ipc/server.rs::handle_subscribe`.
     // Future cleanup: migrate that call site to `s.parse::<Topic>()` and
     // delete this shim.
@@ -88,6 +90,7 @@ impl FromStr for Topic {
 pub const DEFAULT_TOPIC_CAPACITY: usize = 256;
 const _: () = assert!(DEFAULT_TOPIC_CAPACITY == 256);
 
+/// Topic-keyed broadcast hub: one bounded `tokio::sync::broadcast` per topic.
 #[derive(Clone)]
 pub struct Hub {
     inner: Arc<RwLock<HashMap<Topic, broadcast::Sender<Arc<serde_json::Value>>>>>,
@@ -101,10 +104,12 @@ impl Default for Hub {
 }
 
 impl Hub {
+    /// Create an empty hub with [`DEFAULT_TOPIC_CAPACITY`] per topic.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Create an empty hub with a custom per-topic broadcast capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),

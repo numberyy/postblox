@@ -54,8 +54,10 @@ pub trait Dispatcher: Send + Sync + 'static {
     async fn dispatch(&self, op: Op, args: Value) -> Result<Value, RpcError>;
 }
 
+/// Errors surfaced by the IPC server bootstrap path.
 #[derive(Debug, Error)]
 pub enum ServerError {
+    /// IO error binding, accepting on, or removing the socket file.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -83,6 +85,7 @@ pub struct ServerHandle {
 }
 
 impl ServerHandle {
+    /// Path of the Unix-domain socket this server is bound to.
     pub fn path(&self) -> &Path {
         &self.path
     }

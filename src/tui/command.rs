@@ -11,28 +11,50 @@ use thiserror::Error;
 
 use super::theme::ThemeName;
 
+/// Parsed `:`-mode command dispatched by the TUI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// `:sync` — run a one-shot reconcile of the active folder.
     Sync,
+    /// `:start-sync` — start the IMAP IDLE worker for the active folder.
     StartSync,
+    /// `:stop-sync` — stop the IMAP IDLE worker for the active folder.
     StopSync,
+    /// `:seen` — mark the selected message as read.
     Seen,
+    /// `:unseen` — mark the selected message as unread.
     Unseen,
+    /// `:flag` — flag the selected message.
     Flag,
+    /// `:unflag` — clear the flag on the selected message.
     Unflag,
+    /// `:archive` — move the selected message to the archive folder.
     Archive,
+    /// `:delete` — move the selected message to the trash folder.
     Delete,
+    /// `:move <folder>` — move the selected message to `<folder>`.
     Move(String),
+    /// `:theme next` — advance to the next theme in the rotation.
     ThemeNext,
+    /// `:theme <name>` — switch directly to the named theme.
     Theme(ThemeName),
+    /// `:compose` — open a blank composer for a new message.
     Compose,
+    /// `:reply` — open the composer pre-filled with a reply.
     Reply,
+    /// `:reply-all` — open the composer pre-filled with a reply-all.
     ReplyAll,
+    /// `:forward` — open the composer pre-filled with a forward.
     Forward,
+    /// `:goto <folder>` — switch the active folder to `<folder>`.
     Goto(String),
+    /// `:account <name|email>` — switch the active account.
     Account(String),
+    /// `:search [--account <name>] <query>` — run an FTS5 search.
     Search {
+        /// Optional account-name filter (matches display name or email).
         account: Option<String>,
+        /// Free-text query passed to the daemon's search op.
         query: String,
     },
     /// Persist the current composer draft (alias `:w`). Mirrors the
@@ -65,12 +87,16 @@ pub(crate) const COMMAND_NAMES: &[&str] = &[
     "w",
 ];
 
+/// Errors returned by [`parse_command`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CommandError {
+    /// Input had no command name after trimming whitespace.
     #[error("empty command")]
     Empty,
+    /// Leading token is not a recognised command name.
     #[error("unknown command '{0}'")]
     Unknown(String),
+    /// Command name parsed but arguments did not match the expected shape.
     #[error("usage: {0}")]
     Usage(&'static str),
 }

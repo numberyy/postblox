@@ -45,14 +45,19 @@ const PREVIEW_KEY_VIEWPORT_LINES: usize = 6;
 const FORWARD_ATTACHMENT_BATCH_MAX_IDS: usize = 32;
 const FORWARD_ATTACHMENT_BATCH_WIRE_BUDGET: usize = crate::ipc::wire::MAX_FRAME_BYTES - (64 * 1024);
 
+/// Errors surfaced by the TUI runtime.
 #[derive(Debug, Error)]
 pub enum TuiError {
+    /// Could not connect to the daemon socket at the given path.
     #[error("unable to connect to daemon socket {path}: {source}")]
     Connect {
+        /// Socket path the TUI tried to connect to.
         path: PathBuf,
+        /// Underlying IPC client error.
         #[source]
         source: ipc::MailboxError,
     },
+    /// Terminal IO or `crossterm` setup error.
     #[error("terminal error: {0}")]
     Terminal(#[from] std::io::Error),
 }
@@ -496,6 +501,7 @@ async fn run_loop(
     Ok(())
 }
 
+/// Apply an inbound daemon event to the TUI state (toast + redraw triggers).
 pub fn on_daemon_event(app: &mut AppState, event: &crate::ipc::Event) {
     let now = Instant::now();
     match event.topic.as_str() {

@@ -142,30 +142,43 @@ impl DraftAttachmentPayload {
     }
 }
 
+/// Errors surfaced by the TUI's [`MailboxClient`] when talking to the daemon.
 #[derive(Debug, Error)]
 pub enum MailboxError {
+    /// Failed to connect to the daemon's Unix socket.
     #[error("connect failed: {0}")]
     Connect(#[source] ClientError),
+    /// Transport- or framing-level failure while issuing an op.
     #[error("{op} request failed: {source}")]
     Request {
+        /// Name of the IPC op that failed.
         op: &'static str,
+        /// Underlying client error.
         #[source]
         source: ClientError,
     },
+    /// Daemon returned an `RpcError` for the op.
     #[error("{op} failed: {code}: {message}")]
     Server {
+        /// Name of the IPC op that failed.
         op: &'static str,
+        /// `RpcError` code returned by the daemon.
         code: String,
+        /// Human-readable message returned by the daemon.
         message: String,
     },
+    /// Daemon returned a successful response that did not match the expected schema.
     #[error("{op} returned malformed data: {source}")]
     Decode {
+        /// Name of the IPC op whose response failed to decode.
         op: &'static str,
+        /// Underlying serde error.
         #[source]
         source: serde_json::Error,
     },
 }
 
+/// Daemon-facing IPC client used by the TUI for read and write ops.
 pub struct MailboxClient {
     client: Client,
 }

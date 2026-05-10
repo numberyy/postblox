@@ -12,11 +12,15 @@ use std::str::FromStr;
 use ratatui::style::{Color, Modifier, Style};
 use thiserror::Error;
 
+/// Named TUI colour palette.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ThemeName {
+    /// Default light palette with a white background.
     #[default]
     Light,
+    /// Dark palette with a black background.
     Dark,
+    /// High-contrast palette tuned for accessibility.
     HighContrast,
 }
 
@@ -131,8 +135,10 @@ impl FromStr for ThemeName {
     }
 }
 
+/// Errors produced when parsing a [`ThemeName`] from a string.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ThemeParseError {
+    /// The supplied string did not match any known theme name.
     #[error("unknown theme '{0}'")]
     Unknown(String),
 }

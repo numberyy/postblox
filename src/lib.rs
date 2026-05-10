@@ -65,4 +65,5 @@ pub mod prelude;
 pub mod secrets;
 pub mod smtp;
 pub mod sync;
+/// `ratatui` TUI client that talks to the daemon over the Unix socket.
 pub mod tui;
