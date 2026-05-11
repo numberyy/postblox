@@ -303,19 +303,19 @@ fn render_folders(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
     // Surface pending approvals alongside the bare "Folders" title so
     // that a user on Inbox can still see N > 0 without scrolling to
     // the virtual approvals row. The badge is suppressed at N = 0 to
-    // avoid permanent visual noise.
+    // avoid allocating a per-frame title string in the common case.
     let pending = app.approvals_pending_count();
-    let title = if pending > 0 {
-        format!("Folders · Approvals ({pending})")
-    } else {
-        "Folders".to_string()
-    };
-    let list = List::new(items)
-        .block(pane_block_owned(
-            title,
+    let block = if pending > 0 {
+        pane_block_owned(
+            format!("Folders · Approvals ({pending})"),
             app.active == ActivePane::Folders,
             theme,
-        ))
+        )
+    } else {
+        pane_block("Folders", app.active == ActivePane::Folders, theme)
+    };
+    let list = List::new(items)
+        .block(block)
         .style(theme.text)
         .highlight_style(theme.selection)
         .highlight_symbol("› ");

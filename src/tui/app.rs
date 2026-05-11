@@ -34,12 +34,6 @@ pub(crate) const MAX_COMMAND_CHARS: usize = 128;
 pub(crate) const MAX_COMPOSE_HEADER_CHARS: usize = 4096;
 pub(crate) const MAX_COMPOSE_BODY_CHARS: usize = 100_000;
 
-/// Initial-viewport guess used when reopening a draft so the first
-/// paint shows the bottom of a long body even though the cursor lands
-/// at the top. The real viewport height is supplied by the next render
-/// frame which clamps `body_scroll` cleanly.
-pub(crate) const VISIBLE_BODY_FALLBACK_LINES: usize = 8;
-
 /// Maximum bytes for any single compose attachment AND the per-draft
 /// aggregate. Mirrors the daemon-side limit (`CLAUDE.md`: "Attachment
 /// size: max 25 MB") so the TUI can reject before round-tripping.
@@ -3357,16 +3351,12 @@ impl AppState {
         if let Some(body) = draft.text_body {
             state.body = body;
             // Reopened drafts land with the cursor at the body start
-            // but the viewport scrolled to the end, so the user sees
-            // their most recent text without losing the top context.
-            // The first render frame clamps `body_scroll` against the
-            // real viewport height.
+            // but the viewport pre-scrolled toward the bottom, so the
+            // user sees their most recent text. The first render frame
+            // clamps `body_scroll` against the real viewport height.
             state.body_cursor = 0;
             state.refresh_body_line_cache();
-            state.body_scroll = state
-                .body_line_cache
-                .line_count()
-                .saturating_sub(VISIBLE_BODY_FALLBACK_LINES);
+            state.body_scroll = state.body_line_cache.line_count().saturating_sub(1);
         }
         state.in_reply_to_msg = draft.in_reply_to_msg;
         state.in_reply_to = draft.in_reply_to;
@@ -7240,12 +7230,8 @@ mod tests {
         assert_eq!(composer.body_cursor_line_column(), (0, 0));
         assert!(
             composer.body_scroll > 0,
-            "long draft should pre-scroll to the bottom (line_count={line_count}, scroll={})",
+            "long draft should pre-scroll toward the bottom (line_count={line_count}, scroll={})",
             composer.body_scroll
-        );
-        assert_eq!(
-            composer.body_scroll,
-            line_count.saturating_sub(VISIBLE_BODY_FALLBACK_LINES)
         );
     }
 

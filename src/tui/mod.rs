@@ -675,6 +675,9 @@ enum PaneKind {
     /// Conversations pane focused on a regular mail folder.
     ConversationsMail,
     /// Conversations pane focused on a folder whose role is `drafts`.
+    /// Mirrors the help-overlay taxonomy variant
+    /// `super::help::Applicability::ConversationsDrafts`; update both
+    /// when adding pane-scoped behaviour for drafts.
     ConversationsDrafts,
     /// Conversations pane focused on the virtual Approvals folder.
     ConversationsApprovals,

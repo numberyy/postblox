@@ -27,7 +27,9 @@ pub(crate) enum Applicability {
     /// Conversations / thread list (regular mail folders only).
     Conversations,
     /// Conversations pane while the selected folder is a Drafts
-    /// folder (role = `drafts`).
+    /// folder (role = `drafts`). Mirrors the keymap-dispatch variant
+    /// `super::PaneKind::ConversationsDrafts`; update both when
+    /// adding pane-scoped help rows for drafts.
     ConversationsDrafts,
     /// Message detail and preview pane.
     Details,
