@@ -895,7 +895,6 @@ pub struct MessageListSnapshot {
 }
 
 /// Authoritative folder message rows plus cursor hints for a cache restore.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct FolderSnapshot {
     folder_messages: Vec<MessageItem>,
@@ -903,21 +902,21 @@ pub(crate) struct FolderSnapshot {
     selected_message_id: Option<MessageId>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct FolderCacheEntry {
     account_id: AccountId,
     folder_id: FolderId,
     snapshot: FolderSnapshot,
     stored_at: Instant,
+    #[cfg(test)]
     generation: u64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct FolderMessageCache {
     capacity: usize,
     ttl: Duration,
+    #[cfg(test)]
     generation: u64,
     entries: VecDeque<FolderCacheEntry>,
 }
@@ -927,6 +926,7 @@ impl Default for FolderMessageCache {
         Self {
             capacity: FOLDER_CACHE_CAPACITY,
             ttl: FOLDER_CACHE_TTL,
+            #[cfg(test)]
             generation: 0,
             entries: VecDeque::new(),
         }
@@ -971,6 +971,7 @@ impl FolderMessageCache {
             folder_id,
             snapshot,
             stored_at: now,
+            #[cfg(test)]
             generation: self.generation,
         });
     }
@@ -986,6 +987,16 @@ impl FolderMessageCache {
         self.bump_generation();
     }
 
+    fn retain_accounts(&mut self, account_ids: &HashSet<AccountId>) {
+        let before = self.entries.len();
+        self.entries
+            .retain(|entry| account_ids.contains(&entry.account_id));
+        if self.entries.len() != before {
+            self.bump_generation();
+        }
+    }
+
+    #[cfg(test)]
     fn generation(&self, account_id: AccountId, folder_id: FolderId) -> u64 {
         self.entries
             .iter()
@@ -999,9 +1010,13 @@ impl FolderMessageCache {
             .position(|entry| entry.account_id == account_id && entry.folder_id == folder_id)
     }
 
+    #[cfg(test)]
     fn bump_generation(&mut self) {
         self.generation = self.generation.saturating_add(1);
     }
+
+    #[cfg(not(test))]
+    fn bump_generation(&mut self) {}
 }
 
 /// One attachment staged in the composer.
@@ -1989,6 +2004,11 @@ impl AppState {
 
     /// Replace the accounts list and reset all dependent panes.
     pub fn apply_accounts(&mut self, accounts: Vec<AccountItem>) {
+        let account_ids = accounts
+            .iter()
+            .map(|account| account.id)
+            .collect::<HashSet<_>>();
+        self.folder_cache.retain_accounts(&account_ids);
         self.accounts = accounts;
         clamp_index(&mut self.selected_account, self.accounts.len());
         self.folders = virtual_folders();
@@ -2083,7 +2103,6 @@ impl AppState {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn folder_cache_invalidate_folder(
         &mut self,
         account_id: AccountId,
@@ -2092,12 +2111,11 @@ impl AppState {
         self.folder_cache.invalidate_folder(account_id, folder_id);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn folder_cache_invalidate_account(&mut self, account_id: AccountId) {
         self.folder_cache.invalidate_account(account_id);
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn folder_cache_generation(
         &self,
         account_id: AccountId,
@@ -5318,6 +5336,29 @@ mod tests {
         assert!(app.folder_cache_lookup(account_a, folder_a2, now).is_none());
         assert!(app.folder_cache_lookup(account_b, folder_b1, now).is_some());
         assert!(app.folder_cache_lookup(account_b, folder_b2, now).is_some());
+    }
+
+    #[test]
+    fn test_folder_cache_drops_entries_for_removed_account() {
+        let account_a = account("a");
+        let account_a_id = account_a.id;
+        let account_b = account("b");
+        let account_b_id = account_b.id;
+        let folder_a = FolderId::new();
+        let folder_b = FolderId::new();
+        let now = Instant::now();
+        let mut app = AppState::default();
+        store_cache_message(&mut app, account_a_id, folder_a, "a", now);
+        store_cache_message(&mut app, account_b_id, folder_b, "b", now);
+
+        app.apply_accounts(vec![account_b]);
+
+        assert!(app
+            .folder_cache_lookup(account_a_id, folder_a, now)
+            .is_none());
+        assert!(app
+            .folder_cache_lookup(account_b_id, folder_b, now)
+            .is_some());
     }
 
     #[test]

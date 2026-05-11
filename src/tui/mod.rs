@@ -568,6 +568,17 @@ pub fn on_daemon_event(app: &mut AppState, event: &crate::ipc::Event) {
             {
                 let folder_id = event.data.get("folder_id").and_then(parse_folder_id_value);
                 app.push_mail_new_toast(account_id, folder_id, now);
+                invalidate_event_folder_cache(app, account_id, folder_id);
+            }
+        }
+        "mail.updated" => {
+            if let Some(account_id) = event
+                .data
+                .get("account_id")
+                .and_then(parse_account_id_value)
+            {
+                let folder_id = event.data.get("folder_id").and_then(parse_folder_id_value);
+                invalidate_event_folder_cache(app, account_id, folder_id);
             }
         }
         "account.synced" => {
@@ -577,6 +588,7 @@ pub fn on_daemon_event(app: &mut AppState, event: &crate::ipc::Event) {
                 .and_then(parse_account_id_value)
             {
                 app.push_account_synced_toast(account_id, now);
+                app.folder_cache_invalidate_account(account_id);
             }
         }
         "sync.state" => {
@@ -616,6 +628,17 @@ pub fn on_daemon_event(app: &mut AppState, event: &crate::ipc::Event) {
             }
         }
         _ => {}
+    }
+}
+
+fn invalidate_event_folder_cache(
+    app: &mut AppState,
+    account_id: AccountId,
+    folder_id: Option<FolderId>,
+) {
+    match folder_id {
+        Some(folder_id) => app.folder_cache_invalidate_folder(account_id, folder_id),
+        None => app.folder_cache_invalidate_account(account_id),
     }
 }
 
@@ -2189,6 +2212,9 @@ async fn run_folder_write<C: Mailbox + ?Sized>(
 
     match result {
         Ok(_) => {
+            if op == FolderWrite::Sync {
+                invalidate_selected_folder_cache(app);
+            }
             refresh_messages(app, client).await;
             if app.error.is_none() {
                 app.set_status(op.success_status(&folder_name));
@@ -2709,13 +2735,19 @@ fn record_command_run_error(app: &mut AppState, error: CommandRunError) {
 async fn refresh_current_pane<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
     match app.active {
         ActivePane::Accounts => refresh_accounts(app, client).await,
-        ActivePane::Folders => refresh_folders(app, client).await,
+        ActivePane::Folders => {
+            if !app.approvals_folder_selected() && !app.drafts_pane_active() {
+                invalidate_selected_folder_cache(app);
+            }
+            refresh_folders(app, client).await;
+        }
         ActivePane::Conversations => {
             if app.approvals_folder_selected() {
                 refresh_approvals(app, client).await;
             } else if app.drafts_pane_active() {
                 refresh_drafts(app, client).await;
             } else {
+                invalidate_selected_folder_cache(app);
                 refresh_messages(app, client).await;
             }
         }
@@ -2731,6 +2763,14 @@ async fn refresh_current_pane<C: Mailbox + ?Sized>(app: &mut AppState, client: &
         }
         ActivePane::Attachments => refresh_attachments(app, client).await,
         ActivePane::Search => refresh_search(app, client).await,
+    }
+}
+
+fn invalidate_selected_folder_cache(app: &mut AppState) {
+    let account_id = app.selected_account_id();
+    let folder_id = app.selected_folder_id();
+    if let (Some(account_id), Some(folder_id)) = (account_id, folder_id) {
+        app.folder_cache_invalidate_folder(account_id, folder_id);
     }
 }
 
@@ -3747,6 +3787,18 @@ mod tests {
             .count()
     }
 
+    fn store_cache_message(
+        app: &mut AppState,
+        account_id: AccountId,
+        folder_id: FolderId,
+        subject: &str,
+    ) {
+        let mut message = message_item(MessageId::new(), vec!["\\Seen"]);
+        message.subject = subject.into();
+        app.folder_messages = vec![message];
+        app.folder_cache_store(account_id, folder_id, Instant::now());
+    }
+
     fn app_with_threaded_messages() -> AppState {
         let thread_id = ThreadId::new();
         let mut app = AppState::default();
@@ -3757,11 +3809,106 @@ mod tests {
         app
     }
 
+    #[test]
+    fn test_on_daemon_event_mail_new_invalidates_folder_cache() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        store_cache_message(&mut app, account_id, folder_id, "cached");
+        assert!(app
+            .folder_cache_lookup(account_id, folder_id, Instant::now())
+            .is_some());
+        let event = crate::ipc::Event {
+            sub: 1,
+            topic: Topic::MailNew.as_str().into(),
+            data: json!({
+                "account_id": account_id.to_string(),
+                "folder_id": folder_id.to_string(),
+            }),
+        };
+
+        on_daemon_event(&mut app, &event);
+
+        assert!(app
+            .folder_cache_lookup(account_id, folder_id, Instant::now())
+            .is_none());
+    }
+
+    #[test]
+    fn test_on_daemon_event_mail_new_without_folder_invalidates_account_cache() {
+        let account_id = AccountId::new();
+        let folder_a = FolderId::new();
+        let folder_b = FolderId::new();
+        let mut app = app_with_account_folder(account_id, folder_a);
+        store_cache_message(&mut app, account_id, folder_a, "a");
+        store_cache_message(&mut app, account_id, folder_b, "b");
+        let event = crate::ipc::Event {
+            sub: 1,
+            topic: Topic::MailNew.as_str().into(),
+            data: json!({"account_id": account_id.to_string()}),
+        };
+
+        on_daemon_event(&mut app, &event);
+
+        assert!(app
+            .folder_cache_lookup(account_id, folder_a, Instant::now())
+            .is_none());
+        assert!(app
+            .folder_cache_lookup(account_id, folder_b, Instant::now())
+            .is_none());
+    }
+
+    #[test]
+    fn test_on_daemon_event_account_synced_invalidates_account_cache() {
+        let account_a = AccountId::new();
+        let account_b = AccountId::new();
+        let folder_a = FolderId::new();
+        let folder_b = FolderId::new();
+        let mut app = app_with_account_folder(account_a, folder_a);
+        store_cache_message(&mut app, account_a, folder_a, "a");
+        store_cache_message(&mut app, account_b, folder_b, "b");
+        let event = crate::ipc::Event {
+            sub: 1,
+            topic: Topic::AccountSynced.as_str().into(),
+            data: json!({"account_id": account_a.to_string()}),
+        };
+
+        on_daemon_event(&mut app, &event);
+
+        assert!(app
+            .folder_cache_lookup(account_a, folder_a, Instant::now())
+            .is_none());
+        assert!(app
+            .folder_cache_lookup(account_b, folder_b, Instant::now())
+            .is_some());
+    }
+
     #[tokio::test]
     async fn test_execute_command_sync_calls_daemon_and_refreshes_messages() {
         let account_id = AccountId::new();
         let folder_id = FolderId::new();
         let mut app = app_with_account_folder(account_id, folder_id);
+        let mut client = MockMailbox::default();
+
+        execute_command(Command::Sync, &mut app, &mut client).await;
+
+        assert_eq!(
+            client.calls,
+            vec![
+                Call::Sync(account_id, "INBOX".into()),
+                Call::ListMessages(folder_id),
+            ]
+        );
+        assert_eq!(app.status, "Synced INBOX");
+        assert!(app.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_sync_success_invalidates_before_refreshing_messages() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        app.apply_folder_messages(vec![message_item(MessageId::new(), vec!["\\Seen"])]);
         let mut client = MockMailbox::default();
 
         execute_command(Command::Sync, &mut app, &mut client).await;
@@ -3787,8 +3934,8 @@ mod tests {
         execute_command(Command::StartSync, &mut app, &mut client).await;
         execute_command(Command::StopSync, &mut app, &mut client).await;
 
-        // Slice B deliberately reuses the cache on the second refresh;
-        // manual-refresh invalidation belongs to Slice C.
+        // Start/stop sync do not mutate local mail data, so the second
+        // refresh can reuse the cache warmed by start-sync.
         assert_eq!(
             client.calls,
             vec![
@@ -3940,6 +4087,23 @@ mod tests {
         assert_eq!(app.detail.as_ref().map(|detail| detail.id), Some(newer.id));
         assert_eq!(list_messages_call_count(&client.calls, folder_id), 0);
         assert!(client.calls.contains(&Call::GetMessage(newer.id)));
+    }
+
+    #[tokio::test]
+    async fn test_refresh_current_pane_regular_conversations_bypasses_cache() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        app.apply_folder_messages(vec![message_item(MessageId::new(), vec!["\\Seen"])]);
+        app.folder_messages.clear();
+        app.threads.clear();
+        app.messages.clear();
+        app.active = ActivePane::Conversations;
+        let mut client = MockMailbox::default();
+
+        refresh_current_pane(&mut app, &mut client).await;
+
+        assert_eq!(list_messages_call_count(&client.calls, folder_id), 1);
     }
 
     #[tokio::test]
