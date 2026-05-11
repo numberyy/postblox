@@ -215,12 +215,83 @@ async fn count_state(daemon: &Daemon) -> SeededCounts {
     }
 }
 
+async fn assert_pending_approval_targets_resolve(daemon: &Daemon) {
+    let mut client = Client::connect(&daemon.sock).await.expect("connect");
+    let approvals_resp = client
+        .request("mcp.approval.list", json!({"state": "pending"}))
+        .await
+        .expect("mcp.approval.list");
+    assert!(
+        approvals_resp.ok,
+        "mcp.approval.list: {:?}",
+        approvals_resp.error
+    );
+    let approvals = approvals_resp.data.as_array().expect("approval array");
+    let mut saw_message = false;
+    let mut saw_draft = false;
+
+    for approval in approvals {
+        let args = approval
+            .get("args")
+            .and_then(serde_json::Value::as_object)
+            .expect("approval args object");
+        if let Some(message_id) = args.get("message_id").and_then(serde_json::Value::as_str) {
+            let message_resp = client
+                .request("message.get", json!({"id": message_id}))
+                .await
+                .expect("message.get");
+            assert!(message_resp.ok, "message.get: {:?}", message_resp.error);
+            assert!(
+                message_resp
+                    .data
+                    .get("subject")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|subject| subject.contains("Quarterly review draft")),
+                "approval message should resolve to the seeded quarterly review message"
+            );
+            assert!(
+                message_resp
+                    .data
+                    .get("from_addr")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|from| from.contains("@demo.example")),
+                "approval message should expose a meaningful sender"
+            );
+            saw_message = true;
+        }
+        if let Some(draft_id) = args.get("draft_id").and_then(serde_json::Value::as_str) {
+            let draft_resp = client
+                .request("draft.get", json!({"id": draft_id}))
+                .await
+                .expect("draft.get");
+            assert!(draft_resp.ok, "draft.get: {:?}", draft_resp.error);
+            let draft = draft_resp.data.get("draft").expect("draft payload");
+            assert_eq!(
+                draft.get("subject").and_then(serde_json::Value::as_str),
+                Some("Draft: weekly update")
+            );
+            assert!(
+                draft
+                    .get("to_addrs")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|to| !to.is_empty()),
+                "approval draft should expose recipients"
+            );
+            saw_draft = true;
+        }
+    }
+
+    assert!(saw_message, "expected a pending approval with message_id");
+    assert!(saw_draft, "expected a pending approval with draft_id");
+}
+
 #[tokio::test]
 async fn test_demo_seed_populates_minimum_entity_counts() {
     let daemon = Daemon::spawn().await;
     run_seed(&daemon);
 
     let counts = count_state(&daemon).await;
+    assert_pending_approval_targets_resolve(&daemon).await;
     assert!(
         counts.accounts >= 3,
         "expected >=3 accounts, got {}",

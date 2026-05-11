@@ -215,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
     let gates_inserted = seed_gates(&mut client).await?;
     println!("seed: {gates_inserted} gate rules ok");
 
-    let approvals_inserted = seed_approvals(&mut client).await?;
+    let approvals_inserted = seed_approvals(&pool, &mut client, &accounts, &folders).await?;
     println!("seed: {approvals_inserted} pending approvals ok");
 
     Ok(())
@@ -691,19 +691,29 @@ async fn seed_gates(client: &mut Client) -> anyhow::Result<usize> {
     Ok(inserted)
 }
 
-async fn seed_approvals(client: &mut Client) -> anyhow::Result<usize> {
+async fn seed_approvals(
+    pool: &SqlitePool,
+    client: &mut Client,
+    accounts: &[AccountRecord],
+    folders: &[FolderRecord],
+) -> anyhow::Result<usize> {
+    let first_account = accounts
+        .first()
+        .ok_or_else(|| anyhow!("at least one demo account is required for approvals"))?;
+    let delete_message_id = demo_delete_message_id(pool, first_account, folders).await?;
+    let send_draft_id = demo_send_draft_id(client, first_account).await?;
     // Defined inline rather than in a `const` so the `Value` payloads
     // can be expressed via `json!` macros (which are not const).
-    let approvals: &[(&str, Value, &str)] = &[
+    let approvals: Vec<(&str, Value, &str)> = vec![
         (
             "postblox_message_send",
-            json!({"account_id": "00000000-0000-0000-0000-000000000001", "draft_id": "00000000-0000-0000-0000-0000000000aa"}),
-            "demo: send weekly update draft",
+            json!({"account_id": first_account.id.to_string(), "draft_id": send_draft_id}),
+            "demo: auto-allow internal sends",
         ),
         (
             "postblox_message_delete",
-            json!({"message_id": "00000000-0000-0000-0000-0000000000bb"}),
-            "demo: delete promotional thread",
+            json!({"message_id": delete_message_id}),
+            "demo: never auto-delete from Trash",
         ),
     ];
     let listed = client
@@ -714,7 +724,7 @@ async fn seed_approvals(client: &mut Client) -> anyhow::Result<usize> {
     let existing = listed.data.as_array().cloned().unwrap_or_default();
     let mut inserted = 0;
     for (tool, args, summary) in approvals {
-        let already = existing.iter().any(|row| row["summary"] == *summary);
+        let already = existing.iter().any(|row| row["summary"] == summary);
         if already {
             continue;
         }
@@ -734,6 +744,41 @@ async fn seed_approvals(client: &mut Client) -> anyhow::Result<usize> {
         inserted += 1;
     }
     Ok(inserted)
+}
+
+async fn demo_delete_message_id(
+    pool: &SqlitePool,
+    account: &AccountRecord,
+    folders: &[FolderRecord],
+) -> anyhow::Result<String> {
+    let inbox = require_folder(folders, account.id, FolderRole::Inbox)?;
+    let uid = encode_uid(0, 1, 0, "inbox");
+    let message = db::messages::get_by_folder_uid(pool, inbox.id, uid)
+        .await
+        .with_context(|| format!("messages::get_by_folder_uid {} {uid}", inbox.id))?
+        .ok_or_else(|| anyhow!("demo approval target message missing"))?;
+    Ok(message.id.to_string())
+}
+
+async fn demo_send_draft_id(
+    client: &mut Client,
+    account: &AccountRecord,
+) -> anyhow::Result<String> {
+    let listed = client
+        .request("draft.list", json!({"account_id": account.id.to_string()}))
+        .await
+        .with_context(|| format!("draft.list for {}", account.email))?;
+    require_ok(&listed, "draft.list")?;
+    listed
+        .data
+        .as_array()
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row["subject"] == "Draft: weekly update")
+                .and_then(|row| row["id"].as_str())
+        })
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("demo approval target draft missing"))
 }
 
 fn require_folder(

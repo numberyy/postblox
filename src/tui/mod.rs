@@ -6,6 +6,7 @@ pub mod theme;
 
 use std::io::{self, Stdout};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -83,6 +84,10 @@ trait Mailbox {
         &mut self,
         message_id: MessageId,
     ) -> Result<Option<app::MessageDetail>, ipc::MailboxError>;
+    async fn get_message_approval_context(
+        &mut self,
+        message_id: MessageId,
+    ) -> Result<Option<app::ApprovalTargetContext>, ipc::MailboxError>;
     async fn sync_folder(
         &mut self,
         account_id: AccountId,
@@ -145,6 +150,10 @@ trait Mailbox {
         &mut self,
         draft_id: DraftId,
     ) -> Result<Option<app::DraftSummary>, ipc::MailboxError>;
+    async fn get_draft_approval_context(
+        &mut self,
+        draft_id: DraftId,
+    ) -> Result<Option<app::ApprovalTargetContext>, ipc::MailboxError>;
     async fn delete_draft(&mut self, draft_id: DraftId) -> Result<(), ipc::MailboxError>;
     async fn search(
         &mut self,
@@ -221,6 +230,13 @@ impl Mailbox for MailboxClient {
         message_id: MessageId,
     ) -> Result<Option<app::MessageDetail>, ipc::MailboxError> {
         MailboxClient::get_message(self, message_id).await
+    }
+
+    async fn get_message_approval_context(
+        &mut self,
+        message_id: MessageId,
+    ) -> Result<Option<app::ApprovalTargetContext>, ipc::MailboxError> {
+        MailboxClient::get_message_approval_context(self, message_id).await
     }
 
     async fn sync_folder(
@@ -328,6 +344,13 @@ impl Mailbox for MailboxClient {
         draft_id: DraftId,
     ) -> Result<Option<app::DraftSummary>, ipc::MailboxError> {
         MailboxClient::get_draft(self, draft_id).await
+    }
+
+    async fn get_draft_approval_context(
+        &mut self,
+        draft_id: DraftId,
+    ) -> Result<Option<app::ApprovalTargetContext>, ipc::MailboxError> {
+        MailboxClient::get_draft_approval_context(self, draft_id).await
     }
 
     async fn delete_draft(&mut self, draft_id: DraftId) -> Result<(), ipc::MailboxError> {
@@ -508,7 +531,7 @@ async fn run_loop(
             event = client.next_event() => {
                 match event {
                     Ok(event) => {
-                        on_daemon_event(&mut app, &event);
+                        on_daemon_event_with_context(&mut app, &mut client, &event).await;
                         false
                     }
                     Err(error) => {
@@ -593,6 +616,24 @@ pub fn on_daemon_event(app: &mut AppState, event: &crate::ipc::Event) {
         }
         _ => {}
     }
+}
+
+async fn on_daemon_event_with_context<C: Mailbox + ?Sized>(
+    app: &mut AppState,
+    client: &mut C,
+    event: &crate::ipc::Event,
+) {
+    if event.topic == Topic::McpApprovalRequested.as_str() {
+        if let Some(approval) =
+            app::ApprovalItem::from_requested_event(&event.data, chrono::Utc::now())
+        {
+            let approval = enrich_approval(approval, client).await;
+            app.merge_approval_request(approval);
+        }
+        return;
+    }
+
+    on_daemon_event(app, event);
 }
 
 fn parse_uuid_value(value: &serde_json::Value) -> Option<Uuid> {
@@ -2433,11 +2474,136 @@ async fn refresh_search<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C)
     submit_search(app, client, query, scope).await;
 }
 
+async fn enrich_approvals<C: Mailbox + ?Sized>(
+    approvals: Vec<app::ApprovalItem>,
+    client: &mut C,
+) -> Vec<app::ApprovalItem> {
+    let mut enriched = Vec::with_capacity(approvals.len());
+    for approval in approvals {
+        enriched.push(enrich_approval(approval, client).await);
+    }
+    enriched
+}
+
+async fn enrich_approval<C: Mailbox + ?Sized>(
+    mut approval: app::ApprovalItem,
+    client: &mut C,
+) -> app::ApprovalItem {
+    let Some(args) = approval.args_value() else {
+        return approval;
+    };
+
+    if let Some(context) = resolve_attachment_context(&approval, &args, client).await {
+        approval.set_target_context(context);
+        return approval;
+    }
+    if let Some(context) = resolve_message_context(&approval, &args, client).await {
+        approval.set_target_context(context);
+        return approval;
+    }
+    if let Some(context) = resolve_draft_context(&approval, &args, client).await {
+        approval.set_target_context(context);
+    }
+    approval
+}
+
+async fn resolve_attachment_context<C: Mailbox + ?Sized>(
+    approval: &app::ApprovalItem,
+    args: &serde_json::Value,
+    client: &mut C,
+) -> Option<app::ApprovalTargetContext> {
+    let attachment_id = approval_attachment_id(approval, args)?;
+    let message_id = approval_arg_id::<MessageId>(args, "message_id")?;
+    match client.list_attachments(message_id).await {
+        Ok(attachments) => attachments
+            .iter()
+            .find(|attachment| attachment.id == attachment_id)
+            .map(app::ApprovalTargetContext::from_attachment),
+        Err(error) => {
+            // best-effort context enrichment: keep the approval row if one target lookup fails.
+            tracing::debug!(%error, %attachment_id, "approval attachment context lookup failed");
+            None
+        }
+    }
+}
+
+async fn resolve_message_context<C: Mailbox + ?Sized>(
+    approval: &app::ApprovalItem,
+    args: &serde_json::Value,
+    client: &mut C,
+) -> Option<app::ApprovalTargetContext> {
+    let message_id = approval_message_id(approval, args)?;
+    match client.get_message_approval_context(message_id).await {
+        Ok(context) => context,
+        Err(error) => {
+            // best-effort context enrichment: keep the approval row if one target lookup fails.
+            tracing::debug!(%error, %message_id, "approval message context lookup failed");
+            None
+        }
+    }
+}
+
+async fn resolve_draft_context<C: Mailbox + ?Sized>(
+    approval: &app::ApprovalItem,
+    args: &serde_json::Value,
+    client: &mut C,
+) -> Option<app::ApprovalTargetContext> {
+    let draft_id = approval_draft_id(approval, args)?;
+    match client.get_draft_approval_context(draft_id).await {
+        Ok(context) => context,
+        Err(error) => {
+            // best-effort context enrichment: keep the approval row if one target lookup fails.
+            tracing::debug!(%error, %draft_id, "approval draft context lookup failed");
+            None
+        }
+    }
+}
+
+fn approval_message_id(
+    approval: &app::ApprovalItem,
+    args: &serde_json::Value,
+) -> Option<MessageId> {
+    approval_arg_id(args, "message_id").or_else(|| match approval.tool.as_str() {
+        "postblox_message_delete"
+        | "postblox_message_get"
+        | "postblox_message_move"
+        | "postblox_message_set_flags" => approval_arg_id(args, "id"),
+        _ => None,
+    })
+}
+
+fn approval_draft_id(approval: &app::ApprovalItem, args: &serde_json::Value) -> Option<DraftId> {
+    approval_arg_id(args, "draft_id").or_else(|| match approval.tool.as_str() {
+        "postblox_draft_delete" | "postblox_draft_update" => approval_arg_id(args, "id"),
+        _ => None,
+    })
+}
+
+fn approval_attachment_id(
+    approval: &app::ApprovalItem,
+    args: &serde_json::Value,
+) -> Option<AttachmentId> {
+    approval_arg_id(args, "attachment_id").or_else(|| match approval.tool.as_str() {
+        tool if tool.starts_with("postblox_attachment_") => approval_arg_id(args, "id"),
+        _ => None,
+    })
+}
+
+fn approval_arg_id<T>(args: &serde_json::Value, key: &str) -> Option<T>
+where
+    T: FromStr,
+{
+    args.get(key)
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| value.parse::<T>().ok())
+}
+
 async fn refresh_approvals<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
     app.approvals.pending = true;
     app.set_status("Loading approvals");
     match client.list_pending_approvals().await {
         Ok(approvals) => {
+            let approvals = enrich_approvals(approvals, client).await;
             let count = approvals.len();
             app.clear_error();
             app.apply_approvals(approvals);
@@ -2710,6 +2876,7 @@ mod tests {
         MoveMessage(MessageId, String),
         ListMessages(FolderId),
         GetMessage(MessageId),
+        GetMessageApprovalContext(MessageId),
         ListAttachments(MessageId),
         PreviewAttachment(AttachmentId),
         ExportAttachment(AttachmentId, PathBuf),
@@ -2725,6 +2892,7 @@ mod tests {
         FetchAttachmentsForForward(MessageId, Vec<AttachmentId>),
         ListDrafts(AccountId),
         GetDraft(DraftId),
+        GetDraftApprovalContext(DraftId),
         DeleteDraft(DraftId),
     }
 
@@ -2733,6 +2901,7 @@ mod tests {
         calls: Vec<Call>,
         messages: Vec<MessageItem>,
         detail: Option<MessageDetail>,
+        approval_message_context: Option<app::ApprovalTargetContext>,
         attachments: Vec<app::AttachmentItem>,
         preview: Option<app::AttachmentPreviewItem>,
         draft_id: Option<DraftId>,
@@ -2745,6 +2914,7 @@ mod tests {
         forward_attachment_batch: Option<ipc::ForwardAttachmentBatch>,
         drafts: Vec<app::DraftItem>,
         draft_summary: Option<app::DraftSummary>,
+        approval_draft_context: Option<app::ApprovalTargetContext>,
         fail_sync: bool,
         fail_set_flags: bool,
         fail_archive: bool,
@@ -2761,6 +2931,8 @@ mod tests {
         fail_fetch_attachments_for_forward: bool,
         fail_list_drafts: bool,
         fail_get_draft: bool,
+        fail_get_draft_approval_context: bool,
+        fail_get_message_approval_context: bool,
         fail_delete_draft: bool,
     }
 
@@ -2791,6 +2963,18 @@ mod tests {
         ) -> Result<Option<MessageDetail>, ipc::MailboxError> {
             self.calls.push(Call::GetMessage(message_id));
             Ok(self.detail.clone())
+        }
+
+        async fn get_message_approval_context(
+            &mut self,
+            message_id: MessageId,
+        ) -> Result<Option<app::ApprovalTargetContext>, ipc::MailboxError> {
+            self.calls.push(Call::GetMessageApprovalContext(message_id));
+            if self.fail_get_message_approval_context {
+                Err(server_error("message.get"))
+            } else {
+                Ok(self.approval_message_context.clone())
+            }
         }
 
         async fn sync_folder(
@@ -3108,6 +3292,18 @@ mod tests {
             }
         }
 
+        async fn get_draft_approval_context(
+            &mut self,
+            draft_id: DraftId,
+        ) -> Result<Option<app::ApprovalTargetContext>, ipc::MailboxError> {
+            self.calls.push(Call::GetDraftApprovalContext(draft_id));
+            if self.fail_get_draft_approval_context {
+                Err(server_error("draft.get"))
+            } else {
+                Ok(self.approval_draft_context.clone())
+            }
+        }
+
         async fn delete_draft(&mut self, draft_id: DraftId) -> Result<(), ipc::MailboxError> {
             self.calls.push(Call::DeleteDraft(draft_id));
             if self.fail_delete_draft {
@@ -3221,6 +3417,7 @@ mod tests {
             args_summary: "subject=Hello".into(),
             args_json: "{\"subject\":\"Hello\"}".into(),
             summary: Some("send draft".into()),
+            target: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -3596,6 +3793,126 @@ mod tests {
             ]
         );
         assert!(app.approvals.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_approvals_enriches_message_target_context() {
+        let approval_id = Uuid::new_v4();
+        let message_id = MessageId::new();
+        let args = json!({ "message_id": message_id.to_string() });
+        let mut app = AppState::default();
+        app.select_approvals_folder();
+        let mut client = MockMailbox {
+            approvals: vec![app::ApprovalItem {
+                id: approval_id,
+                tool: "postblox_message_delete".into(),
+                args_summary: app::compact_args_summary(&args),
+                args_json: serde_json::to_string_pretty(&args).unwrap(),
+                summary: Some("demo: never auto-delete from Trash".into()),
+                target: None,
+                created_at: chrono::Utc::now(),
+            }],
+            approval_message_context: app::ApprovalTargetContext::from_args(&json!({
+                "subject": "Quarterly review draft",
+                "from": "contact-0-1@demo.example",
+                "to": "alice@demo.local",
+                "snippet": "Please review.",
+            })),
+            ..Default::default()
+        };
+
+        refresh_approvals(&mut app, &mut client).await;
+
+        assert_eq!(
+            client.calls,
+            vec![
+                Call::ListPendingApprovals,
+                Call::GetMessageApprovalContext(message_id),
+            ]
+        );
+        let row = app
+            .selected_approval()
+            .and_then(app::ApprovalItem::row_summary)
+            .unwrap();
+        assert!(row.contains("\"Quarterly review draft\" from contact-0-1@demo.example"));
+        assert!(!row.contains("message=…"));
+    }
+
+    #[tokio::test]
+    async fn test_refresh_approvals_enriches_draft_target_context() {
+        let approval_id = Uuid::new_v4();
+        let draft_id = DraftId::new();
+        let args = json!({ "draft_id": draft_id.to_string() });
+        let mut app = AppState::default();
+        app.select_approvals_folder();
+        let mut client = MockMailbox {
+            approvals: vec![app::ApprovalItem {
+                id: approval_id,
+                tool: "postblox_message_send".into(),
+                args_summary: app::compact_args_summary(&args),
+                args_json: serde_json::to_string_pretty(&args).unwrap(),
+                summary: Some("demo: auto-allow internal sends".into()),
+                target: None,
+                created_at: chrono::Utc::now(),
+            }],
+            approval_draft_context: app::ApprovalTargetContext::from_args(&json!({
+                "subject": "Draft: weekly update",
+                "to_addrs": ["partner@demo.example"],
+                "text_body": "Quick weekly summary draft.",
+            })),
+            ..Default::default()
+        };
+
+        refresh_approvals(&mut app, &mut client).await;
+
+        assert_eq!(
+            client.calls,
+            vec![
+                Call::ListPendingApprovals,
+                Call::GetDraftApprovalContext(draft_id),
+            ]
+        );
+        let row = app
+            .selected_approval()
+            .and_then(app::ApprovalItem::row_summary)
+            .unwrap();
+        assert!(row.contains("to=partner@demo.example subject=\"Draft: weekly update\""));
+        assert!(!row.contains("draft=…"));
+    }
+
+    #[tokio::test]
+    async fn test_live_approval_requested_event_enriches_context() {
+        let approval_id = Uuid::new_v4();
+        let message_id = MessageId::new();
+        let mut app = AppState::default();
+        let mut client = MockMailbox {
+            approval_message_context: app::ApprovalTargetContext::from_args(&json!({
+                "subject": "Quarterly review draft",
+                "from": "contact-0-1@demo.example",
+            })),
+            ..Default::default()
+        };
+        let requested = crate::ipc::Event {
+            sub: 1,
+            topic: Topic::McpApprovalRequested.as_str().into(),
+            data: json!({
+                "approval_id": approval_id,
+                "tool": "postblox_message_delete",
+                "args": {"message_id": message_id.to_string()},
+                "summary": "demo: never auto-delete from Trash",
+                "state": "pending",
+            }),
+        };
+
+        on_daemon_event_with_context(&mut app, &mut client, &requested).await;
+
+        assert_eq!(
+            client.calls,
+            vec![Call::GetMessageApprovalContext(message_id)]
+        );
+        let row = app.approvals.items[0].row_summary().unwrap();
+        assert!(row.contains("\"Quarterly review draft\" from contact-0-1@demo.example"));
+        assert!(!row.contains("message=…"));
     }
 
     #[test]

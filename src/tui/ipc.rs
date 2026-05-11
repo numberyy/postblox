@@ -23,8 +23,8 @@ use crate::models::{
 };
 
 use super::app::{
-    AccountItem, ApprovalItem, AttachmentItem, AttachmentPreviewItem, ComposerDraft, DraftItem,
-    DraftSummary, FolderItem, MessageDetail, MessageItem, SearchHit,
+    AccountItem, ApprovalItem, ApprovalTargetContext, AttachmentItem, AttachmentPreviewItem,
+    ComposerDraft, DraftItem, DraftSummary, FolderItem, MessageDetail, MessageItem, SearchHit,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -280,6 +280,26 @@ impl MailboxClient {
             .await?;
         let message: Option<Message> = decode_response("message.get", response)?;
         Ok(message.map(MessageDetail::from))
+    }
+
+    /// Fetch message target metadata for approval rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as `Option<Message>`.
+    pub(crate) async fn get_message_approval_context(
+        &mut self,
+        message_id: MessageId,
+    ) -> Result<Option<ApprovalTargetContext>, MailboxError> {
+        let response = self
+            .request("message.get", json!({ "id": message_id }))
+            .await?;
+        let message: Option<Message> = decode_response("message.get", response)?;
+        Ok(message.as_ref().map(ApprovalTargetContext::from_message))
     }
 
     /// One-shot sync of `folder_name` against the upstream IMAP server.
@@ -612,6 +632,26 @@ impl MailboxClient {
         let response = self.request("draft.get", json!({ "id": draft_id })).await?;
         let payload: Option<DraftGetResult> = decode_response("draft.get", response)?;
         Ok(payload.map(DraftSummary::from))
+    }
+
+    /// Fetch draft target metadata for approval rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as `Option<DraftGetResult>`.
+    pub(crate) async fn get_draft_approval_context(
+        &mut self,
+        draft_id: DraftId,
+    ) -> Result<Option<ApprovalTargetContext>, MailboxError> {
+        let response = self.request("draft.get", json!({ "id": draft_id })).await?;
+        let payload: Option<DraftGetResult> = decode_response("draft.get", response)?;
+        Ok(payload
+            .as_ref()
+            .map(|payload| ApprovalTargetContext::from_draft(&payload.draft)))
     }
 
     /// Permanently delete `draft_id`.

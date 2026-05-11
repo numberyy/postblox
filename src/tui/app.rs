@@ -581,6 +581,147 @@ impl SearchState {
     }
 }
 
+/// Human-readable target metadata for a pending approval request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ApprovalTargetContext {
+    target: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    snippet: Option<String>,
+    attachment: Option<String>,
+}
+
+impl ApprovalTargetContext {
+    /// Build target metadata from direct approval arguments when they
+    /// already contain human-readable fields.
+    pub(crate) fn from_args(args: &Value) -> Option<Self> {
+        let subject = arg_text(args, "subject");
+        let folder = arg_text(args, "folder").or_else(|| arg_text(args, "folder_name"));
+        let filename = arg_text(args, "filename");
+        let target = subject
+            .or_else(|| filename.clone())
+            .or_else(|| folder.map(|name| format!("folder {name}")));
+        let from = arg_text(args, "from").or_else(|| arg_text(args, "from_addr"));
+        let to = arg_text(args, "to").or_else(|| arg_text(args, "to_addrs"));
+        let snippet = arg_text(args, "snippet")
+            .or_else(|| arg_text(args, "body"))
+            .or_else(|| arg_text(args, "text_body"))
+            .map(|value| first_chars_one_line(&value, 96));
+        let attachment = filename.map(|name| match arg_text(args, "content_type") {
+            Some(content_type) => format!("{name} ({content_type})"),
+            None => name,
+        });
+        Self::non_empty(Self {
+            target,
+            from,
+            to,
+            snippet,
+            attachment,
+        })
+    }
+
+    /// Build target metadata from a fetched message row.
+    pub(crate) fn from_message(message: &Message) -> Self {
+        Self {
+            target: Some(text_or_default(message.subject.as_deref(), "(no subject)")),
+            from: Some(message.from_addr.clone()),
+            to: Some(addrs_label(&message.to_addrs)),
+            snippet: message
+                .snippet
+                .as_deref()
+                .map(|snippet| first_chars_one_line(snippet, 96))
+                .filter(|snippet| !snippet.is_empty()),
+            attachment: None,
+        }
+    }
+
+    /// Build target metadata from a fetched draft row.
+    pub(crate) fn from_draft(draft: &Draft) -> Self {
+        Self {
+            target: Some(text_or_default(draft.subject.as_deref(), "(no subject)")),
+            from: None,
+            to: Some(addrs_label(&draft.to_addrs)),
+            snippet: draft
+                .text_body
+                .as_deref()
+                .map(|body| first_line_or_default(Some(body)))
+                .filter(|snippet| !snippet.is_empty()),
+            attachment: None,
+        }
+    }
+
+    /// Build target metadata from an attachment listed for its parent message.
+    pub(crate) fn from_attachment(attachment: &AttachmentItem) -> Self {
+        Self {
+            target: Some(attachment.filename.clone()),
+            from: None,
+            to: None,
+            snippet: None,
+            attachment: Some(format!(
+                "{} ({})",
+                attachment.filename, attachment.content_type
+            )),
+        }
+    }
+
+    /// Primary row text for this target.
+    pub(crate) fn row_summary(&self) -> Option<String> {
+        if let Some(attachment) = self.attachment.as_deref() {
+            return Some(format!("attachment=\"{}\"", escape_quotes(attachment)));
+        }
+        match (
+            self.target.as_deref(),
+            self.from.as_deref(),
+            self.to.as_deref(),
+        ) {
+            (Some(target), Some(from), _) => {
+                Some(format!("\"{}\" from {from}", quote_inner(target)))
+            }
+            (Some(target), _, Some(to)) => {
+                Some(format!("to={to} subject=\"{}\"", quote_inner(target)))
+            }
+            (Some(target), _, _) => Some(format!("\"{}\"", quote_inner(target))),
+            (None, _, Some(to)) => Some(format!("to={to}")),
+            _ => None,
+        }
+    }
+
+    /// Detail-pane lines describing this target.
+    pub(crate) fn detail_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(target) = self.target.as_deref() {
+            lines.push(format!("Target: \"{}\"", quote_inner(target)));
+        } else if let Some(attachment) = self.attachment.as_deref() {
+            lines.push(format!(
+                "Target: attachment \"{}\"",
+                quote_inner(attachment)
+            ));
+        }
+        if let Some(from) = self.from.as_deref() {
+            lines.push(format!("From: {from}"));
+        }
+        if let Some(to) = self.to.as_deref() {
+            lines.push(format!("To: {to}"));
+        }
+        if let Some(snippet) = self.snippet.as_deref() {
+            lines.push(format!("Snippet: {snippet}"));
+        }
+        if let Some(attachment) = self.attachment.as_deref() {
+            lines.push(format!("Attachment: {attachment}"));
+        }
+        lines
+    }
+
+    fn non_empty(context: Self) -> Option<Self> {
+        (context.target.is_some()
+            || context.from.is_some()
+            || context.to.is_some()
+            || context.snippet.is_some()
+            || context.attachment.is_some())
+        .then_some(context)
+    }
+}
+
 /// One pending MCP approval row rendered in the virtual approvals folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalItem {
@@ -589,6 +730,7 @@ pub struct ApprovalItem {
     pub(crate) args_summary: String,
     pub(crate) args_json: String,
     pub(crate) summary: Option<String>,
+    pub(crate) target: Option<ApprovalTargetContext>,
     pub(crate) created_at: DateTime<Utc>,
 }
 
@@ -600,6 +742,7 @@ impl From<McpApproval> for ApprovalItem {
             args_summary: compact_args_summary(&approval.args),
             args_json: approval_args_json(&approval.args),
             summary: optional_summary_label(approval.summary),
+            target: ApprovalTargetContext::from_args(&approval.args),
             created_at: approval.created_at,
         }
     }
@@ -609,6 +752,45 @@ impl ApprovalItem {
     /// Human-readable label for the internal MCP tool name.
     pub(crate) fn tool_label(&self) -> String {
         tool_label(&self.tool)
+    }
+
+    /// Parsed raw argument payload, used for best-effort target enrichment.
+    pub(crate) fn args_value(&self) -> Option<Value> {
+        serde_json::from_str(&self.args_json).ok()
+    }
+
+    /// Attach human-readable target metadata to this approval row.
+    pub(crate) fn set_target_context(&mut self, target: ApprovalTargetContext) {
+        self.target = Some(target);
+    }
+
+    /// Row subtitle combining the target context with the policy summary.
+    pub(crate) fn row_summary(&self) -> Option<String> {
+        let target = self
+            .target
+            .as_ref()
+            .and_then(ApprovalTargetContext::row_summary)
+            .or_else(|| {
+                let args = self.args_summary.trim();
+                (!args.is_empty()).then(|| args.to_string())
+            });
+        combine_target_and_summary(target, self.summary.as_deref())
+    }
+
+    /// Detail-pane target lines, falling back to the compact argument summary.
+    pub(crate) fn target_detail_lines(&self) -> Vec<String> {
+        if let Some(target) = self.target.as_ref() {
+            let lines = target.detail_lines();
+            if !lines.is_empty() {
+                return lines;
+            }
+        }
+        let args = self.args_summary.trim();
+        if args.is_empty() {
+            Vec::new()
+        } else {
+            vec![format!("Target: {args}")]
+        }
     }
 
     /// Build a pending approval row from a live `mcp.approval_requested`
@@ -645,6 +827,7 @@ impl ApprovalItem {
             args_summary,
             args_json,
             summary,
+            target: ApprovalTargetContext::from_args(&args),
             created_at: now,
         })
     }
@@ -3707,12 +3890,14 @@ fn text_or_default(value: Option<&str>, default: &str) -> String {
 pub(crate) fn compact_args_summary(args: &Value) -> String {
     const PREFERRED_KEYS: &[&str] = &[
         "to",
+        "to_addrs",
         "subject",
         "folder",
         "folder_name",
         "message_id",
         "draft_id",
         "attachment_id",
+        "id",
     ];
     if let Value::Object(map) = args {
         if map.is_empty() {
@@ -3741,6 +3926,7 @@ fn approval_args_json(args: &Value) -> String {
 
 fn compact_arg_label(key: &str) -> &str {
     match key {
+        "to_addrs" => "to",
         "message_id" => "message",
         "draft_id" => "draft",
         "attachment_id" => "attachment",
@@ -3805,6 +3991,46 @@ fn shorten_uuid_like_in_text(value: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+fn arg_text(args: &Value, key: &str) -> Option<String> {
+    let value = args.get(key)?;
+    match value {
+        Value::String(value) => non_empty_string(value),
+        Value::Array(values) => {
+            let parts: Vec<String> = values
+                .iter()
+                .filter_map(|value| match value {
+                    Value::String(value) => non_empty_string(value),
+                    Value::Null => None,
+                    other => Some(other.to_string()),
+                })
+                .collect();
+            (!parts.is_empty()).then(|| parts.join(", "))
+        }
+        Value::Null => None,
+        other => Some(other.to_string()),
+    }
+}
+
+fn combine_target_and_summary(target: Option<String>, summary: Option<&str>) -> Option<String> {
+    let summary = summary.map(str::trim).filter(|value| !value.is_empty());
+    match (target, summary) {
+        (Some(target), Some(summary)) if !target.trim().is_empty() => {
+            Some(format!("{} • {summary}", target.trim()))
+        }
+        (Some(target), _) if !target.trim().is_empty() => Some(target.trim().to_string()),
+        (_, Some(summary)) => Some(summary.to_string()),
+        _ => None,
+    }
+}
+
+fn quote_inner(value: &str) -> String {
+    escape_quotes(value)
+}
+
+fn escape_quotes(value: &str) -> String {
+    value.replace('"', "\\\"")
 }
 
 fn tool_label(tool: &str) -> String {
@@ -4177,6 +4403,7 @@ mod tests {
             args_summary: "subject=Hello".into(),
             args_json: "{\"subject\":\"Hello\"}".into(),
             summary: Some("send draft".into()),
+            target: None,
             created_at,
         }
     }

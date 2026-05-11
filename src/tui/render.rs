@@ -17,9 +17,8 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use ratatui::Frame;
 
 use super::app::{
-    human_size, ActivePane, AppState, ApprovalItem, ComposeField, InputMode, SyncStateUi,
-    ToastKind, ICON_ERROR, ICON_IDLE, ICON_POLLING, ICON_SYNCING, MAX_COMPOSE_ATTACHMENT_BYTES,
-    MAX_SELECTED_ERROR_CHARS,
+    human_size, ActivePane, AppState, ComposeField, InputMode, SyncStateUi, ToastKind, ICON_ERROR,
+    ICON_IDLE, ICON_POLLING, ICON_SYNCING, MAX_COMPOSE_ATTACHMENT_BYTES, MAX_SELECTED_ERROR_CHARS,
 };
 use super::theme::Theme;
 
@@ -158,7 +157,7 @@ fn render_approval_list(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme
                     ),
                     Span::styled(format!(" {}", approval.age_label_at(now)), theme.muted),
                 ])];
-                if let Some(summary) = approval_target_rule_summary(approval) {
+                if let Some(summary) = approval.row_summary() {
                     lines.push(Line::styled(summary, theme.muted));
                 }
                 ListItem::new(lines)
@@ -473,14 +472,13 @@ fn approval_detail_text(app: &AppState) -> String {
     let Some(approval) = app.selected_approval() else {
         return format!("No pending approvals\n\n{hints}");
     };
-    let mut lines = vec![
-        format!("Action: {}", approval.tool_label()),
-        format!("Tool: {}", approval.tool),
-        format!("Created: {}", approval.age_label_at(Utc::now())),
-    ];
+    let mut lines = vec![format!("Action: {}", approval.tool_label())];
+    lines.extend(approval.target_detail_lines());
     if let Some(summary) = approval.summary.as_deref() {
         lines.push(format!("Summary: {summary}"));
     }
+    lines.push(format!("Tool: {}", approval.tool));
+    lines.push(format!("Created: {}", approval.age_label_at(Utc::now())));
     lines.push(String::new());
     lines.push("Arguments:".into());
     lines.extend(approval.args_json.lines().map(str::to_string));
@@ -493,21 +491,6 @@ fn approval_detail_title(app: &AppState) -> String {
     app.selected_approval()
         .map(|approval| format!("Approval: {}", approval.tool_label()))
         .unwrap_or_else(|| "Approval detail".into())
-}
-
-fn approval_target_rule_summary(approval: &ApprovalItem) -> Option<String> {
-    let args = approval.args_summary.trim();
-    let summary = approval
-        .summary
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    match (args.is_empty(), summary) {
-        (true, None) => None,
-        (false, None) => Some(args.to_string()),
-        (true, Some(summary)) => Some(summary.to_string()),
-        (false, Some(summary)) => Some(format!("{args} • {summary}")),
-    }
 }
 
 fn render_detail_with_attachments(
@@ -997,8 +980,8 @@ mod tests {
     use super::*;
     use crate::models::{AccountId, AttachmentId, FolderId, MessageId, ThreadId};
     use crate::tui::app::{
-        compact_args_summary, AccountItem, ApprovalItem, AttachmentItem, AttachmentPreviewItem,
-        FolderItem, FolderKind, MessageDetail, MessageItem,
+        compact_args_summary, AccountItem, ApprovalItem, ApprovalTargetContext, AttachmentItem,
+        AttachmentPreviewItem, FolderItem, FolderKind, MessageDetail, MessageItem,
     };
     use crate::tui::theme::ThemeName;
 
@@ -1018,7 +1001,7 @@ mod tests {
     }
 
     fn render_approval_list_to_buffer(app: &AppState) -> Buffer {
-        let backend = TestBackend::new(80, 8);
+        let backend = TestBackend::new(140, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
@@ -1030,7 +1013,7 @@ mod tests {
     }
 
     fn render_approval_detail_to_buffer(app: &AppState) -> Buffer {
-        let backend = TestBackend::new(100, 12);
+        let backend = TestBackend::new(120, 16);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
@@ -1341,6 +1324,45 @@ mod tests {
     }
 
     #[test]
+    fn test_render_approvals_folder_list_and_detail_use_target_context() {
+        let mut app = AppState::default();
+        app.select_approvals_folder();
+        let message_id = "00000000-0000-0000-0000-0000000000bb";
+        let target = serde_json::json!({
+            "subject": "Quarterly review draft",
+            "from": "contact-0-1@demo.example",
+            "to": "alice@demo.local",
+            "snippet": "Please review before Friday.",
+        });
+        app.apply_approvals(vec![ApprovalItem {
+            id: uuid::Uuid::new_v4(),
+            tool: "postblox_message_delete".into(),
+            args_summary: compact_args_summary(&serde_json::json!({"message_id": message_id})),
+            args_json: format!("{{\n  \"message_id\": \"{message_id}\"\n}}"),
+            summary: Some("demo: never auto-delete from Trash".into()),
+            target: ApprovalTargetContext::from_args(&target),
+            created_at: Utc::now(),
+        }]);
+
+        let list_text = buffer_text(&render_approval_list_to_buffer(&app));
+        assert!(list_text.contains("Delete message"));
+        assert!(list_text.contains("\"Quarterly review draft\" from contact-0-1@demo.example"));
+        assert!(list_text.contains("demo: never auto-delete from Trash"));
+        assert!(!list_text.contains("message=…00bb"));
+        assert!(!list_text.contains(message_id));
+
+        let detail_text = buffer_text(&render_approval_detail_to_buffer(&app));
+        assert!(detail_text.contains("Action: Delete message"));
+        assert!(detail_text.contains("Target: \"Quarterly review draft\""));
+        assert!(detail_text.contains("From: contact-0-1@demo.example"));
+        assert!(detail_text.contains("To: alice@demo.local"));
+        assert!(detail_text.contains("Snippet: Please review before Friday."));
+        assert!(detail_text.contains("Tool: postblox_message_delete"));
+        assert!(detail_text.contains("Arguments:"));
+        assert!(detail_text.contains("\"message_id\": \"00000000-0000-0000-0000-0000000000bb\""));
+    }
+
+    #[test]
     fn test_render_approvals_folder_list_uses_human_label_and_short_id() {
         let mut app = AppState::default();
         app.select_approvals_folder();
@@ -1351,6 +1373,7 @@ mod tests {
             args_summary: compact_args_summary(&serde_json::json!({"message_id": message_id})),
             args_json: format!("{{\n  \"message_id\": \"{message_id}\"\n}}"),
             summary: Some("demo: never auto-delete from Trash".into()),
+            target: None,
             created_at: Utc::now(),
         }]);
 
@@ -1378,6 +1401,7 @@ mod tests {
             args_summary: compact_args_summary(&serde_json::json!({"message_id": message_id})),
             args_json: format!("{{\n  \"message_id\": \"{message_id}\"\n}}"),
             summary: Some("demo: never auto-delete from Trash".into()),
+            target: None,
             created_at: Utc::now(),
         }]);
 
@@ -1385,6 +1409,7 @@ mod tests {
 
         assert!(text.contains("Approval: Delete message"));
         assert!(text.contains("Action: Delete message"));
+        assert!(text.contains("Target: message=…00bb"));
         assert!(text.contains("Tool: postblox_message_delete"));
         assert!(text.contains("Arguments:"));
         assert!(text.contains("\"message_id\": \"00000000-0000-0000-0000-0000000000bb\""));
@@ -1409,6 +1434,7 @@ mod tests {
             args_summary: "subject=Delete me".into(),
             args_json: "{\"subject\":\"Delete me\"}".into(),
             summary: None,
+            target: None,
             created_at: Utc::now(),
         }]);
         app.select_approvals_folder();
