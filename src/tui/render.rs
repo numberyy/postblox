@@ -56,10 +56,10 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &AppState) {
     render_accounts(frame, top[0], app, &theme);
     render_folders(frame, top[1], app, &theme);
     render_conversations(frame, top[2], app, &theme);
-    if app.active == ActivePane::Approvals {
-        render_approvals(frame, main[1], app, &theme);
-    } else if app.search_pane_visible() {
+    if app.search_pane_visible() {
         render_search(frame, main[1], app, &theme);
+    } else if app.approvals_folder_selected() {
+        render_approval_detail(frame, main[1], app, &theme);
     } else if app.attachments_pane_visible() {
         render_detail_with_attachments(frame, main[1], app, &theme);
     } else {
@@ -132,8 +132,8 @@ fn render_search(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_approvals(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
-    let active = app.active == ActivePane::Approvals;
+fn render_approval_list(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    let active = app.active == ActivePane::Conversations;
     let count = app.approvals.items.len();
     let title = if app.approvals.pending {
         format!("Approvals • {count} pending • loading…")
@@ -174,6 +174,19 @@ fn render_approvals(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &T
         .highlight_style(theme.selection)
         .highlight_symbol("› ");
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_approval_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    let text = approval_detail_text(app);
+    let paragraph = Paragraph::new(text)
+        .block(pane_block(
+            "Approval detail",
+            app.active == ActivePane::Details,
+            theme,
+        ))
+        .style(theme.text)
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 fn render_toasts(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
@@ -257,10 +270,20 @@ fn render_folders(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
         app.folders
             .iter()
             .map(|folder| {
-                ListItem::new(Line::from(vec![
-                    Span::raw(folder.name.as_str()),
-                    Span::styled(format!(" [{}]", folder.role), theme.muted),
-                ]))
+                if folder.is_approvals_virtual() {
+                    ListItem::new(Line::from(vec![
+                        Span::raw(folder.name.as_str()),
+                        Span::styled(
+                            format!(" ({}) [system]", app.approvals_pending_count()),
+                            theme.muted,
+                        ),
+                    ]))
+                } else {
+                    ListItem::new(Line::from(vec![
+                        Span::raw(folder.name.as_str()),
+                        Span::styled(format!(" [{}]", folder.role), theme.muted),
+                    ]))
+                }
             })
             .collect()
     };
@@ -278,6 +301,11 @@ fn render_folders(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
 }
 
 fn render_conversations(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    if app.approvals_folder_selected() {
+        render_approval_list(frame, area, app, theme);
+        return;
+    }
+
     if app.drafts_pane_active() {
         render_drafts(frame, area, app, theme);
         return;
@@ -440,6 +468,30 @@ fn detail_text(app: &AppState) -> String {
     } else {
         "Press Enter to open the selected message".into()
     }
+}
+
+fn approval_detail_text(app: &AppState) -> String {
+    let hints = "Keys: j/k move • a approve • d deny • :approve/:deny";
+    if app.approvals.pending && app.approvals.items.is_empty() {
+        return format!("Loading approvals…\n\n{hints}");
+    }
+    let Some(approval) = app.selected_approval() else {
+        return format!("No pending approvals\n\n{hints}");
+    };
+    let mut text = format!(
+        "Tool: {}\nCreated: {}\n\nArgs:\n{}\n\n{}",
+        approval.tool,
+        approval.age_label_at(Utc::now()),
+        approval.args_json,
+        hints
+    );
+    if let Some(summary) = approval.summary.as_deref() {
+        text.insert_str(
+            text.find("\n\nArgs:").unwrap_or(text.len()),
+            &format!("\nSummary: {summary}"),
+        );
+    }
+    text
 }
 
 fn render_detail_with_attachments(
@@ -798,8 +850,10 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
                 format!(
                     " {status} | Preview: j/k scroll • PgUp/PgDn page • g/G top/bottom • v select • y copy • Esc cancel "
                 )
-            } else if app.active == ActivePane::Approvals {
-                format!(" {status} | Approvals: j/k move • a approve • d deny • Esc back ")
+            } else if app.approvals_folder_selected()
+                && matches!(app.active, ActivePane::Conversations | ActivePane::Details)
+            {
+                format!(" {status} | Approvals: j/k move • a approve • d deny • :approve/:deny ")
             } else if app.active == ActivePane::Details {
                 format!(
                     " {status} | Details: Tab pane • d details • j/k msg/scroll • o toggle • O expand all • PgUp/PgDn page • ←/→ cursor • v select • a attach • q quit "
@@ -927,7 +981,7 @@ mod tests {
     use super::*;
     use crate::models::{AccountId, AttachmentId, FolderId, MessageId, ThreadId};
     use crate::tui::app::{
-        AccountItem, ApprovalItem, AttachmentItem, AttachmentPreviewItem, FolderItem,
+        AccountItem, ApprovalItem, AttachmentItem, AttachmentPreviewItem, FolderItem, FolderKind,
         MessageDetail, MessageItem,
     };
     use crate::tui::theme::ThemeName;
@@ -1010,6 +1064,7 @@ mod tests {
             status: "idle".into(),
         }]);
         app.apply_folders(vec![FolderItem {
+            kind: FolderKind::Mail,
             id: FolderId::new(),
             name: "INBOX".into(),
             role: "inbox".into(),
@@ -1151,6 +1206,7 @@ mod tests {
     fn test_render_singleton_conversation_has_no_count_badge() {
         let mut app = AppState::default();
         app.apply_folders(vec![FolderItem {
+            kind: FolderKind::Mail,
             id: FolderId::new(),
             name: "INBOX".into(),
             role: "inbox".into(),
@@ -1177,6 +1233,7 @@ mod tests {
         let mut app = AppState::default();
         let thread_id = ThreadId::new();
         app.apply_folders(vec![FolderItem {
+            kind: FolderKind::Mail,
             id: FolderId::new(),
             name: "INBOX".into(),
             role: "inbox".into(),
@@ -1230,29 +1287,27 @@ mod tests {
     }
 
     #[test]
-    fn test_render_empty_approvals_pane_says_no_pending_approvals() {
-        let mut app = AppState {
-            active: ActivePane::Approvals,
-            ..Default::default()
-        };
+    fn test_render_empty_approvals_folder_says_no_pending_approvals() {
+        let mut app = AppState::default();
+        app.select_approvals_folder();
         app.apply_approvals(Vec::new());
 
         let text = buffer_text(&render_to_buffer(&app));
 
         assert!(text.contains("Approvals"));
+        assert!(text.contains("Approvals (0)"));
         assert!(text.contains("No pending approvals"));
     }
 
     #[test]
-    fn test_render_approvals_row_includes_tool_and_args_summary() {
-        let mut app = AppState {
-            active: ActivePane::Approvals,
-            ..Default::default()
-        };
+    fn test_render_approvals_folder_row_includes_tool_args_and_detail() {
+        let mut app = AppState::default();
+        app.select_approvals_folder();
         app.apply_approvals(vec![ApprovalItem {
             id: uuid::Uuid::new_v4(),
             tool: "postblox_message_send".into(),
             args_summary: "to=[alice@example.com], subject=Hi".into(),
+            args_json: "{\n  \"subject\": \"Hi\"\n}".into(),
             summary: Some("send draft".into()),
             created_at: Utc::now(),
         }]);
@@ -1261,7 +1316,37 @@ mod tests {
 
         assert!(text.contains("postblox_message_send"));
         assert!(text.contains("to=[alice@example.com], subject=Hi"));
+        assert!(text.contains("Approvals (1)"));
+        assert!(text.contains("\"subject\": \"Hi\""));
         assert!(text.contains("send draft"));
+    }
+
+    #[test]
+    fn test_render_approvals_folder_replaces_conversations_list() {
+        let mut app = AppState::default();
+        app.apply_folder_messages(vec![MessageItem {
+            id: MessageId::new(),
+            thread_id: None,
+            subject: "Mail subject".into(),
+            from: "alice@example.com".into(),
+            date: "2026-05-07 10:00".into(),
+            snippet: "Preview".into(),
+            flags: Vec::new(),
+        }]);
+        app.apply_approvals(vec![ApprovalItem {
+            id: uuid::Uuid::new_v4(),
+            tool: "postblox_draft_delete".into(),
+            args_summary: "subject=Delete me".into(),
+            args_json: "{\"subject\":\"Delete me\"}".into(),
+            summary: None,
+            created_at: Utc::now(),
+        }]);
+        app.select_approvals_folder();
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(text.contains("postblox_draft_delete"));
+        assert!(!text.contains("Mail subject"));
     }
 
     #[test]

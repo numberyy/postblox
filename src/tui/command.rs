@@ -30,7 +30,7 @@ pub enum Command {
     Unflag,
     /// `:archive` — move the selected message to the archive folder.
     Archive,
-    /// `:approvals` — open pending MCP approvals.
+    /// `:approvals` — select the virtual pending MCP approvals folder.
     Approvals,
     /// `:approve` — allow the highlighted pending approval.
     Approve,

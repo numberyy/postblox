@@ -23,7 +23,9 @@ use crate::ipc::Topic;
 use crate::models::{
     AccountId, AddressList, ApprovalState, AttachmentId, DraftId, FolderId, MessageId,
 };
-use app::{ActivePane, AppState, InputMode, SyncStateUi, FLAGGED_FLAG, SEEN_FLAG};
+use app::{
+    ActivePane, AppState, InputMode, SyncStateUi, APPROVALS_FOLDER_NAME, FLAGGED_FLAG, SEEN_FLAG,
+};
 use command::{parse_command, Command};
 use ipc::MailboxClient;
 use theme::ThemeName;
@@ -645,7 +647,10 @@ async fn handle_key<C: Mailbox + ?Sized>(
         return false;
     }
 
-    if app.active == ActivePane::Approvals && handle_approvals_pane_key(key, app, client).await {
+    if app.approvals_folder_selected()
+        && matches!(app.active, ActivePane::Conversations | ActivePane::Details)
+        && handle_approvals_folder_key(key, app, client).await
+    {
         return false;
     }
 
@@ -720,16 +725,10 @@ async fn handle_key<C: Mailbox + ?Sized>(
         }
         KeyCode::Right | KeyCode::Tab => {
             app.cycle_active_pane();
-            if app.active == ActivePane::Approvals {
-                refresh_approvals(app, client).await;
-            }
             false
         }
         KeyCode::Left => {
             app.cycle_active_pane_reverse();
-            if app.active == ActivePane::Approvals {
-                refresh_approvals(app, client).await;
-            }
             false
         }
         KeyCode::Char('r') => {
@@ -1745,6 +1744,10 @@ async fn run_goto_folder<C: Mailbox + ?Sized>(
         record_command_parse_error(app, "usage: goto <folder>".into());
         return;
     }
+    if folder_name.eq_ignore_ascii_case(APPROVALS_FOLDER_NAME) {
+        open_approvals(app, client).await;
+        return;
+    }
     if app.selected_account_id().is_none() {
         record_command_run_error(app, CommandRunError::AccountNotSelected);
         return;
@@ -1980,7 +1983,7 @@ async fn run_message_move<C: Mailbox + ?Sized>(
 }
 
 fn message_list_focused(app: &AppState) -> bool {
-    app.active == ActivePane::Conversations
+    app.active == ActivePane::Conversations && !app.approvals_folder_selected()
 }
 
 /// True when the user is on the Conversations pane in a Drafts folder,
@@ -2106,18 +2109,13 @@ async fn handle_search_pane_key<C: Mailbox + ?Sized>(
     }
 }
 
-/// Handle keys while the Approvals pane is focused.
-async fn handle_approvals_pane_key<C: Mailbox + ?Sized>(
+/// Handle approval-list keys while the virtual approvals folder is selected.
+async fn handle_approvals_folder_key<C: Mailbox + ?Sized>(
     key: KeyEvent,
     app: &mut AppState,
     client: &mut C,
 ) -> bool {
     match key.code {
-        KeyCode::Esc => {
-            app.close_approvals();
-            app.set_status("Approvals closed");
-            true
-        }
         KeyCode::Down | KeyCode::Char('j') => {
             app.move_approval_selection(1);
             true
@@ -2148,6 +2146,12 @@ async fn run_approval_decision<C: Mailbox + ?Sized>(
     client: &mut C,
     decision: ApprovalState,
 ) {
+    if !app.approvals_folder_selected() {
+        let message = "Select the Approvals folder first".to_string();
+        app.push_toast(app::ToastKind::Warn, message.clone(), Instant::now());
+        app.set_status(message);
+        return;
+    }
     if app.selected_approval().is_none() {
         let message = "No pending approval selected".to_string();
         app.push_toast(app::ToastKind::Warn, message.clone(), Instant::now());
@@ -2341,6 +2345,9 @@ fn selected_account_folder(app: &AppState) -> Result<(AccountId, String), Comman
     let account_id = app
         .selected_account_id()
         .ok_or(CommandRunError::AccountNotSelected)?;
+    if app.approvals_folder_selected() {
+        return Err(CommandRunError::FolderUnavailable);
+    }
     let folder_name = app
         .selected_folder_name()
         .ok_or(CommandRunError::FolderUnavailable)?
@@ -2364,14 +2371,18 @@ async fn refresh_current_pane<C: Mailbox + ?Sized>(app: &mut AppState, client: &
         ActivePane::Accounts => refresh_accounts(app, client).await,
         ActivePane::Folders => refresh_folders(app, client).await,
         ActivePane::Conversations => {
-            if app.drafts_pane_active() {
+            if app.approvals_folder_selected() {
+                refresh_approvals(app, client).await;
+            } else if app.drafts_pane_active() {
                 refresh_drafts(app, client).await;
             } else {
                 refresh_messages(app, client).await;
             }
         }
         ActivePane::Details => {
-            if app.drafts_pane_active() {
+            if app.approvals_folder_selected() {
+                refresh_approvals(app, client).await;
+            } else if app.drafts_pane_active() {
                 // Detail pane is unused while viewing drafts.
                 refresh_drafts(app, client).await;
             } else {
@@ -2380,7 +2391,6 @@ async fn refresh_current_pane<C: Mailbox + ?Sized>(app: &mut AppState, client: &
         }
         ActivePane::Attachments => refresh_attachments(app, client).await,
         ActivePane::Search => refresh_search(app, client).await,
-        ActivePane::Approvals => refresh_approvals(app, client).await,
     }
 }
 
@@ -2388,21 +2398,28 @@ async fn refresh_after_selection_change<C: Mailbox + ?Sized>(app: &mut AppState,
     match app.active {
         ActivePane::Accounts => refresh_folders(app, client).await,
         ActivePane::Folders => {
-            if app.drafts_pane_active() {
+            if app.approvals_folder_selected() {
+                refresh_approvals(app, client).await;
+            } else if app.drafts_pane_active() {
                 refresh_drafts(app, client).await;
             } else {
                 refresh_messages(app, client).await;
             }
         }
         ActivePane::Conversations => {
-            if !app.drafts_pane_active() {
+            if app.approvals_folder_selected() {
+                // Selection movement is local; no daemon refresh needed.
+            } else if !app.drafts_pane_active() {
                 refresh_detail(app, client).await;
             }
         }
-        ActivePane::Details => refresh_detail(app, client).await,
+        ActivePane::Details => {
+            if !app.approvals_folder_selected() {
+                refresh_detail(app, client).await;
+            }
+        }
         ActivePane::Attachments => refresh_attachment_preview(app, client).await,
         ActivePane::Search => {}
-        ActivePane::Approvals => {}
     }
 }
 
@@ -2472,7 +2489,11 @@ async fn refresh_folders<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C
                 app.set_status("No folders for selected account");
             } else {
                 app.set_status(format!("Loaded {count} folder(s)"));
-                refresh_messages(app, client).await;
+                if app.approvals_folder_selected() {
+                    refresh_approvals(app, client).await;
+                } else {
+                    refresh_messages(app, client).await;
+                }
             }
         }
         Err(error) => record_error(app, error),
@@ -2480,6 +2501,10 @@ async fn refresh_folders<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C
 }
 
 async fn refresh_messages<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
+    if app.approvals_folder_selected() {
+        refresh_approvals(app, client).await;
+        return;
+    }
     let Some(folder_id) = app.selected_folder_id() else {
         app.apply_folder_messages(Vec::new());
         app.set_status("No folder selected");
@@ -2671,7 +2696,7 @@ mod tests {
 
     use super::*;
     use crate::models::ThreadId;
-    use crate::tui::app::{AccountItem, FolderItem, MessageDetail, MessageItem};
+    use crate::tui::app::{AccountItem, FolderItem, FolderKind, MessageDetail, MessageItem};
     use crate::tui::theme::ThemeName;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3112,6 +3137,7 @@ mod tests {
 
     fn folder_item(id: FolderId) -> FolderItem {
         FolderItem {
+            kind: FolderKind::Mail,
             id,
             name: "INBOX".into(),
             role: "inbox".into(),
@@ -3193,6 +3219,7 @@ mod tests {
             id,
             tool: tool.into(),
             args_summary: "subject=Hello".into(),
+            args_json: "{\"subject\":\"Hello\"}".into(),
             summary: Some("send draft".into()),
             created_at: chrono::Utc::now(),
         }
@@ -3404,7 +3431,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_command_approvals_opens_and_refreshes_pane() {
+    async fn test_execute_command_approvals_selects_virtual_folder_and_refreshes() {
         let approval_id = Uuid::new_v4();
         let mut app = AppState {
             active: ActivePane::Folders,
@@ -3417,8 +3444,8 @@ mod tests {
 
         execute_command(Command::Approvals, &mut app, &mut client).await;
 
-        assert_eq!(app.active, ActivePane::Approvals);
-        assert_eq!(app.approvals.previous_pane, ActivePane::Folders);
+        assert_eq!(app.active, ActivePane::Conversations);
+        assert!(app.approvals_folder_selected());
         assert_eq!(
             app.selected_approval().map(|approval| approval.id),
             Some(approval_id)
@@ -3431,10 +3458,8 @@ mod tests {
     async fn test_execute_command_approve_and_deny_remove_selected_locally() {
         let allow_id = Uuid::new_v4();
         let deny_id = Uuid::new_v4();
-        let mut app = AppState {
-            active: ActivePane::Approvals,
-            ..Default::default()
-        };
+        let mut app = AppState::default();
+        app.select_approvals_folder();
         let now = chrono::Utc::now();
         let mut allow = approval_item(allow_id, "postblox_message_send");
         allow.created_at = now;
@@ -3459,10 +3484,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_command_approve_empty_list_is_polite_noop() {
-        let mut app = AppState {
-            active: ActivePane::Approvals,
-            ..Default::default()
-        };
+        let mut app = AppState::default();
+        app.select_approvals_folder();
         let mut client = MockMailbox::default();
 
         execute_command(Command::Approve, &mut app, &mut client).await;
@@ -3495,8 +3518,8 @@ mod tests {
             .await
         );
 
-        assert_eq!(app.active, ActivePane::Approvals);
-        assert_eq!(app.approvals.previous_pane, ActivePane::Conversations);
+        assert_eq!(app.active, ActivePane::Conversations);
+        assert!(app.approvals_folder_selected());
         assert_eq!(
             app.selected_approval().map(|approval| approval.id),
             Some(approval_id)
@@ -3505,15 +3528,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_tab_refreshes_approvals_when_cycle_enters_pane() {
-        let approval_id = Uuid::new_v4();
+    async fn test_handle_key_tab_cycle_no_longer_enters_hidden_approvals_pane() {
         let mut app = AppState::default();
         app.begin_search("pending approval", None);
         app.apply_search_hits(Vec::new());
-        let mut client = MockMailbox {
-            approvals: vec![approval_item(approval_id, "postblox_message_send")],
-            ..Default::default()
-        };
+        let mut client = MockMailbox::default();
 
         assert!(
             !handle_key(
@@ -3524,35 +3543,59 @@ mod tests {
             .await
         );
 
-        assert_eq!(app.active, ActivePane::Approvals);
-        assert_eq!(app.approvals.previous_pane, ActivePane::Search);
-        assert_eq!(
-            app.selected_approval().map(|approval| approval.id),
-            Some(approval_id)
-        );
-        assert_eq!(client.calls, vec![Call::ListPendingApprovals]);
+        assert_eq!(app.active, ActivePane::Accounts);
+        assert!(client.calls.is_empty());
     }
 
     #[tokio::test]
-    async fn test_handle_key_approvals_escape_returns_previous_pane() {
-        let mut app = AppState {
-            active: ActivePane::Folders,
-            ..Default::default()
-        };
-        app.begin_approvals();
+    async fn test_execute_command_approve_requires_approvals_folder() {
+        let approval_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.apply_approvals(vec![approval_item(approval_id, "postblox_message_send")]);
         let mut client = MockMailbox::default();
 
-        assert!(
-            !handle_key(
-                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-                &mut app,
-                &mut client,
-            )
-            .await
-        );
+        execute_command(Command::Approve, &mut app, &mut client).await;
 
-        assert_eq!(app.active, ActivePane::Folders);
-        assert_eq!(app.status, "Approvals closed");
+        assert_eq!(app.status, "Select the Approvals folder first");
+        assert!(client.calls.is_empty());
+        assert_eq!(app.approvals.items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_a_and_d_decide_when_approvals_folder_selected() {
+        let allow_id = Uuid::new_v4();
+        let deny_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.select_approvals_folder();
+        let now = chrono::Utc::now();
+        let mut allow = approval_item(allow_id, "postblox_message_send");
+        allow.created_at = now;
+        let mut deny = approval_item(deny_id, "postblox_draft_delete");
+        deny.created_at = now - chrono::Duration::seconds(1);
+        app.apply_approvals(vec![allow, deny]);
+        let mut client = MockMailbox::default();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        handle_key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert_eq!(
+            client.calls,
+            vec![
+                Call::DecideApproval(allow_id, ApprovalState::Allowed),
+                Call::DecideApproval(deny_id, ApprovalState::Denied),
+            ]
+        );
+        assert!(app.approvals.items.is_empty());
     }
 
     #[test]
@@ -3574,6 +3617,7 @@ mod tests {
         on_daemon_event(&mut app, &requested);
 
         assert_eq!(app.approvals.items.len(), 1);
+        assert_eq!(app.approvals_pending_count(), 1);
         assert_eq!(app.approvals.items[0].id, approval_id);
         assert_eq!(app.approvals.items[0].args_summary, "subject=Hello");
 
@@ -3585,6 +3629,7 @@ mod tests {
         on_daemon_event(&mut app, &decided);
 
         assert!(app.approvals.items.is_empty());
+        assert_eq!(app.approvals_pending_count(), 0);
     }
 
     #[tokio::test]
@@ -3776,9 +3821,9 @@ mod tests {
         for expected in [
             ActivePane::Folders,
             ActivePane::Conversations,
-            ActivePane::Approvals,
             ActivePane::Accounts,
             ActivePane::Folders,
+            ActivePane::Conversations,
         ] {
             assert!(
                 !handle_key(
@@ -3800,9 +3845,9 @@ mod tests {
         for expected in [
             ActivePane::Folders,
             ActivePane::Conversations,
-            ActivePane::Approvals,
             ActivePane::Accounts,
             ActivePane::Folders,
+            ActivePane::Conversations,
         ] {
             assert!(
                 !handle_key(
@@ -3824,9 +3869,9 @@ mod tests {
         for expected in [
             ActivePane::Folders,
             ActivePane::Conversations,
-            ActivePane::Approvals,
             ActivePane::Accounts,
             ActivePane::Folders,
+            ActivePane::Conversations,
         ] {
             assert!(
                 !handle_key(
@@ -3848,9 +3893,9 @@ mod tests {
         for expected in [
             ActivePane::Folders,
             ActivePane::Conversations,
-            ActivePane::Approvals,
             ActivePane::Accounts,
             ActivePane::Folders,
+            ActivePane::Conversations,
         ] {
             assert!(
                 !handle_key(
@@ -3870,11 +3915,11 @@ mod tests {
         let mut client = MockMailbox::default();
 
         for expected in [
-            ActivePane::Approvals,
             ActivePane::Conversations,
             ActivePane::Folders,
             ActivePane::Accounts,
-            ActivePane::Approvals,
+            ActivePane::Conversations,
+            ActivePane::Folders,
         ] {
             assert!(
                 !handle_key(
@@ -3894,11 +3939,11 @@ mod tests {
         let mut client = MockMailbox::default();
 
         for expected in [
-            ActivePane::Approvals,
             ActivePane::Conversations,
             ActivePane::Folders,
             ActivePane::Accounts,
-            ActivePane::Approvals,
+            ActivePane::Conversations,
+            ActivePane::Folders,
         ] {
             assert!(
                 !handle_key(
@@ -5255,6 +5300,7 @@ mod tests {
         app.apply_folders(vec![
             folder_item(inbox_id),
             FolderItem {
+                kind: FolderKind::Mail,
                 id: archive_id,
                 name: "Archive".into(),
                 role: "archive".into(),
@@ -5267,6 +5313,26 @@ mod tests {
         assert_eq!(app.selected_folder_id(), Some(archive_id));
         assert_eq!(app.active, ActivePane::Folders);
         assert!(client.calls.contains(&Call::ListMessages(archive_id)));
+    }
+
+    #[tokio::test]
+    async fn test_command_bar_goto_approvals_selects_virtual_folder() {
+        let approval_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        let mut client = MockMailbox {
+            approvals: vec![approval_item(approval_id, "postblox_message_send")],
+            ..Default::default()
+        };
+
+        run_command_line("goto Approvals".into(), &mut app, &mut client).await;
+
+        assert_eq!(app.active, ActivePane::Conversations);
+        assert!(app.approvals_folder_selected());
+        assert_eq!(
+            app.selected_approval().map(|approval| approval.id),
+            Some(approval_id)
+        );
+        assert_eq!(client.calls, vec![Call::ListPendingApprovals]);
     }
 
     #[tokio::test]
@@ -5769,6 +5835,7 @@ mod tests {
 
     fn drafts_folder_item(id: FolderId) -> FolderItem {
         FolderItem {
+            kind: FolderKind::Mail,
             id,
             name: "[Gmail]/Drafts".into(),
             role: "drafts".into(),

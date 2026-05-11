@@ -78,7 +78,8 @@ pub enum ActivePane {
     Folders,
     /// Conversations (threads) list for the active folder — one row
     /// per thread, Gmail-style. Doubles as the Drafts pane when a
-    /// drafts folder is active.
+    /// drafts folder is active and as the approvals list when the
+    /// virtual approvals folder is active.
     Conversations,
     /// Message detail / preview pane.
     Details,
@@ -86,8 +87,6 @@ pub enum ActivePane {
     Attachments,
     /// Quick-search results pane.
     Search,
-    /// Pending MCP approval requests.
-    Approvals,
 }
 
 impl ActivePane {
@@ -98,20 +97,18 @@ impl ActivePane {
             Self::Conversations => Self::Details,
             Self::Details => Self::Attachments,
             Self::Attachments => Self::Search,
-            Self::Search => Self::Approvals,
-            Self::Approvals => Self::Accounts,
+            Self::Search => Self::Accounts,
         }
     }
 
     pub(crate) fn previous(self) -> Self {
         match self {
-            Self::Accounts => Self::Approvals,
+            Self::Accounts => Self::Search,
             Self::Folders => Self::Accounts,
             Self::Conversations => Self::Folders,
             Self::Details => Self::Conversations,
             Self::Attachments => Self::Details,
             Self::Search => Self::Attachments,
-            Self::Approvals => Self::Search,
         }
     }
 }
@@ -140,6 +137,10 @@ pub(crate) const MAX_SEARCH_CHARS: usize = 256;
 
 /// Maximum chars shown for an approval request's compact argument summary.
 pub(crate) const MAX_APPROVAL_ARGS_CHARS: usize = 80;
+
+/// Display name for the predefined virtual approvals folder.
+pub(crate) const APPROVALS_FOLDER_NAME: &str = "Approvals";
+const APPROVALS_FOLDER_ROLE: &str = "system";
 
 /// Field currently focused in the composer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +213,8 @@ impl From<Account> for AccountItem {
 /// Folder row rendered in the folders pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderItem {
+    /// Source backing this row.
+    pub kind: FolderKind,
     /// Stable folder identifier.
     pub id: FolderId,
     /// IMAP folder name (e.g. `INBOX`, `Archive`).
@@ -223,10 +226,36 @@ pub struct FolderItem {
 impl From<Folder> for FolderItem {
     fn from(folder: Folder) -> Self {
         Self {
+            kind: FolderKind::Mail,
             id: folder.id,
             name: folder.name,
             role: folder.role.as_str().to_string(),
         }
+    }
+}
+
+/// Concrete source for a row in the folders list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderKind {
+    /// A daemon-backed mail folder.
+    Mail,
+    /// The predefined virtual MCP approvals folder.
+    Approvals,
+}
+
+impl FolderItem {
+    fn approvals_virtual() -> Self {
+        Self {
+            kind: FolderKind::Approvals,
+            id: FolderId::from(Uuid::nil()),
+            name: APPROVALS_FOLDER_NAME.into(),
+            role: APPROVALS_FOLDER_ROLE.into(),
+        }
+    }
+
+    /// True for the predefined virtual approvals folder row.
+    pub(crate) fn is_approvals_virtual(&self) -> bool {
+        self.kind == FolderKind::Approvals
     }
 }
 
@@ -552,12 +581,13 @@ impl SearchState {
     }
 }
 
-/// One pending MCP approval row rendered in the Approvals pane.
+/// One pending MCP approval row rendered in the virtual approvals folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalItem {
     pub(crate) id: Uuid,
     pub(crate) tool: String,
     pub(crate) args_summary: String,
+    pub(crate) args_json: String,
     pub(crate) summary: Option<String>,
     pub(crate) created_at: DateTime<Utc>,
 }
@@ -568,6 +598,7 @@ impl From<McpApproval> for ApprovalItem {
             id: approval.id,
             tool: approval.tool,
             args_summary: compact_args_summary(&approval.args),
+            args_json: approval_args_json(&approval.args),
             summary: optional_summary_label(approval.summary),
             created_at: approval.created_at,
         }
@@ -596,6 +627,8 @@ impl ApprovalItem {
             .get("args")
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        let args_summary = compact_args_summary(&args);
+        let args_json = approval_args_json(&args);
         let summary = data
             .get("summary")
             .and_then(Value::as_str)
@@ -604,7 +637,8 @@ impl ApprovalItem {
         Some(Self {
             id,
             tool,
-            args_summary: compact_args_summary(&args),
+            args_summary,
+            args_json,
             summary,
             created_at: now,
         })
@@ -616,25 +650,12 @@ impl ApprovalItem {
     }
 }
 
-/// Pending MCP approvals plus cursor and previous-pane state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Pending MCP approvals plus cursor state.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ApprovalsState {
     pub(crate) items: Vec<ApprovalItem>,
     pub(crate) selected: usize,
     pub(crate) pending: bool,
-    /// Pane to restore when the user closes approvals via Esc.
-    pub(crate) previous_pane: ActivePane,
-}
-
-impl Default for ApprovalsState {
-    fn default() -> Self {
-        Self {
-            items: Vec::new(),
-            selected: 0,
-            pending: false,
-            previous_pane: ActivePane::Accounts,
-        }
-    }
 }
 
 /// Attachment row rendered in the attachments pane.
@@ -1543,21 +1564,11 @@ impl Default for AppState {
 
 impl AppState {
     pub(crate) fn cycle_active_pane(&mut self) {
-        let previous = self.active;
         self.active = self.next_visible_pane();
-        self.record_approvals_previous_pane(previous);
     }
 
     pub(crate) fn cycle_active_pane_reverse(&mut self) {
-        let previous = self.active;
         self.active = self.previous_visible_pane();
-        self.record_approvals_previous_pane(previous);
-    }
-
-    fn record_approvals_previous_pane(&mut self, previous: ActivePane) {
-        if self.active == ActivePane::Approvals && previous != ActivePane::Approvals {
-            self.approvals.previous_pane = previous;
-        }
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) -> bool {
@@ -1565,7 +1576,7 @@ impl AppState {
             ActivePane::Accounts => {
                 let changed = move_index(&mut self.selected_account, self.accounts.len(), delta);
                 if changed {
-                    self.folders.clear();
+                    self.folders = virtual_folders();
                     self.folder_messages.clear();
                     self.threads.clear();
                     self.messages.clear();
@@ -1591,6 +1602,9 @@ impl AppState {
                 changed
             }
             ActivePane::Conversations => {
+                if self.approvals_folder_selected() {
+                    return self.move_approval_selection(delta);
+                }
                 if self.drafts_pane_active() {
                     let changed = move_index(&mut self.selected_draft, self.drafts.len(), delta);
                     if changed {
@@ -1606,7 +1620,12 @@ impl AppState {
                 }
                 changed
             }
-            ActivePane::Details => false,
+            ActivePane::Details => {
+                if self.approvals_folder_selected() {
+                    return self.move_approval_selection(delta);
+                }
+                false
+            }
             ActivePane::Attachments => {
                 if !self.attachments_pane_visible() {
                     self.normalize_active_pane();
@@ -1624,7 +1643,6 @@ impl AppState {
                 changed
             }
             ActivePane::Search => self.move_search_selection(delta),
-            ActivePane::Approvals => self.move_approval_selection(delta),
         }
     }
 
@@ -1632,7 +1650,7 @@ impl AppState {
     pub fn apply_accounts(&mut self, accounts: Vec<AccountItem>) {
         self.accounts = accounts;
         clamp_index(&mut self.selected_account, self.accounts.len());
-        self.folders.clear();
+        self.folders = virtual_folders();
         self.folder_messages.clear();
         self.threads.clear();
         self.messages.clear();
@@ -1647,8 +1665,17 @@ impl AppState {
 
     /// Replace the folders list for the active account and reset dependent state.
     pub fn apply_folders(&mut self, folders: Vec<FolderItem>) {
-        self.folders = folders;
-        clamp_index(&mut self.selected_folder, self.folders.len());
+        let keep_approvals_selected = self.approvals_folder_selected()
+            && matches!(
+                self.active,
+                ActivePane::Folders | ActivePane::Conversations | ActivePane::Details
+            );
+        self.folders = folders_with_approvals(folders);
+        if keep_approvals_selected {
+            self.selected_folder = self.approvals_folder_index().unwrap_or(0);
+        } else {
+            clamp_index(&mut self.selected_folder, self.folders.len());
+        }
         self.folder_messages.clear();
         self.threads.clear();
         self.messages.clear();
@@ -1958,11 +1985,11 @@ impl AppState {
     }
 
     pub(crate) fn attachments_pane_visible(&self) -> bool {
-        self.detail.is_some() && !self.attachments.is_empty()
+        !self.approvals_folder_selected() && self.detail.is_some() && !self.attachments.is_empty()
     }
 
     pub(crate) fn detail_pane_visible(&self) -> bool {
-        self.detail.is_some()
+        self.approvals_folder_selected() || self.detail.is_some()
     }
 
     pub(crate) fn focus_detail_pane(&mut self) -> bool {
@@ -2342,7 +2369,12 @@ impl AppState {
     }
 
     pub(crate) fn selected_folder_id(&self) -> Option<FolderId> {
-        self.folders.get(self.selected_folder).map(|f| f.id)
+        self.folders
+            .get(self.selected_folder)
+            .and_then(|folder| match folder.kind {
+                FolderKind::Mail => Some(folder.id),
+                FolderKind::Approvals => None,
+            })
     }
 
     pub(crate) fn selected_folder_name(&self) -> Option<&str> {
@@ -2362,6 +2394,18 @@ impl AppState {
     /// keybindings on the messages list.
     pub(crate) fn drafts_pane_active(&self) -> bool {
         self.selected_folder_role() == Some("drafts")
+    }
+
+    /// True when the selected folder row is the virtual approvals folder.
+    pub(crate) fn approvals_folder_selected(&self) -> bool {
+        self.folders
+            .get(self.selected_folder)
+            .is_some_and(FolderItem::is_approvals_virtual)
+    }
+
+    /// Number of pending approvals currently mirrored in the TUI.
+    pub(crate) fn approvals_pending_count(&self) -> usize {
+        self.approvals.items.len()
     }
 
     /// Switch the active account by case-insensitive label or email
@@ -2384,7 +2428,7 @@ impl AppState {
         }
         self.selected_account = index;
         self.active = ActivePane::Accounts;
-        self.folders.clear();
+        self.folders = virtual_folders();
         self.folder_messages.clear();
         self.threads.clear();
         self.messages.clear();
@@ -2421,6 +2465,27 @@ impl AppState {
         self.selected_thread = 0;
         self.selected_message = 0;
         self.normalize_active_pane();
+        true
+    }
+
+    /// Select the predefined virtual approvals folder and focus its list.
+    pub(crate) fn select_approvals_folder(&mut self) -> bool {
+        if !self.folders.iter().any(FolderItem::is_approvals_virtual) {
+            self.folders.push(FolderItem::approvals_virtual());
+        }
+        let Some(index) = self.approvals_folder_index() else {
+            return false;
+        };
+        self.selected_folder = index;
+        self.active = ActivePane::Conversations;
+        self.folder_messages.clear();
+        self.threads.clear();
+        self.messages.clear();
+        self.clear_drafts();
+        self.clear_detail_state();
+        self.selected_thread = 0;
+        self.selected_message = 0;
+        self.clear_error();
         true
     }
 
@@ -2546,17 +2611,10 @@ impl AppState {
         self.search.as_ref().is_some_and(|state| state.pending)
     }
 
-    pub(crate) fn approvals_pane_visible(&self) -> bool {
-        true
-    }
-
-    /// Focus the Approvals pane and mark its list as refreshing.
+    /// Select the approvals folder and mark its list as refreshing.
     pub(crate) fn begin_approvals(&mut self) {
-        if self.active != ActivePane::Approvals {
-            self.approvals.previous_pane = self.active;
-        }
         self.approvals.pending = true;
-        self.active = ActivePane::Approvals;
+        self.select_approvals_folder();
         self.clear_error();
     }
 
@@ -2565,17 +2623,6 @@ impl AppState {
         self.approvals.items = sorted_approvals(approvals);
         self.approvals.pending = false;
         clamp_index(&mut self.approvals.selected, self.approvals.items.len());
-    }
-
-    /// Restore the pane that was active before Approvals opened.
-    pub(crate) fn close_approvals(&mut self) {
-        let previous = self.approvals.previous_pane;
-        self.active = if previous == ActivePane::Approvals {
-            ActivePane::Accounts
-        } else {
-            previous
-        };
-        self.normalize_active_pane();
     }
 
     pub(crate) fn move_approval_selection(&mut self, delta: isize) -> bool {
@@ -2684,6 +2731,9 @@ impl AppState {
     }
 
     pub(crate) fn selected_message_id(&self) -> Option<MessageId> {
+        if self.approvals_folder_selected() {
+            return None;
+        }
         self.messages.get(self.selected_message).map(|m| m.id)
     }
 
@@ -2692,6 +2742,9 @@ impl AppState {
     }
 
     pub(crate) fn selected_message(&self) -> Option<&MessageItem> {
+        if self.approvals_folder_selected() {
+            return None;
+        }
         self.messages.get(self.selected_message)
     }
 
@@ -3360,7 +3413,7 @@ impl AppState {
 
     fn next_visible_pane(&self) -> ActivePane {
         let mut pane = self.active;
-        for _ in 0..7 {
+        for _ in 0..6 {
             pane = pane.next();
             if self.pane_visible(pane) {
                 return pane;
@@ -3371,7 +3424,7 @@ impl AppState {
 
     fn previous_visible_pane(&self) -> ActivePane {
         let mut pane = self.active;
-        for _ in 0..7 {
+        for _ in 0..6 {
             pane = pane.previous();
             if self.pane_visible(pane) {
                 return pane;
@@ -3385,9 +3438,14 @@ impl AppState {
             ActivePane::Details => self.detail_pane_visible(),
             ActivePane::Attachments => self.attachments_pane_visible(),
             ActivePane::Search => self.search_pane_visible(),
-            ActivePane::Approvals => self.approvals_pane_visible(),
             ActivePane::Accounts | ActivePane::Folders | ActivePane::Conversations => true,
         }
+    }
+
+    fn approvals_folder_index(&self) -> Option<usize> {
+        self.folders
+            .iter()
+            .position(FolderItem::is_approvals_virtual)
     }
 
     fn clear_detail_state(&mut self) {
@@ -3569,6 +3627,16 @@ fn sorted_approvals(mut approvals: Vec<ApprovalItem>) -> Vec<ApprovalItem> {
     approvals
 }
 
+fn folders_with_approvals(mut folders: Vec<FolderItem>) -> Vec<FolderItem> {
+    folders.retain(|folder| !folder.is_approvals_virtual());
+    folders.push(FolderItem::approvals_virtual());
+    folders
+}
+
+fn virtual_folders() -> Vec<FolderItem> {
+    vec![FolderItem::approvals_virtual()]
+}
+
 fn build_threads(messages: &[MessageItem]) -> Vec<ThreadItem> {
     let mut threads = Vec::<ThreadItem>::new();
 
@@ -3648,6 +3716,10 @@ pub(crate) fn compact_args_summary(args: &Value) -> String {
 
     let raw = serde_json::to_string(args).unwrap_or_else(|_| "<args>".into());
     truncate_chars(&raw, MAX_APPROVAL_ARGS_CHARS)
+}
+
+fn approval_args_json(args: &Value) -> String {
+    serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string())
 }
 
 fn compact_arg_value(value: &Value) -> String {
@@ -3966,6 +4038,7 @@ mod tests {
 
     fn folder(name: &str) -> FolderItem {
         FolderItem {
+            kind: FolderKind::Mail,
             id: FolderId::new(),
             name: name.into(),
             role: "custom".into(),
@@ -4001,6 +4074,7 @@ mod tests {
             id: Uuid::new_v4(),
             tool: tool.into(),
             args_summary: "subject=Hello".into(),
+            args_json: "{\"subject\":\"Hello\"}".into(),
             summary: Some("send draft".into()),
             created_at,
         }
@@ -4068,11 +4142,9 @@ mod tests {
         assert_eq!(ActivePane::Conversations.next(), ActivePane::Details);
         assert_eq!(ActivePane::Details.next(), ActivePane::Attachments);
         assert_eq!(ActivePane::Attachments.next(), ActivePane::Search);
-        assert_eq!(ActivePane::Search.next(), ActivePane::Approvals);
-        assert_eq!(ActivePane::Approvals.next(), ActivePane::Accounts);
+        assert_eq!(ActivePane::Search.next(), ActivePane::Accounts);
 
-        assert_eq!(ActivePane::Accounts.previous(), ActivePane::Approvals);
-        assert_eq!(ActivePane::Approvals.previous(), ActivePane::Search);
+        assert_eq!(ActivePane::Accounts.previous(), ActivePane::Search);
         assert_eq!(ActivePane::Search.previous(), ActivePane::Attachments);
         assert_eq!(ActivePane::Attachments.previous(), ActivePane::Details);
         assert_eq!(ActivePane::Details.previous(), ActivePane::Conversations);
@@ -4088,8 +4160,6 @@ mod tests {
         assert_eq!(app.active, ActivePane::Folders);
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Conversations);
-        app.cycle_active_pane();
-        assert_eq!(app.active, ActivePane::Approvals);
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
     }
@@ -4116,41 +4186,28 @@ mod tests {
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Search);
         app.cycle_active_pane();
-        assert_eq!(app.active, ActivePane::Approvals);
-        app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
     }
 
     #[test]
-    fn test_cycle_active_pane_records_approvals_previous_pane_for_escape() {
+    fn test_begin_approvals_selects_virtual_folder_and_focuses_list() {
         let mut app = AppState {
             active: ActivePane::Search,
             search: Some(SearchState::new("needle", None, ActivePane::Conversations)),
             ..Default::default()
         };
 
-        app.cycle_active_pane();
+        app.begin_approvals();
 
-        assert_eq!(app.active, ActivePane::Approvals);
-        assert_eq!(app.approvals.previous_pane, ActivePane::Search);
-        app.close_approvals();
-        assert_eq!(app.active, ActivePane::Search);
-
-        app.active = ActivePane::Accounts;
-        app.cycle_active_pane_reverse();
-
-        assert_eq!(app.active, ActivePane::Approvals);
-        assert_eq!(app.approvals.previous_pane, ActivePane::Accounts);
-        app.close_approvals();
-        assert_eq!(app.active, ActivePane::Accounts);
+        assert_eq!(app.active, ActivePane::Conversations);
+        assert!(app.approvals_folder_selected());
+        assert!(app.approvals.pending);
     }
 
     #[test]
     fn test_approvals_state_empty_one_and_many_selection() {
-        let mut app = AppState {
-            active: ActivePane::Approvals,
-            ..Default::default()
-        };
+        let mut app = AppState::default();
+        app.select_approvals_folder();
         assert!(!app.move_selection(1));
         assert!(app.selected_approval().is_none());
 
@@ -4314,7 +4371,8 @@ mod tests {
 
         assert!(app.move_selection(1));
 
-        assert!(app.folders.is_empty());
+        assert_eq!(app.folders.len(), 1);
+        assert!(app.approvals_folder_selected());
         assert!(app.folder_messages.is_empty());
         assert!(app.threads.is_empty());
         assert!(app.messages.is_empty());
@@ -4402,7 +4460,8 @@ mod tests {
         app.apply_accounts(Vec::new());
 
         assert_eq!(app.selected_account, 0);
-        assert!(app.folders.is_empty());
+        assert_eq!(app.folders.len(), 1);
+        assert!(app.approvals_folder_selected());
         assert!(app.folder_messages.is_empty());
         assert!(app.threads.is_empty());
         assert!(app.messages.is_empty());
@@ -4968,7 +5027,7 @@ mod tests {
 
         assert!(!app.attachments_pane_visible());
         app.cycle_active_pane();
-        assert_eq!(app.active, ActivePane::Approvals);
+        assert_eq!(app.active, ActivePane::Accounts);
 
         let message_id = app.messages[0].id;
         app.apply_detail(Some(detail(message_id, "body")));
@@ -4981,11 +5040,7 @@ mod tests {
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Attachments);
         app.cycle_active_pane();
-        assert_eq!(app.active, ActivePane::Approvals);
-        app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
-        app.cycle_active_pane_reverse();
-        assert_eq!(app.active, ActivePane::Approvals);
         app.cycle_active_pane_reverse();
         assert_eq!(app.active, ActivePane::Attachments);
         app.cycle_active_pane_reverse();
@@ -5043,7 +5098,7 @@ mod tests {
         assert!(!app.focus_detail_pane());
         assert_eq!(app.active, ActivePane::Conversations);
         app.cycle_active_pane();
-        assert_eq!(app.active, ActivePane::Approvals);
+        assert_eq!(app.active, ActivePane::Accounts);
 
         let message_id = app.messages[0].id;
         app.apply_detail(Some(detail(message_id, "body")));
@@ -5053,11 +5108,7 @@ mod tests {
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Details);
         app.cycle_active_pane();
-        assert_eq!(app.active, ActivePane::Approvals);
-        app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
-        app.cycle_active_pane_reverse();
-        assert_eq!(app.active, ActivePane::Approvals);
         app.cycle_active_pane_reverse();
         assert_eq!(app.active, ActivePane::Details);
 
@@ -6489,11 +6540,13 @@ mod tests {
         let mut app = AppState::default();
         app.apply_folders(vec![
             FolderItem {
+                kind: FolderKind::Mail,
                 id: FolderId::new(),
                 name: "INBOX".into(),
                 role: "inbox".into(),
             },
             FolderItem {
+                kind: FolderKind::Mail,
                 id: FolderId::new(),
                 name: "[Gmail]/Drafts".into(),
                 role: "drafts".into(),
@@ -6538,6 +6591,7 @@ mod tests {
         let first = DraftId::new();
         let second = DraftId::new();
         app.apply_folders(vec![FolderItem {
+            kind: FolderKind::Mail,
             id: FolderId::new(),
             name: "[Gmail]/Drafts".into(),
             role: "drafts".into(),

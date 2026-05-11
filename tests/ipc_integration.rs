@@ -3144,7 +3144,7 @@ async fn search_op_clamps_limit_to_two_hundred() {
 #[tokio::test]
 async fn tui_reducer_creates_toast_for_mail_new_event() {
     use postblox::ipc::Event as IpcEvent;
-    use postblox::tui::app::{AccountItem, AppState, FolderItem, ToastKind};
+    use postblox::tui::app::{AccountItem, AppState, FolderItem, FolderKind, ToastKind};
     use postblox::tui::on_daemon_event;
     let account_id = AccountId::new();
     let folder_id = FolderId::new();
@@ -3156,6 +3156,7 @@ async fn tui_reducer_creates_toast_for_mail_new_event() {
         status: "idle".into(),
     }]);
     app.apply_folders(vec![FolderItem {
+        kind: FolderKind::Mail,
         id: folder_id,
         name: "INBOX".into(),
         role: "inbox".into(),
