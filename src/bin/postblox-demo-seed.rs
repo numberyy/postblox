@@ -13,11 +13,19 @@
 //! uses internally. TODO: replace with a dedicated `message.upsert_raw`
 //! op once a second caller materialises.
 //!
+//! Attachments parsed from the embedded RFC822 fixtures are persisted
+//! via [`postblox::attachments::persist_parsed_for_message`] — the same
+//! helper the IMAP reconciler uses (`src/sync/reconciler.rs`) — so the
+//! demo TUI's attachment pane is populated for messages seeded from
+//! attachment-bearing fixtures like `attachment_multipart.eml`.
+//!
 //! Re-running the binary against an already-seeded DB is a no-op: the
-//! account / folder / thread / draft / gate / approval lookups all
-//! short-circuit on a stable natural key (email address, folder name,
-//! thread external_id, draft subject, gate tool+pattern, approval
-//! summary). Counts therefore stay constant across reseeds.
+//! account / folder / thread / message / draft / gate / approval
+//! lookups all short-circuit on a stable natural key (email address,
+//! folder name, thread external_id, `(folder_id, uid)`, draft subject,
+//! gate tool+pattern, approval summary). Counts therefore stay
+//! constant across reseeds — including the attachment rows, which are
+//! only persisted alongside a fresh message insert.
 //!
 //! Usage:
 //! ```sh
@@ -194,8 +202,12 @@ async fn main() -> anyhow::Result<()> {
     let folders = seed_folders(&mut client, &accounts).await?;
     println!("seed: {} folders ok", folders.len());
 
-    let messages_inserted = seed_messages(&pool, &accounts, &folders).await?;
+    let SeedMessageCounts {
+        messages: messages_inserted,
+        attachments: attachments_inserted,
+    } = seed_messages(&pool, &accounts, &folders).await?;
     println!("seed: {messages_inserted} messages ok");
+    println!("seed: {attachments_inserted} attachments ok");
 
     let drafts_inserted = seed_drafts(&mut client, &accounts).await?;
     println!("seed: {drafts_inserted} drafts ok");
@@ -303,15 +315,30 @@ async fn seed_folders(
     Ok(out)
 }
 
-/// Insert message rows directly into SQLite. Returns the number of rows
-/// inserted on this run (skipped rows are not counted).
+/// Tally of message and attachment rows persisted by [`seed_messages`].
+/// Skipped rows (idempotent reseed branches) are not counted.
+#[derive(Debug, Default, Clone, Copy)]
+struct SeedMessageCounts {
+    messages: usize,
+    attachments: usize,
+}
+
+impl std::ops::AddAssign for SeedMessageCounts {
+    fn add_assign(&mut self, rhs: Self) {
+        self.messages += rhs.messages;
+        self.attachments += rhs.attachments;
+    }
+}
+
+/// Insert message + attachment rows directly into SQLite. Returns the
+/// number of rows inserted on this run (skipped rows are not counted).
 async fn seed_messages(
     pool: &SqlitePool,
     accounts: &[AccountRecord],
     folders: &[FolderRecord],
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<SeedMessageCounts> {
     let now = Utc::now();
-    let mut inserted = 0;
+    let mut totals = SeedMessageCounts::default();
     for (account_idx, acc) in accounts.iter().enumerate() {
         let inbox = require_folder(folders, acc.id, FolderRole::Inbox)?;
         let sent = require_folder(folders, acc.id, FolderRole::Sent)?;
@@ -319,7 +346,7 @@ async fn seed_messages(
 
         // INBOX: per topic, seed a thread of `INBOX_MESSAGES_PER_THREAD` messages.
         for (topic_idx, topic) in acc.topics.iter().enumerate() {
-            inserted += seed_thread(
+            totals += seed_thread(
                 pool,
                 acc,
                 inbox.id,
@@ -334,7 +361,7 @@ async fn seed_messages(
         }
         // Sent: short standalone messages, each its own thread.
         for sent_idx in 0..SENT_MESSAGES_PER_ACCOUNT {
-            inserted += seed_thread(
+            totals += seed_thread(
                 pool,
                 acc,
                 sent.id,
@@ -349,7 +376,7 @@ async fn seed_messages(
         }
         // Archive: short standalone messages, each its own thread.
         for archive_idx in 0..ARCHIVE_MESSAGES_PER_ACCOUNT {
-            inserted += seed_thread(
+            totals += seed_thread(
                 pool,
                 acc,
                 archive.id,
@@ -363,7 +390,7 @@ async fn seed_messages(
             .await?;
         }
     }
-    Ok(inserted)
+    Ok(totals)
 }
 
 /// Seed a single thread of `count` chained messages. Idempotent on the
@@ -380,23 +407,23 @@ async fn seed_thread(
     folder_tag: &str,
     account_idx: usize,
     base_time: DateTime<Utc>,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<SeedMessageCounts> {
     let external_id = format!("demo-{}-{folder_tag}-{topic_idx}", acc.email);
     if db::threads::get_by_external_id(pool, acc.id, &external_id)
         .await
         .with_context(|| format!("threads::get_by_external_id {external_id}"))?
         .is_some()
     {
-        return Ok(0);
+        return Ok(SeedMessageCounts::default());
     }
 
     let thread = db::threads::create(pool, acc.id, Some(&external_id), Some(subject))
         .await
         .with_context(|| format!("threads::create {external_id}"))?;
 
-    let mut inserted = 0;
+    let mut totals = SeedMessageCounts::default();
     for msg_idx in 0..count {
-        inserted += seed_one_message(
+        totals += seed_one_message(
             pool,
             acc,
             folder_id,
@@ -413,7 +440,7 @@ async fn seed_thread(
     db::threads::refresh_aggregates(pool, thread.id)
         .await
         .with_context(|| format!("threads::refresh_aggregates {}", thread.id))?;
-    Ok(inserted)
+    Ok(totals)
 }
 
 /// Build one message row from a fixture, with header rewrites that make
@@ -430,7 +457,7 @@ async fn seed_one_message(
     folder_tag: &str,
     account_idx: usize,
     base_time: DateTime<Utc>,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<SeedMessageCounts> {
     // Deterministic UID derived from the same key tuple used by
     // `external_id`: stable across reseeds, unique within a folder.
     let uid = encode_uid(account_idx, topic_idx, msg_idx, folder_tag);
@@ -439,12 +466,12 @@ async fn seed_one_message(
         .with_context(|| format!("messages::get_by_folder_uid {folder_id} {uid}"))?
         .is_some()
     {
-        return Ok(0);
+        return Ok(SeedMessageCounts::default());
     }
 
     let fixture_idx = (account_idx + topic_idx + msg_idx) % FIXTURES.len();
     let (fixture_name, raw_bytes) = FIXTURES[fixture_idx];
-    let parsed = postblox::mail::parser::parse(raw_bytes).with_context(|| {
+    let mut parsed = postblox::mail::parser::parse(raw_bytes).with_context(|| {
         format!(
             "parse fixture {} for {} thread {topic_idx} msg {msg_idx}",
             fixture_name, acc.email
@@ -514,6 +541,12 @@ async fn seed_one_message(
         MessageFlags::default()
     };
 
+    // Take attachments out before consuming the rest of `parsed` so we
+    // can persist them after the message row exists — mirrors the
+    // pattern in `src/sync/reconciler.rs`.
+    let parsed_attachments = std::mem::take(&mut parsed.attachments);
+    let html_body = parsed.html_body;
+
     let new_msg = db::messages::NewMessage {
         account_id: acc.id,
         folder_id,
@@ -530,16 +563,28 @@ async fn seed_one_message(
         subject: Some(display_subject),
         snippet: Some(snippet),
         text_body: Some(text_body),
-        html_body: parsed.html_body.clone(),
+        html_body,
         raw_size: raw_bytes.len() as i64,
         flags,
         internal_date,
         sent_at: Some(internal_date),
     };
-    db::messages::create(pool, &new_msg)
+    let message = db::messages::create(pool, &new_msg)
         .await
         .with_context(|| format!("messages::create uid={uid} for {}", acc.email))?;
-    Ok(1)
+    let stored =
+        postblox::attachments::persist_parsed_for_message(pool, message.id, &parsed_attachments)
+            .await
+            .with_context(|| {
+                format!(
+            "attachments::persist_parsed_for_message fixture={fixture_name} uid={uid} for {}",
+            acc.email
+        )
+            })?;
+    Ok(SeedMessageCounts {
+        messages: 1,
+        attachments: stored.len(),
+    })
 }
 
 /// Encode a stable UID per `(account, topic, msg_idx, folder_tag)`. The
