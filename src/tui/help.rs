@@ -410,7 +410,7 @@ pub(crate) static HELP_ROWS: &[HelpSection] = &[
             },
             HelpEntry {
                 keys: ":goto <folder>",
-                summary: "Switch the active folder (`:goto Approvals` aliases :approvals)",
+                summary: "Switch the active folder by name (case-insensitive fallback; `:goto Approvals` aliases :approvals)",
                 applies_to: Applicability::CommandBar,
             },
             HelpEntry {

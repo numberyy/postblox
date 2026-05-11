@@ -28,7 +28,7 @@ use crate::models::{
 use app::{
     ActivePane, AppState, InputMode, SyncStateUi, APPROVALS_FOLDER_NAME, FLAGGED_FLAG, SEEN_FLAG,
 };
-use command::{parse_command, Command};
+use command::{nearest_command_name, parse_command, Command, CommandError};
 use ipc::MailboxClient;
 use theme::ThemeName;
 
@@ -1941,7 +1941,7 @@ async fn run_command_line<C: Mailbox + ?Sized>(input: String, app: &mut AppState
     }
     match parse_command(&input) {
         Ok(command) => execute_command(command, app, client).await,
-        Err(error) => record_command_parse_error(app, error.to_string()),
+        Err(error) => record_command_parse_error(app, error),
     }
 }
 
@@ -2083,7 +2083,7 @@ async fn run_goto_folder<C: Mailbox + ?Sized>(
 ) {
     let folder_name = folder_name.trim();
     if folder_name.is_empty() {
-        record_command_parse_error(app, "usage: goto <folder>".into());
+        record_command_parse_error(app, CommandError::Usage("goto <folder>"));
         return;
     }
     if folder_name.eq_ignore_ascii_case(APPROVALS_FOLDER_NAME) {
@@ -2108,7 +2108,7 @@ async fn run_goto_folder<C: Mailbox + ?Sized>(
 async fn run_select_account<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C, name: &str) {
     let name = name.trim();
     if name.is_empty() {
-        record_command_parse_error(app, "usage: account <name|email>".into());
+        record_command_parse_error(app, CommandError::Usage("account <name|email>"));
         return;
     }
     if !app.select_account_by_name(name) {
@@ -2301,7 +2301,7 @@ async fn run_message_move<C: Mailbox + ?Sized>(
     };
     let folder_name = folder_name.trim();
     if folder_name.is_empty() {
-        record_command_parse_error(app, "usage: move <folder>".into());
+        record_command_parse_error(app, CommandError::Usage("move <folder>"));
         return;
     }
 
@@ -2670,7 +2670,15 @@ fn selected_account_folder(app: &AppState) -> Result<(AccountId, String), Comman
     Ok((account_id, folder_name))
 }
 
-fn record_command_parse_error(app: &mut AppState, message: String) {
+fn record_command_parse_error(app: &mut AppState, error: CommandError) {
+    let mut message = error.to_string();
+    if let CommandError::Unknown(name) = &error {
+        if let Some(suggestion) = nearest_command_name(name) {
+            message.push_str(" — did you mean :");
+            message.push_str(suggestion);
+            message.push('?');
+        }
+    }
     app.set_status(message.clone());
     app.set_error(message);
 }
@@ -7419,5 +7427,48 @@ mod tests {
         assert_eq!(app.status, initial_status);
         assert_eq!(app.selected_folder, initial_selected_folder);
         assert_eq!(app.selected_account, initial_selected_account);
+    }
+
+    #[test]
+    fn test_command_parse_error_appends_did_you_mean_when_close() {
+        let mut app = AppState::default();
+
+        record_command_parse_error(&mut app, CommandError::Unknown("helo".into()));
+
+        let error = app.error.clone().expect("error must be set");
+        assert!(
+            error.contains("did you mean :help?"),
+            "missing suggestion in {error:?}"
+        );
+        assert!(error.starts_with("unknown command 'helo'"));
+        assert_eq!(app.status, error);
+    }
+
+    #[test]
+    fn test_command_parse_error_omits_did_you_mean_when_no_close_match() {
+        let mut app = AppState::default();
+
+        record_command_parse_error(&mut app, CommandError::Unknown("zzz".into()));
+
+        let error = app.error.clone().expect("error must be set");
+        assert!(
+            !error.contains("did you mean"),
+            "unexpected suggestion in {error:?}"
+        );
+        assert!(error.starts_with("unknown command 'zzz'"));
+    }
+
+    #[test]
+    fn test_command_parse_error_preserves_usage_message() {
+        let mut app = AppState::default();
+
+        record_command_parse_error(&mut app, CommandError::Usage("move <folder>"));
+
+        let error = app.error.clone().expect("error must be set");
+        assert!(
+            !error.contains("did you mean"),
+            "usage error must not get a suggestion in {error:?}"
+        );
+        assert_eq!(error, "usage: move <folder>");
     }
 }

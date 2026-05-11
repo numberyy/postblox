@@ -158,6 +158,90 @@ pub fn parse_command(input: &str) -> Result<Command, CommandError> {
     }
 }
 
+/// Return the closest known command name to `input` within
+/// Damerau-Levenshtein distance ≤ 2, used by the TUI to attach a
+/// `did you mean :foo?` suggestion to [`CommandError::Unknown`].
+///
+/// Ties are broken by ascending edit distance first, then by the
+/// order of [`COMMAND_NAMES`] (which is sorted ASCII-ascending — so
+/// the lexicographically earlier name wins on a tie).
+///
+/// Returns `None` when:
+/// - `input` is empty (parser already rejects this; defensive),
+/// - no command name is within distance 2, or
+/// - the length difference between `input` and every candidate is
+///   greater than 2 (a fast short-circuit before computing the
+///   matrix).
+///
+/// Distance 0 means `input` exactly matches a command name — the
+/// `parse_command` parser handles that branch on its own, so callers
+/// reaching this helper from `record_command_parse_error` will never
+/// hit distance 0 in practice. The helper still returns the exact
+/// match in that case so it is correct in isolation.
+pub(crate) fn nearest_command_name(input: &str) -> Option<&'static str> {
+    if input.is_empty() {
+        return None;
+    }
+    let input_bytes = input.as_bytes();
+    let input_len = input_bytes.len();
+    let mut best: Option<(usize, usize)> = None;
+    for (index, name) in COMMAND_NAMES.iter().enumerate() {
+        let name_bytes = name.as_bytes();
+        let len_diff = name_bytes.len().abs_diff(input_len);
+        if len_diff > 2 {
+            continue;
+        }
+        let distance = damerau_levenshtein(input_bytes, name_bytes);
+        if distance > 2 {
+            continue;
+        }
+        match best {
+            None => best = Some((distance, index)),
+            Some((current_distance, current_index)) => {
+                if distance < current_distance
+                    || (distance == current_distance && index < current_index)
+                {
+                    best = Some((distance, index));
+                }
+            }
+        }
+    }
+    best.map(|(_, index)| COMMAND_NAMES[index])
+}
+
+/// Damerau-Levenshtein distance over ASCII byte slices. The command
+/// names are ASCII, so byte comparison is sufficient. Two rolling
+/// rows + a previous-previous row handle the transposition case.
+fn damerau_levenshtein(a: &[u8], b: &[u8]) -> usize {
+    let (rows, cols) = (a.len(), b.len());
+    if rows == 0 {
+        return cols;
+    }
+    if cols == 0 {
+        return rows;
+    }
+    let mut prev_prev: Vec<usize> = vec![0; cols + 1];
+    let mut prev: Vec<usize> = (0..=cols).collect();
+    let mut curr: Vec<usize> = vec![0; cols + 1];
+    for i in 1..=rows {
+        curr[0] = i;
+        for j in 1..=cols {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let deletion = prev[j] + 1;
+            let insertion = curr[j - 1] + 1;
+            let substitution = prev[j - 1] + cost;
+            let mut value = deletion.min(insertion).min(substitution);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                value = value.min(prev_prev[j - 2] + 1);
+            }
+            curr[j] = value;
+        }
+        std::mem::swap(&mut prev_prev, &mut prev);
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[cols]
+}
+
 /// Return the longest unambiguous Tab-completion for a `:`-mode prefix.
 ///
 /// - `Some((completion, single_match))` when the prefix has at least one
@@ -665,5 +749,34 @@ mod tests {
         let mut sorted = COMMAND_NAMES.to_vec();
         sorted.sort_unstable();
         assert_eq!(sorted.as_slice(), COMMAND_NAMES);
+    }
+
+    #[test]
+    fn test_nearest_command_name_returns_close_match() {
+        assert_eq!(nearest_command_name("helo"), Some("help"));
+        assert_eq!(nearest_command_name("archieve"), Some("archive"));
+        // Transposition: Damerau distance from "seacrh" to "search" is 1.
+        assert_eq!(nearest_command_name("seacrh"), Some("search"));
+    }
+
+    #[test]
+    fn test_nearest_command_name_returns_none_for_far_match() {
+        assert_eq!(nearest_command_name("zzz"), None);
+        // Length delta vs every command name is > 2 so the short
+        // circuit fires before any matrix work.
+        assert_eq!(nearest_command_name("delete-everything"), None);
+    }
+
+    #[test]
+    fn test_nearest_command_name_empty_input_is_none() {
+        assert_eq!(nearest_command_name(""), None);
+    }
+
+    #[test]
+    fn test_nearest_command_name_breaks_ties_lex_ascending() {
+        // "sn" is distance 2 from both "seen" and "sync"; "seen"
+        // precedes "sync" in COMMAND_NAMES (which is sorted), so the
+        // helper must surface "seen".
+        assert_eq!(nearest_command_name("sn"), Some("seen"));
     }
 }

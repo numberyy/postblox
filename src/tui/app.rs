@@ -2703,15 +2703,31 @@ impl AppState {
         true
     }
 
-    /// Switch the active folder by exact name match within the current
-    /// account. Returns true on a successful match. Same downstream
-    /// reset as moving via `↑`/`↓` on the folders pane.
+    /// Switch the active folder by name match within the current
+    /// account. Exact (case-sensitive) match wins first so users who
+    /// type the precise IMAP name keep that behaviour; if no exact
+    /// match exists, the lookup falls back to ASCII-case-insensitive
+    /// comparison against `folder.name`. Folder names are
+    /// predominantly ASCII (INBOX, Sent, Drafts, Trash, …) so
+    /// `eq_ignore_ascii_case` is the right precision — we deliberately
+    /// avoid `to_lowercase` which is locale-sensitive. Returns true on
+    /// a successful match. Same downstream reset as moving via
+    /// `↑`/`↓` on the folders pane.
     pub(crate) fn select_folder_by_name(&mut self, name: &str) -> bool {
         let needle = name.trim();
         if needle.is_empty() {
             return false;
         }
-        let Some(index) = self.folders.iter().position(|folder| folder.name == needle) else {
+        let index = self
+            .folders
+            .iter()
+            .position(|folder| folder.name == needle)
+            .or_else(|| {
+                self.folders
+                    .iter()
+                    .position(|folder| folder.name.eq_ignore_ascii_case(needle))
+            });
+        let Some(index) = index else {
             return false;
         };
         if self.selected_folder == index {
@@ -7186,5 +7202,45 @@ mod tests {
         assert_eq!(app.help_scroll, 42);
         app.scroll_help_home();
         assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn test_select_folder_by_name_prefers_exact_match() {
+        let mut app = AppState::default();
+        app.apply_folders(vec![folder("inbox"), folder("INBOX")]);
+
+        assert!(app.select_folder_by_name("INBOX"));
+        // The exact (case-sensitive) match is the second folder; the
+        // fallback would have picked the first one.
+        assert_eq!(app.folders[app.selected_folder].name, "INBOX");
+        assert_eq!(app.selected_folder, 1);
+    }
+
+    #[test]
+    fn test_select_folder_by_name_falls_back_to_case_insensitive() {
+        let mut app = AppState::default();
+        app.apply_folders(vec![folder("INBOX")]);
+
+        assert!(app.select_folder_by_name("inbox"));
+        assert_eq!(app.folders[app.selected_folder].name, "INBOX");
+    }
+
+    #[test]
+    fn test_select_folder_by_name_returns_false_for_unknown() {
+        let mut app = AppState::default();
+        app.apply_folders(vec![folder("INBOX")]);
+        let initial = app.selected_folder;
+
+        assert!(!app.select_folder_by_name("Nonexistent"));
+        assert_eq!(app.selected_folder, initial);
+    }
+
+    #[test]
+    fn test_select_folder_by_name_trims_whitespace_then_matches() {
+        let mut app = AppState::default();
+        app.apply_folders(vec![folder("INBOX")]);
+
+        assert!(app.select_folder_by_name("  inbox  "));
+        assert_eq!(app.folders[app.selected_folder].name, "INBOX");
     }
 }
