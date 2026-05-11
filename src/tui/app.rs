@@ -46,6 +46,8 @@ pub(crate) const MAX_COMPOSE_PATH_CHARS: usize = 4096;
 /// Maximum number of simultaneously visible toasts. Pushing past this
 /// drops the oldest toast.
 pub(crate) const MAX_TOASTS: usize = 3;
+pub(crate) const FOLDER_CACHE_CAPACITY: usize = 6;
+pub(crate) const FOLDER_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// TTL for non-error toasts.
 pub(crate) const TOAST_TTL_INFO: Duration = Duration::from_secs(3);
@@ -892,6 +894,116 @@ pub struct MessageListSnapshot {
     selected_message: usize,
 }
 
+/// Authoritative folder message rows plus cursor hints for a cache restore.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct FolderSnapshot {
+    folder_messages: Vec<MessageItem>,
+    selected_thread_key: Option<Uuid>,
+    selected_message_id: Option<MessageId>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct FolderCacheEntry {
+    account_id: AccountId,
+    folder_id: FolderId,
+    snapshot: FolderSnapshot,
+    stored_at: Instant,
+    generation: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct FolderMessageCache {
+    capacity: usize,
+    ttl: Duration,
+    generation: u64,
+    entries: VecDeque<FolderCacheEntry>,
+}
+
+impl Default for FolderMessageCache {
+    fn default() -> Self {
+        Self {
+            capacity: FOLDER_CACHE_CAPACITY,
+            ttl: FOLDER_CACHE_TTL,
+            generation: 0,
+            entries: VecDeque::new(),
+        }
+    }
+}
+
+impl FolderMessageCache {
+    fn lookup(
+        &mut self,
+        account_id: AccountId,
+        folder_id: FolderId,
+        now: Instant,
+    ) -> Option<FolderSnapshot> {
+        let index = self.entry_index(account_id, folder_id)?;
+        let entry = self.entries.remove(index)?;
+        if now.saturating_duration_since(entry.stored_at) > self.ttl {
+            return None;
+        }
+        let snapshot = entry.snapshot.clone();
+        self.entries.push_back(entry);
+        Some(snapshot)
+    }
+
+    fn store(
+        &mut self,
+        account_id: AccountId,
+        folder_id: FolderId,
+        snapshot: FolderSnapshot,
+        now: Instant,
+    ) {
+        if let Some(index) = self.entry_index(account_id, folder_id) {
+            self.entries.remove(index);
+        }
+        if self.capacity == 0 {
+            return;
+        }
+        while self.entries.len() >= self.capacity {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(FolderCacheEntry {
+            account_id,
+            folder_id,
+            snapshot,
+            stored_at: now,
+            generation: self.generation,
+        });
+    }
+
+    fn invalidate_folder(&mut self, account_id: AccountId, folder_id: FolderId) {
+        self.entries
+            .retain(|entry| entry.account_id != account_id || entry.folder_id != folder_id);
+        self.bump_generation();
+    }
+
+    fn invalidate_account(&mut self, account_id: AccountId) {
+        self.entries.retain(|entry| entry.account_id != account_id);
+        self.bump_generation();
+    }
+
+    fn generation(&self, account_id: AccountId, folder_id: FolderId) -> u64 {
+        self.entries
+            .iter()
+            .find(|entry| entry.account_id == account_id && entry.folder_id == folder_id)
+            .map_or(self.generation, |entry| entry.generation)
+    }
+
+    fn entry_index(&self, account_id: AccountId, folder_id: FolderId) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| entry.account_id == account_id && entry.folder_id == folder_id)
+    }
+
+    fn bump_generation(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+    }
+}
+
 /// One attachment staged in the composer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerAttachment {
@@ -1675,6 +1787,7 @@ pub struct AppState {
     pub(crate) accounts: Vec<AccountItem>,
     pub(crate) folders: Vec<FolderItem>,
     pub(crate) folder_messages: Vec<MessageItem>,
+    pub(crate) folder_cache: FolderMessageCache,
     pub(crate) threads: Vec<ThreadItem>,
     pub(crate) messages: Vec<MessageItem>,
     pub(crate) detail: Option<MessageDetail>,
@@ -1746,6 +1859,7 @@ impl Default for AppState {
             accounts: Vec::new(),
             folders: Vec::new(),
             folder_messages: Vec::new(),
+            folder_cache: FolderMessageCache::default(),
             threads: Vec::new(),
             messages: Vec::new(),
             detail: None,
@@ -1921,12 +2035,68 @@ impl AppState {
     }
 
     pub(crate) fn apply_folder_messages(&mut self, messages: Vec<MessageItem>) {
+        let selected_account_id = self.selected_account_id();
+        let selected_folder_id = self.selected_folder_id();
         let previous_key = self.selected_thread().map(|thread| thread.key);
         self.folder_messages = messages;
         self.rebuild_threads(previous_key);
         self.refresh_visible_messages();
         self.normalize_active_pane();
         self.clear_detail_state();
+        if let (Some(account_id), Some(folder_id)) = (selected_account_id, selected_folder_id) {
+            self.folder_cache_store(account_id, folder_id, Instant::now());
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn folder_cache_lookup(
+        &mut self,
+        account_id: AccountId,
+        folder_id: FolderId,
+        now: Instant,
+    ) -> Option<FolderSnapshot> {
+        self.folder_cache.lookup(account_id, folder_id, now)
+    }
+
+    pub(crate) fn folder_cache_store(
+        &mut self,
+        account_id: AccountId,
+        folder_id: FolderId,
+        now: Instant,
+    ) {
+        if self.approvals_folder_selected() {
+            return;
+        }
+        let snapshot = FolderSnapshot {
+            folder_messages: self.folder_messages.clone(),
+            selected_thread_key: self.selected_thread().map(|thread| thread.key),
+            selected_message_id: self.selected_message_id(),
+        };
+        self.folder_cache
+            .store(account_id, folder_id, snapshot, now);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn folder_cache_invalidate_folder(
+        &mut self,
+        account_id: AccountId,
+        folder_id: FolderId,
+    ) {
+        self.folder_cache.invalidate_folder(account_id, folder_id);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn folder_cache_invalidate_account(&mut self, account_id: AccountId) {
+        self.folder_cache.invalidate_account(account_id);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn folder_cache_generation(
+        &self,
+        account_id: AccountId,
+        folder_id: FolderId,
+    ) -> u64 {
+        self.folder_cache.generation(account_id, folder_id)
     }
 
     pub(crate) fn apply_drafts(&mut self, drafts: Vec<DraftItem>) {
@@ -3214,6 +3384,21 @@ impl AppState {
         self.selected_message = snapshot.selected_message;
         clamp_index(&mut self.selected_message, self.messages.len());
         self.normalize_active_pane();
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn restore_folder_snapshot(&mut self, snapshot: FolderSnapshot) {
+        let selected_thread_key = snapshot.selected_thread_key;
+        let selected_message_id = snapshot.selected_message_id;
+        self.folder_messages = snapshot.folder_messages;
+        self.rebuild_threads(selected_thread_key);
+        self.refresh_visible_messages();
+        if let Some(index) = selected_message_id.and_then(|id| self.message_index(id)) {
+            self.selected_message = index;
+        }
+        clamp_index(&mut self.selected_message, self.messages.len());
+        self.normalize_active_pane();
+        self.clear_detail_state();
     }
 
     pub(crate) fn begin_delete_confirmation(&mut self, message_id: MessageId) {
@@ -4602,6 +4787,30 @@ mod tests {
         }
     }
 
+    fn app_with_selected_folder() -> (AppState, AccountId, FolderId) {
+        let account = account("one");
+        let account_id = account.id;
+        let folder = folder("INBOX");
+        let folder_id = folder.id;
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account]);
+        app.apply_folders(vec![folder]);
+        (app, account_id, folder_id)
+    }
+
+    fn store_cache_message(
+        app: &mut AppState,
+        account_id: AccountId,
+        folder_id: FolderId,
+        subject: &str,
+        now: Instant,
+    ) {
+        app.folder_messages = vec![message(subject)];
+        app.rebuild_threads(None);
+        app.refresh_visible_messages();
+        app.folder_cache_store(account_id, folder_id, now);
+    }
+
     #[test]
     fn test_draft_attachment_decode_failure_keeps_bytes_absent() {
         let attachment = DraftAttachmentBytes::from(draft_attachment_payload("not valid base64"));
@@ -4995,6 +5204,184 @@ mod tests {
 
         assert_eq!(app.selected_message, 0);
         assert_eq!(app.selected_message_id(), Some(app.messages[0].id));
+    }
+
+    #[test]
+    fn test_folder_cache_insert_and_lookup_returns_snapshot() {
+        let (mut app, account_id, folder_id) = app_with_selected_folder();
+        app.apply_folder_messages(vec![message("one"), message("two")]);
+
+        let snapshot = app
+            .folder_cache_lookup(account_id, folder_id, Instant::now())
+            .expect("fresh cache snapshot");
+
+        assert_eq!(snapshot.folder_messages.len(), 2);
+    }
+
+    #[test]
+    fn test_folder_cache_lru_evicts_oldest_when_over_capacity() {
+        let mut app = AppState::default();
+        let account_id = AccountId::new();
+        let started_at = Instant::now();
+        let folder_ids = (0..=FOLDER_CACHE_CAPACITY)
+            .map(|index| {
+                let folder_id = FolderId::new();
+                store_cache_message(
+                    &mut app,
+                    account_id,
+                    folder_id,
+                    &format!("message {index}"),
+                    started_at + Duration::from_secs(index as u64),
+                );
+                folder_id
+            })
+            .collect::<Vec<_>>();
+
+        let lookup_at = started_at + Duration::from_secs(FOLDER_CACHE_CAPACITY as u64 + 1);
+
+        assert_eq!(app.folder_cache.entries.len(), FOLDER_CACHE_CAPACITY);
+        assert!(app
+            .folder_cache_lookup(account_id, folder_ids[0], lookup_at)
+            .is_none());
+        assert!(app
+            .folder_cache_lookup(account_id, folder_ids[1], lookup_at)
+            .is_some());
+    }
+
+    #[test]
+    fn test_folder_cache_ttl_invalidates_when_expired() {
+        let mut app = AppState::default();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let stored_at = Instant::now();
+        store_cache_message(&mut app, account_id, folder_id, "old", stored_at);
+
+        let expired_at = stored_at + FOLDER_CACHE_TTL + Duration::from_millis(1);
+
+        assert!(app
+            .folder_cache_lookup(account_id, folder_id, expired_at)
+            .is_none());
+        assert!(app.folder_cache.entries.is_empty());
+    }
+
+    #[test]
+    fn test_folder_cache_invalidate_folder_drops_entry() {
+        let mut app = AppState::default();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let now = Instant::now();
+        store_cache_message(&mut app, account_id, folder_id, "one", now);
+
+        app.folder_cache_invalidate_folder(account_id, folder_id);
+
+        assert!(app
+            .folder_cache_lookup(account_id, folder_id, now)
+            .is_none());
+    }
+
+    #[test]
+    fn test_folder_cache_invalidate_account_drops_only_matching() {
+        let mut app = AppState::default();
+        let account_a = AccountId::new();
+        let account_b = AccountId::new();
+        let folder_a1 = FolderId::new();
+        let folder_a2 = FolderId::new();
+        let folder_b1 = FolderId::new();
+        let folder_b2 = FolderId::new();
+        let now = Instant::now();
+        store_cache_message(&mut app, account_a, folder_a1, "a1", now);
+        store_cache_message(&mut app, account_a, folder_a2, "a2", now);
+        store_cache_message(&mut app, account_b, folder_b1, "b1", now);
+        store_cache_message(&mut app, account_b, folder_b2, "b2", now);
+
+        app.folder_cache_invalidate_account(account_a);
+
+        assert!(app.folder_cache_lookup(account_a, folder_a1, now).is_none());
+        assert!(app.folder_cache_lookup(account_a, folder_a2, now).is_none());
+        assert!(app.folder_cache_lookup(account_b, folder_b1, now).is_some());
+        assert!(app.folder_cache_lookup(account_b, folder_b2, now).is_some());
+    }
+
+    #[test]
+    fn test_folder_cache_store_replaces_existing_entry_for_same_folder() {
+        let mut app = AppState::default();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let now = Instant::now();
+        store_cache_message(&mut app, account_id, folder_id, "old", now);
+        store_cache_message(&mut app, account_id, folder_id, "new", now);
+
+        let snapshot = app
+            .folder_cache_lookup(account_id, folder_id, now)
+            .expect("replaced cache snapshot");
+
+        assert_eq!(app.folder_cache.entries.len(), 1);
+        assert_eq!(snapshot.folder_messages[0].subject, "new");
+    }
+
+    #[test]
+    fn test_folder_cache_generation_bumps_on_invalidate_folder() {
+        let mut app = AppState::default();
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        store_cache_message(&mut app, account_id, folder_id, "one", Instant::now());
+        let before = app.folder_cache_generation(account_id, folder_id);
+
+        app.folder_cache_invalidate_folder(account_id, folder_id);
+        let after = app.folder_cache_generation(account_id, folder_id);
+
+        assert!(after > before);
+    }
+
+    #[test]
+    fn test_folder_cache_skips_approvals_virtual_folder() {
+        let account = account("one");
+        let account_id = account.id;
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account]);
+        assert!(app.select_approvals_folder());
+        app.folder_messages = vec![message("approval")];
+        let approvals_id = FolderId::from(Uuid::nil());
+
+        app.folder_cache_store(account_id, approvals_id, Instant::now());
+
+        assert!(app
+            .folder_cache_lookup(account_id, approvals_id, Instant::now())
+            .is_none());
+    }
+
+    #[test]
+    fn test_folder_cache_restore_rebuilds_threads_and_visible_messages() {
+        let first_thread = ThreadId::new();
+        let second_thread = ThreadId::new();
+        let first_oldest = thread_message(first_thread, "first oldest", "2026-05-07 09:00", &[]);
+        let first_oldest_id = first_oldest.id;
+        let first_newest = thread_message(first_thread, "first newest", "2026-05-07 12:00", &[]);
+        let second = thread_message(second_thread, "second", "2026-05-07 11:00", &[]);
+        let snapshot = FolderSnapshot {
+            folder_messages: vec![second, first_newest, first_oldest],
+            selected_thread_key: Some(first_thread.into_inner()),
+            selected_message_id: Some(first_oldest_id),
+        };
+        let mut app = AppState::default();
+        app.apply_detail(Some(MessageDetail {
+            id: MessageId::new(),
+            subject: "stale".into(),
+            from: "alice@example.com".into(),
+            snippet: "stale".into(),
+            body: "stale".into(),
+            flags: Vec::new(),
+        }));
+
+        app.restore_folder_snapshot(snapshot);
+
+        assert_eq!(app.threads.len(), 2);
+        assert_eq!(app.selected_thread().unwrap().thread_id, Some(first_thread));
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.messages[0].subject, "first oldest");
+        assert_eq!(app.messages[1].subject, "first newest");
+        assert_eq!(app.selected_message_id(), Some(first_oldest_id));
+        assert!(app.detail.is_none());
     }
 
     #[test]
