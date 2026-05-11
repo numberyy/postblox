@@ -12,7 +12,7 @@
 //! the daemon-side limits so the UI rejects oversize inputs before
 //! round-tripping.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -322,6 +322,72 @@ impl From<Message> for MessageDetail {
             body,
             flags: flags_from_value(&message.flags),
         }
+    }
+}
+
+/// Expansion, focus, and loaded body cache for the selected conversation stack.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct ConversationDetailState {
+    focused_message_id: Option<MessageId>,
+    expanded_message_ids: HashSet<MessageId>,
+    details_by_id: HashMap<MessageId, MessageDetail>,
+}
+
+impl ConversationDetailState {
+    fn reset(&mut self, messages: &[MessageItem], selected_message: usize) {
+        self.expanded_message_ids.clear();
+        self.details_by_id.clear();
+        self.focused_message_id = messages
+            .get(selected_message.min(messages.len().saturating_sub(1)))
+            .map(|message| message.id);
+        if let Some(message_id) = self.focused_message_id {
+            self.expanded_message_ids.insert(message_id);
+        }
+    }
+
+    fn focused_message_id(&self) -> Option<MessageId> {
+        self.focused_message_id
+    }
+
+    fn set_focused_message_id(&mut self, message_id: Option<MessageId>) {
+        self.focused_message_id = message_id;
+    }
+
+    fn is_expanded(&self, message_id: MessageId, message_count: usize) -> bool {
+        message_count == 1 || self.expanded_message_ids.contains(&message_id)
+    }
+
+    fn toggle_focused(&mut self, message_count: usize) -> Option<bool> {
+        if message_count == 0 {
+            return None;
+        }
+        if message_count == 1 {
+            return Some(true);
+        }
+        let message_id = self.focused_message_id?;
+        if self.expanded_message_ids.remove(&message_id) {
+            Some(false)
+        } else {
+            self.expanded_message_ids.insert(message_id);
+            Some(true)
+        }
+    }
+
+    fn expand_all(&mut self, messages: &[MessageItem]) {
+        self.expanded_message_ids
+            .extend(messages.iter().map(|message| message.id));
+    }
+
+    fn cache_detail(&mut self, detail: MessageDetail) {
+        self.details_by_id.insert(detail.id, detail);
+    }
+
+    fn detail(&self, message_id: MessageId) -> Option<&MessageDetail> {
+        self.details_by_id.get(&message_id)
+    }
+
+    fn has_detail(&self, message_id: MessageId) -> bool {
+        self.details_by_id.contains_key(&message_id)
     }
 }
 
@@ -1280,6 +1346,8 @@ pub struct AppState {
     pub(crate) threads: Vec<ThreadItem>,
     pub(crate) messages: Vec<MessageItem>,
     pub(crate) detail: Option<MessageDetail>,
+    /// Stack expansion/focus state for the selected conversation detail pane.
+    pub(crate) conversation_detail: ConversationDetailState,
     pub(crate) detail_text_cache: Option<TextLineCache>,
     pub(crate) detail_cursor: usize,
     pub(crate) detail_scroll: usize,
@@ -1339,6 +1407,7 @@ impl Default for AppState {
             threads: Vec::new(),
             messages: Vec::new(),
             detail: None,
+            conversation_detail: ConversationDetailState::default(),
             detail_text_cache: None,
             detail_cursor: 0,
             detail_scroll: 0,
@@ -1563,31 +1632,13 @@ impl AppState {
             self.clear_attachments();
         }
         if let Some(detail) = &detail {
-            let selected_thread = self.selected_thread().map(|thread| thread.key);
-            if let Some(message) = self
-                .folder_messages
-                .iter_mut()
-                .find(|message| message.id == detail.id)
-            {
-                message.flags = detail.flags.clone();
-            }
-            if let Some(message) = self
-                .messages
-                .iter_mut()
-                .find(|message| message.id == detail.id)
-            {
-                message.flags = detail.flags.clone();
-            }
-            if !self.folder_messages.is_empty() {
-                self.rebuild_threads(selected_thread);
-                self.refresh_visible_messages();
-            }
+            self.update_message_flags_from_detail(detail);
+            self.conversation_detail.cache_detail(detail.clone());
         }
-        self.detail_text_cache = detail
-            .as_ref()
-            .map(|detail| TextLineCache::new(detail_text(detail)));
         self.detail = detail;
+        self.rebuild_detail_text_cache();
         self.reset_detail_navigation_state();
+        self.place_detail_cursor_at_focused_message();
         if was_detail_focused && self.detail.is_some() {
             self.active = ActivePane::Details;
         }
@@ -2457,6 +2508,93 @@ impl AppState {
             .map(|message| (message.id, message.with_flag(flag, enabled)))
     }
 
+    /// Focused message in the conversation detail stack, if a stack is loaded.
+    pub(crate) fn focused_conversation_message_id(&self) -> Option<MessageId> {
+        self.conversation_detail
+            .focused_message_id()
+            .or_else(|| self.selected_message_id())
+    }
+
+    /// Whether `message_id` is expanded in the selected conversation stack.
+    pub(crate) fn is_conversation_message_expanded(&self, message_id: MessageId) -> bool {
+        self.conversation_detail
+            .is_expanded(message_id, self.messages.len())
+    }
+
+    /// Toggle expansion for the focused stack message.
+    pub(crate) fn toggle_focused_message_expansion(&mut self) -> Option<bool> {
+        let expanded = self
+            .conversation_detail
+            .toggle_focused(self.messages.len())?;
+        self.rebuild_detail_text_cache();
+        self.reset_detail_navigation_state();
+        self.place_detail_cursor_at_focused_message();
+        Some(expanded)
+    }
+
+    /// Expand every message in the selected conversation stack.
+    pub(crate) fn expand_all_conversation_messages(&mut self) -> bool {
+        if self.messages.is_empty() {
+            return false;
+        }
+        self.conversation_detail.expand_all(&self.messages);
+        self.rebuild_detail_text_cache();
+        self.reset_detail_navigation_state();
+        self.place_detail_cursor_at_focused_message();
+        true
+    }
+
+    /// Move focus within the selected conversation stack.
+    pub(crate) fn move_conversation_detail_focus(&mut self, delta: isize) -> bool {
+        if self.messages.len() <= 1 {
+            return false;
+        }
+        let current = self
+            .focused_conversation_message_id()
+            .and_then(|message_id| self.message_index(message_id))
+            .unwrap_or(self.selected_message.min(self.messages.len() - 1));
+        let next = clamp_isize(
+            current as isize + delta,
+            0,
+            self.messages.len().saturating_sub(1) as isize,
+        ) as usize;
+        if next == current {
+            return false;
+        }
+        self.selected_message = next;
+        let message_id = self.messages[next].id;
+        self.conversation_detail
+            .set_focused_message_id(Some(message_id));
+        if let Some(detail) = self.conversation_detail.detail(message_id).cloned() {
+            self.detail = Some(detail);
+        }
+        self.clear_attachments();
+        self.reset_detail_navigation_state();
+        self.place_detail_cursor_at_focused_message();
+        true
+    }
+
+    /// Expanded stack message IDs whose bodies have not been fetched yet.
+    pub(crate) fn expanded_message_ids_without_detail(&self) -> Vec<MessageId> {
+        self.messages
+            .iter()
+            .filter(|message| self.is_conversation_message_expanded(message.id))
+            .filter(|message| !self.conversation_detail.has_detail(message.id))
+            .map(|message| message.id)
+            .collect()
+    }
+
+    /// Cache a fetched message body for the conversation stack.
+    pub(crate) fn cache_conversation_detail(&mut self, detail: MessageDetail) {
+        let detail_id = detail.id;
+        self.update_message_flags_from_detail(&detail);
+        self.conversation_detail.cache_detail(detail.clone());
+        if self.focused_conversation_message_id() == Some(detail_id) {
+            self.detail = Some(detail);
+        }
+        self.rebuild_detail_text_cache();
+    }
+
     /// Capture the message-list state needed to undo an optimistic
     /// remove. Returned snapshot is opaque to callers and should only
     /// be passed back to [`AppState::restore_message_list_snapshot`].
@@ -2977,6 +3115,7 @@ impl AppState {
     }
 
     fn refresh_visible_messages(&mut self) {
+        let previous_selected_message = self.selected_message_id();
         if let Some(thread_key) = self.selected_thread().map(|thread| thread.key) {
             self.messages = self
                 .folder_messages
@@ -2990,10 +3129,13 @@ impl AppState {
         }
         // Conversations show the latest message of the selected thread
         // in the Detail pane. `sort_messages_oldest_first` puts the
-        // latest message at the end of `messages`, so point the
-        // selection cursor at it.
+        // latest message at the end of `messages`, so point the cursor
+        // at it unless the previous selection is still in this thread.
         if self.messages.is_empty() {
             self.selected_message = 0;
+        } else if let Some(index) = previous_selected_message.and_then(|id| self.message_index(id))
+        {
+            self.selected_message = index;
         } else {
             self.selected_message = self.messages.len() - 1;
         }
@@ -3049,6 +3191,8 @@ impl AppState {
     fn clear_detail_state(&mut self) {
         self.detail = None;
         self.detail_text_cache = None;
+        self.conversation_detail
+            .reset(&self.messages, self.selected_message);
         self.reset_detail_navigation_state();
         self.clear_attachments();
     }
@@ -3103,6 +3247,112 @@ impl AppState {
         self.detail_selection_anchor = None;
         self.detail_selection_focus = 0;
         self.detail_preferred_column = None;
+    }
+
+    fn message_index(&self, message_id: MessageId) -> Option<usize> {
+        self.messages
+            .iter()
+            .position(|message| message.id == message_id)
+    }
+
+    fn update_message_flags_from_detail(&mut self, detail: &MessageDetail) {
+        let selected_thread = self.selected_thread().map(|thread| thread.key);
+        if let Some(message) = self
+            .folder_messages
+            .iter_mut()
+            .find(|message| message.id == detail.id)
+        {
+            message.flags = detail.flags.clone();
+        }
+        if let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id == detail.id)
+        {
+            message.flags = detail.flags.clone();
+        }
+        if !self.folder_messages.is_empty() {
+            self.rebuild_threads(selected_thread);
+            self.refresh_visible_messages();
+        }
+    }
+
+    fn rebuild_detail_text_cache(&mut self) {
+        self.detail_text_cache = self.conversation_detail_text().map(TextLineCache::new);
+    }
+
+    fn conversation_detail_text(&self) -> Option<String> {
+        if self.messages.is_empty() {
+            return self.detail.as_ref().map(detail_text);
+        }
+        if self.messages.len() == 1 {
+            let message = &self.messages[0];
+            return Some(
+                self.conversation_detail
+                    .detail(message.id)
+                    .or(self
+                        .detail
+                        .as_ref()
+                        .filter(|detail| detail.id == message.id))
+                    .map(detail_text)
+                    .unwrap_or_else(|| message_summary_detail_text(message)),
+            );
+        }
+
+        let mut out = String::new();
+        for (index, message) in self.messages.iter().enumerate() {
+            if index > 0 {
+                out.push('\n');
+            }
+            if self.is_conversation_message_expanded(message.id) {
+                out.push_str(&expanded_message_header(message));
+                out.push('\n');
+                if let Some(detail) = self.conversation_detail.detail(message.id).or(self
+                    .detail
+                    .as_ref()
+                    .filter(|detail| detail.id == message.id))
+                {
+                    out.push_str(&stack_detail_text(detail));
+                } else {
+                    out.push_str(&message_summary_detail_text(message));
+                }
+            } else {
+                out.push_str(&collapsed_message_header(message));
+            }
+        }
+        Some(out)
+    }
+
+    fn place_detail_cursor_at_focused_message(&mut self) {
+        let line = self.focused_message_header_line();
+        self.detail_cursor = self.detail_line_start(line);
+        self.detail_selection_focus = line;
+    }
+
+    fn focused_message_header_line(&self) -> usize {
+        let Some(focused_message_id) = self.focused_conversation_message_id() else {
+            return 0;
+        };
+        if self.messages.len() <= 1 {
+            return 0;
+        }
+        let mut line = 0usize;
+        for message in &self.messages {
+            if message.id == focused_message_id {
+                return line;
+            }
+            line = line.saturating_add(1);
+            if self.is_conversation_message_expanded(message.id) {
+                line = line.saturating_add(stack_message_body_line_count(
+                    self.conversation_detail.detail(message.id).or(self
+                        .detail
+                        .as_ref()
+                        .filter(|detail| detail.id == message.id)),
+                    message,
+                ));
+            }
+        }
+        0
     }
 }
 
@@ -3172,6 +3422,50 @@ fn detail_text(detail: &MessageDetail) -> String {
         "Subject: {}\nFrom: {}\nSnippet: {}\n\n{}",
         detail.subject, detail.from, detail.snippet, detail.body
     )
+}
+
+fn stack_detail_text(detail: &MessageDetail) -> String {
+    format!(
+        "Subject: {}\nSnippet: {}\n\n{}",
+        detail.subject, detail.snippet, detail.body
+    )
+}
+
+fn message_summary_detail_text(message: &MessageItem) -> String {
+    format!(
+        "Subject: {}\nSnippet: {}\n\n{}",
+        message.subject, message.snippet, message.snippet
+    )
+}
+
+fn expanded_message_header(message: &MessageItem) -> String {
+    format!("[-] {} · {}", message.from, message.date)
+}
+
+fn collapsed_message_header(message: &MessageItem) -> String {
+    let snippet = first_chars_one_line(&message.snippet, 72);
+    if snippet.is_empty() {
+        format!("[+] {} · {}", message.from, message.date)
+    } else {
+        format!("[+] {} · {} · {}", message.from, message.date, snippet)
+    }
+}
+
+fn first_chars_one_line(value: &str, limit: usize) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(limit)
+        .collect()
+}
+
+fn stack_message_body_line_count(detail: Option<&MessageDetail>, message: &MessageItem) -> usize {
+    let text = detail
+        .map(stack_detail_text)
+        .unwrap_or_else(|| message_summary_detail_text(message));
+    LineCache::from_text(&text).line_count()
 }
 
 /// Render a JSON address array as a comma-joined label for a Drafts
@@ -3862,6 +4156,134 @@ mod tests {
         assert_eq!(app.messages.len(), 2);
         assert_eq!(app.messages[0].subject, "replacement first");
         assert_eq!(app.messages[1].subject, "replacement reply");
+    }
+
+    #[test]
+    fn test_conversation_detail_state_defaults_newest_message_expanded_focused() {
+        let thread_id = ThreadId::new();
+        let mut app = AppState::default();
+        let oldest = thread_message(thread_id, "oldest", "2026-05-07 09:00", &[SEEN_FLAG]);
+        let middle = thread_message(thread_id, "middle", "2026-05-07 10:00", &[SEEN_FLAG]);
+        let newest = thread_message(thread_id, "newest", "2026-05-07 11:00", &[SEEN_FLAG]);
+        let oldest_id = oldest.id;
+        let middle_id = middle.id;
+        let newest_id = newest.id;
+
+        app.apply_folder_messages(vec![newest, oldest, middle]);
+
+        assert_eq!(app.selected_message_id(), Some(newest_id));
+        assert_eq!(app.focused_conversation_message_id(), Some(newest_id));
+        assert!(app.is_conversation_message_expanded(newest_id));
+        assert!(!app.is_conversation_message_expanded(oldest_id));
+        assert!(!app.is_conversation_message_expanded(middle_id));
+    }
+
+    #[test]
+    fn test_conversation_detail_state_switching_conversation_resets_newest() {
+        let first_thread = ThreadId::new();
+        let second_thread = ThreadId::new();
+        let first_oldest = thread_message(
+            first_thread,
+            "first oldest",
+            "2026-05-07 09:00",
+            &[SEEN_FLAG],
+        );
+        let first_newest = thread_message(
+            first_thread,
+            "first newest",
+            "2026-05-07 12:00",
+            &[SEEN_FLAG],
+        );
+        let second_oldest = thread_message(
+            second_thread,
+            "second oldest",
+            "2026-05-07 08:00",
+            &[SEEN_FLAG],
+        );
+        let second_newest = thread_message(
+            second_thread,
+            "second newest",
+            "2026-05-07 11:00",
+            &[SEEN_FLAG],
+        );
+        let second_oldest_id = second_oldest.id;
+        let second_newest_id = second_newest.id;
+        let mut app = AppState {
+            active: ActivePane::Conversations,
+            ..Default::default()
+        };
+        app.apply_folder_messages(vec![
+            first_newest,
+            first_oldest,
+            second_newest,
+            second_oldest,
+        ]);
+        assert!(app.move_conversation_detail_focus(-1));
+        assert_eq!(app.selected_message, 0);
+
+        assert!(app.move_selection(1));
+
+        assert_eq!(
+            app.selected_thread().unwrap().thread_id,
+            Some(second_thread)
+        );
+        assert_eq!(app.selected_message_id(), Some(second_newest_id));
+        assert_eq!(
+            app.focused_conversation_message_id(),
+            Some(second_newest_id)
+        );
+        assert!(app.is_conversation_message_expanded(second_newest_id));
+        assert!(!app.is_conversation_message_expanded(second_oldest_id));
+    }
+
+    #[test]
+    fn test_toggle_focused_message_expansion_collapses_and_expands() {
+        let thread_id = ThreadId::new();
+        let older = thread_message(thread_id, "older", "2026-05-07 09:00", &[SEEN_FLAG]);
+        let older_id = older.id;
+        let newer = thread_message(thread_id, "newer", "2026-05-07 10:00", &[SEEN_FLAG]);
+        let mut app = AppState::default();
+        app.apply_folder_messages(vec![newer, older]);
+        assert!(app.move_conversation_detail_focus(-1));
+
+        assert_eq!(app.toggle_focused_message_expansion(), Some(true));
+        assert!(app.is_conversation_message_expanded(older_id));
+        assert_eq!(app.toggle_focused_message_expansion(), Some(false));
+        assert!(!app.is_conversation_message_expanded(older_id));
+    }
+
+    #[test]
+    fn test_expand_all_conversation_messages_expands_every_message() {
+        let thread_id = ThreadId::new();
+        let oldest = thread_message(thread_id, "oldest", "2026-05-07 09:00", &[SEEN_FLAG]);
+        let middle = thread_message(thread_id, "middle", "2026-05-07 10:00", &[SEEN_FLAG]);
+        let newest = thread_message(thread_id, "newest", "2026-05-07 11:00", &[SEEN_FLAG]);
+        let ids = vec![oldest.id, middle.id, newest.id];
+        let mut app = AppState::default();
+        app.apply_folder_messages(vec![newest, oldest, middle]);
+
+        assert!(app.expand_all_conversation_messages());
+
+        for message_id in ids {
+            assert!(app.is_conversation_message_expanded(message_id));
+        }
+    }
+
+    #[test]
+    fn test_move_conversation_detail_focus_updates_selected_message_for_attachments() {
+        let thread_id = ThreadId::new();
+        let older = thread_message(thread_id, "older", "2026-05-07 09:00", &[SEEN_FLAG]);
+        let older_id = older.id;
+        let newer = thread_message(thread_id, "newer", "2026-05-07 10:00", &[SEEN_FLAG]);
+        let newer_id = newer.id;
+        let mut app = AppState::default();
+        app.apply_folder_messages(vec![newer, older]);
+        assert_eq!(app.selected_message_id(), Some(newer_id));
+
+        assert!(app.move_conversation_detail_focus(-1));
+
+        assert_eq!(app.focused_conversation_message_id(), Some(older_id));
+        assert_eq!(app.selected_message_id(), Some(older_id));
     }
 
     #[test]

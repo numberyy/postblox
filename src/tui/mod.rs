@@ -598,7 +598,7 @@ async fn handle_key<C: Mailbox + ?Sized>(
         return false;
     }
 
-    if app.active == ActivePane::Details && handle_detail_key(key, app) {
+    if app.active == ActivePane::Details && handle_detail_key(key, app, client).await {
         return false;
     }
 
@@ -1019,7 +1019,11 @@ fn non_empty_string(value: &str) -> Option<String> {
     }
 }
 
-fn handle_detail_key(key: KeyEvent, app: &mut AppState) -> bool {
+async fn handle_detail_key<C: Mailbox + ?Sized>(
+    key: KeyEvent,
+    app: &mut AppState,
+    client: &mut C,
+) -> bool {
     match key.code {
         KeyCode::Esc => {
             if app.clear_detail_selection() {
@@ -1032,15 +1036,43 @@ fn handle_detail_key(key: KeyEvent, app: &mut AppState) -> bool {
         KeyCode::Down | KeyCode::Char('j') => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 app.start_detail_line_selection();
+                app.move_detail_line(1, DETAIL_KEY_VIEWPORT_LINES);
+            } else if app.move_conversation_detail_focus(1) {
+                refresh_detail(app, client).await;
+            } else {
+                app.move_detail_line(1, DETAIL_KEY_VIEWPORT_LINES);
             }
-            app.move_detail_line(1, DETAIL_KEY_VIEWPORT_LINES);
             true
         }
         KeyCode::Up | KeyCode::Char('k') => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 app.start_detail_line_selection();
+                app.move_detail_line(-1, DETAIL_KEY_VIEWPORT_LINES);
+            } else if app.move_conversation_detail_focus(-1) {
+                refresh_detail(app, client).await;
+            } else {
+                app.move_detail_line(-1, DETAIL_KEY_VIEWPORT_LINES);
             }
-            app.move_detail_line(-1, DETAIL_KEY_VIEWPORT_LINES);
+            true
+        }
+        KeyCode::Char('o') => {
+            match app.toggle_focused_message_expansion() {
+                Some(true) => {
+                    refresh_missing_expanded_details(app, client).await;
+                    app.set_status("Message expanded");
+                }
+                Some(false) => app.set_status("Message collapsed"),
+                None => app.set_status("No message selected"),
+            }
+            true
+        }
+        KeyCode::Char('O') => {
+            if app.expand_all_conversation_messages() {
+                refresh_missing_expanded_details(app, client).await;
+                app.set_status("Conversation expanded");
+            } else {
+                app.set_status("No message selected");
+            }
             true
         }
         KeyCode::PageDown => {
@@ -1092,6 +1124,25 @@ fn handle_detail_key(key: KeyEvent, app: &mut AppState) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+async fn refresh_missing_expanded_details<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
+    let missing = app.expanded_message_ids_without_detail();
+    for message_id in missing {
+        match client.get_message(message_id).await {
+            Ok(Some(detail)) => {
+                app.clear_error();
+                app.cache_conversation_detail(detail);
+            }
+            Ok(None) => {
+                app.set_status("Message no longer exists");
+            }
+            Err(error) => {
+                record_error(app, error);
+                return;
+            }
+        }
     }
 }
 
@@ -2372,7 +2423,7 @@ async fn refresh_detail<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C)
 }
 
 async fn refresh_attachments<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
-    let Some(message_id) = app.detail.as_ref().map(|detail| detail.id) else {
+    let Some(message_id) = app.selected_message_id() else {
         app.apply_attachments(Vec::new());
         return;
     };
@@ -3591,6 +3642,44 @@ mod tests {
             vec![Call::GetMessage(reply.id), Call::ListAttachments(reply.id),]
         );
         assert_eq!(app.detail.as_ref().unwrap().id, reply.id);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_detail_k_moves_stack_focus_and_refreshes_attachments() {
+        let thread_id = ThreadId::new();
+        let start = thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]);
+        let reply = thread_message_item(thread_id, "Reply", "2026-05-07 10:00", vec!["\\Seen"]);
+        let attachment_id = AttachmentId::new();
+        let mut app = AppState::default();
+        app.apply_folder_messages(vec![reply.clone(), start.clone()]);
+        app.apply_detail(Some(detail_for(&reply)));
+        app.active = ActivePane::Details;
+        let mut client = MockMailbox {
+            detail: Some(detail_for(&start)),
+            attachments: vec![attachment_item(attachment_id, start.id)],
+            ..Default::default()
+        };
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.selected_message_id(), Some(start.id));
+        assert_eq!(app.focused_conversation_message_id(), Some(start.id));
+        assert_eq!(app.attachments.len(), 1);
+        assert_eq!(
+            client.calls,
+            vec![
+                Call::GetMessage(start.id),
+                Call::ListAttachments(start.id),
+                Call::PreviewAttachment(attachment_id),
+            ]
+        );
     }
 
     #[tokio::test]

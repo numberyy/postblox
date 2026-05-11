@@ -753,7 +753,7 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
                 )
             } else if app.active == ActivePane::Details {
                 format!(
-                    " {status} | Details: Tab pane • d details • ↑/↓/j/k lines • PgUp/PgDn/Ctrl-U/D page • ←/→ cursor • Home/End line • v select • Esc clear VIS • a attach • q quit "
+                    " {status} | Details: Tab pane • d details • j/k msg/scroll • o toggle • O expand all • PgUp/PgDn page • ←/→ cursor • v select • a attach • q quit "
                 )
             } else {
                 format!(
@@ -905,6 +905,35 @@ mod tests {
             .collect::<String>()
     }
 
+    fn threaded_message(
+        thread_id: ThreadId,
+        subject: &str,
+        from: &str,
+        date: &str,
+        snippet: &str,
+    ) -> MessageItem {
+        MessageItem {
+            id: MessageId::new(),
+            thread_id: Some(thread_id),
+            subject: subject.into(),
+            from: from.into(),
+            date: date.into(),
+            snippet: snippet.into(),
+            flags: Vec::new(),
+        }
+    }
+
+    fn detail_for(message: &MessageItem, body: &str) -> MessageDetail {
+        MessageDetail {
+            id: message.id,
+            subject: message.subject.clone(),
+            from: message.from.clone(),
+            snippet: message.snippet.clone(),
+            body: body.into(),
+            flags: message.flags.clone(),
+        }
+    }
+
     #[test]
     fn test_render_empty_state_shows_friendly_accounts_message() {
         let mut app = AppState::default();
@@ -937,7 +966,7 @@ mod tests {
         }]);
         app.apply_folder_messages(vec![
             MessageItem {
-                id: MessageId::new(),
+                id: selected_id,
                 thread_id: Some(thread_id),
                 subject: "Launch plan reply".into(),
                 from: "alice@example.com".into(),
@@ -946,7 +975,7 @@ mod tests {
                 flags: vec!["\\Flagged".into()],
             },
             MessageItem {
-                id: selected_id,
+                id: MessageId::new(),
                 thread_id: Some(thread_id),
                 subject: "Launch plan".into(),
                 from: "alice@example.com".into(),
@@ -957,7 +986,7 @@ mod tests {
         ]);
         app.apply_detail(Some(MessageDetail {
             id: selected_id,
-            subject: "Launch plan".into(),
+            subject: "Launch plan reply".into(),
             from: "alice@example.com".into(),
             snippet: "Preview".into(),
             body: "Full launch details".into(),
@@ -974,6 +1003,98 @@ mod tests {
         assert!(text.contains("★"));
         assert!(text.contains("Launch plan"));
         assert!(text.contains("Full launch details"));
+    }
+
+    #[test]
+    fn test_render_one_message_conversation_detail_expanded_without_collapsed_header() {
+        let mut app = AppState::default();
+        let thread_id = ThreadId::new();
+        let message = threaded_message(
+            thread_id,
+            "Solo update",
+            "alice@example.com",
+            "2026-05-07 10:00",
+            "Solo preview",
+        );
+        app.apply_folder_messages(vec![message.clone()]);
+        app.apply_detail(Some(detail_for(&message, "Solo body")));
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(text.contains("Solo body"));
+        assert!(!text.contains("[+]"));
+    }
+
+    #[test]
+    fn test_render_three_message_conversation_detail_collapses_older_messages() {
+        let mut app = AppState::default();
+        let thread_id = ThreadId::new();
+        let oldest = threaded_message(
+            thread_id,
+            "Start",
+            "alice@example.com",
+            "2026-05-07 09:00",
+            "Oldest snippet",
+        );
+        let middle = threaded_message(
+            thread_id,
+            "Middle",
+            "bob@example.com",
+            "2026-05-07 10:00",
+            "Middle snippet",
+        );
+        let newest = threaded_message(
+            thread_id,
+            "Latest",
+            "carol@example.com",
+            "2026-05-07 11:00",
+            "Newest snippet",
+        );
+        app.apply_folder_messages(vec![newest.clone(), oldest, middle]);
+        app.apply_detail(Some(detail_for(&newest, "Newest body")));
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert_eq!(text.matches("[+]").count(), 2);
+        assert!(text.contains("[-] carol@example.com · 2026-05-07 11:00"));
+        assert!(text.contains("Newest body"));
+    }
+
+    #[test]
+    fn test_render_toggled_older_message_expanded_with_body() {
+        let mut app = AppState::default();
+        let thread_id = ThreadId::new();
+        let oldest = threaded_message(
+            thread_id,
+            "Start",
+            "alice@example.com",
+            "2026-05-07 09:00",
+            "Oldest snippet",
+        );
+        let middle = threaded_message(
+            thread_id,
+            "Middle",
+            "bob@example.com",
+            "2026-05-07 10:00",
+            "Middle snippet",
+        );
+        let newest = threaded_message(
+            thread_id,
+            "Latest",
+            "carol@example.com",
+            "2026-05-07 11:00",
+            "Newest snippet",
+        );
+        app.apply_folder_messages(vec![newest.clone(), oldest.clone(), middle]);
+        app.apply_detail(Some(detail_for(&newest, "Newest body")));
+        assert!(app.move_conversation_detail_focus(-2));
+        assert_eq!(app.toggle_focused_message_expansion(), Some(true));
+        app.apply_detail(Some(detail_for(&oldest, "Oldest expanded body")));
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(text.contains("[-] alice@example.com · 2026-05-07 09:00"));
+        assert!(text.contains("Oldest expanded body"));
     }
 
     #[test]
