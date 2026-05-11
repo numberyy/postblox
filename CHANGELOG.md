@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documented
+- R7-G hygiene bundle finalised (G-H1..G-M4 all shipped); plan notes updated.
+- E-H4 approval broadcast subscription verified end-to-end; polling fully removed.
+
 ### Added
 - `just demo` recipe and `postblox-demo-seed` binary that spin up a
   self-contained local daemon, seed accounts/folders/messages/drafts/

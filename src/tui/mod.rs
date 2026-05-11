@@ -2465,6 +2465,14 @@ async fn open_approvals<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C)
     refresh_approvals(app, client).await;
 }
 
+/// Apply an approval decision to the daemon and reconcile the local row list.
+///
+/// The local row is optimistically removed via [`AppState::remove_selected_approval`]
+/// before the IPC call. On `Ok(true)` we deliberately do NOT refetch: the daemon
+/// broadcasts [`Topic::McpApprovalDecided`], which `on_daemon_event` translates into
+/// `remove_approval_by_id`, so the row would be removed a second time by a refresh.
+/// On `Ok(false)` (already-decided) and `Err(...)` the local optimistic remove must
+/// be reconciled against daemon truth, so those branches call `refresh_approvals`.
 async fn run_approval_decision<C: Mailbox + ?Sized>(
     app: &mut AppState,
     client: &mut C,
