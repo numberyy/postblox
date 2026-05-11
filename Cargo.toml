@@ -60,6 +60,10 @@ path = "src/bin/postblox-mcp.rs"
 name = "postblox-bench"
 path = "src/bin/postblox-bench.rs"
 
+[[bin]]
+name = "postblox-demo-seed"
+path = "src/bin/postblox-demo-seed.rs"
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
