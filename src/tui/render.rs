@@ -1627,6 +1627,35 @@ mod tests {
     }
 
     #[test]
+    fn test_render_detail_viewport_shows_focused_stack_marker() {
+        let mut app = AppState::default();
+        let thread_id = ThreadId::new();
+        let oldest = threaded_message(
+            thread_id,
+            "Start",
+            "alice@example.com",
+            "2026-05-07 09:00",
+            "Oldest snippet",
+        );
+        let newest = threaded_message(
+            thread_id,
+            "Latest",
+            "carol@example.com",
+            "2026-05-07 11:00",
+            "Newest snippet",
+        );
+        app.apply_folder_messages(vec![newest.clone(), oldest]);
+        app.apply_detail(Some(detail_for(&newest, "Newest body")));
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(
+            text.contains('▶'),
+            "rendered buffer must contain the focused-stack marker glyph"
+        );
+    }
+
+    #[test]
     fn test_render_singleton_conversation_has_no_count_badge() {
         let mut app = AppState::default();
         app.apply_folders(vec![FolderItem {

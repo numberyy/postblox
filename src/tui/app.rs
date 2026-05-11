@@ -34,6 +34,12 @@ pub(crate) const MAX_COMMAND_CHARS: usize = 128;
 pub(crate) const MAX_COMPOSE_HEADER_CHARS: usize = 4096;
 pub(crate) const MAX_COMPOSE_BODY_CHARS: usize = 100_000;
 
+/// Initial-viewport guess used when reopening a draft so the first
+/// paint shows the bottom of a long body even though the cursor lands
+/// at the top. The real viewport height is supplied by the next render
+/// frame which clamps `body_scroll` cleanly.
+pub(crate) const VISIBLE_BODY_FALLBACK_LINES: usize = 8;
+
 /// Maximum bytes for any single compose attachment AND the per-draft
 /// aggregate. Mirrors the daemon-side limit (`CLAUDE.md`: "Attachment
 /// size: max 25 MB") so the TUI can reject before round-tripping.
@@ -1513,6 +1519,45 @@ impl ComposerState {
                 text.replace_range(start..end, "");
                 *cursor = current;
                 true
+            }
+        };
+        if changed {
+            self.after_text_edit();
+        }
+        changed
+    }
+
+    /// Delete the word immediately before the cursor in the focused field.
+    /// First skips trailing whitespace (so `Ctrl-W` after `"hello "` deletes
+    /// `"hello"`, not just the space), then deletes the contiguous run of
+    /// non-whitespace characters. Treats the body's `\n` as whitespace so
+    /// the cursor walks back across line boundaries (matches bash /
+    /// readline). Returns `true` only when characters were removed.
+    pub(crate) fn delete_word_before_cursor(&mut self) -> bool {
+        let changed = {
+            let (text, cursor) = self.focused_text_and_cursor_mut();
+            let current = (*cursor).min(char_count(text));
+            if current == 0 {
+                *cursor = 0;
+                false
+            } else {
+                let chars: Vec<char> = text.chars().collect();
+                let mut new_cursor = current;
+                while new_cursor > 0 && chars[new_cursor - 1].is_whitespace() {
+                    new_cursor -= 1;
+                }
+                while new_cursor > 0 && !chars[new_cursor - 1].is_whitespace() {
+                    new_cursor -= 1;
+                }
+                if new_cursor == current {
+                    false
+                } else {
+                    let start = char_to_byte_index(text, new_cursor);
+                    let end = char_to_byte_index(text, current);
+                    text.replace_range(start..end, "");
+                    *cursor = new_cursor;
+                    true
+                }
             }
         };
         if changed {
@@ -3101,6 +3146,9 @@ impl AppState {
             self.detail = Some(detail);
         }
         self.clear_attachments();
+        // The detail text cache encodes the focused-header marker, so
+        // rebuild it whenever stack focus moves.
+        self.rebuild_detail_text_cache();
         self.reset_detail_navigation_state();
         self.place_detail_cursor_at_focused_message();
         true
@@ -3308,8 +3356,17 @@ impl AppState {
         }
         if let Some(body) = draft.text_body {
             state.body = body;
-            state.body_cursor = char_count(&state.body);
+            // Reopened drafts land with the cursor at the body start
+            // but the viewport scrolled to the end, so the user sees
+            // their most recent text without losing the top context.
+            // The first render frame clamps `body_scroll` against the
+            // real viewport height.
+            state.body_cursor = 0;
             state.refresh_body_line_cache();
+            state.body_scroll = state
+                .body_line_cache
+                .line_count()
+                .saturating_sub(VISIBLE_BODY_FALLBACK_LINES);
         }
         state.in_reply_to_msg = draft.in_reply_to_msg;
         state.in_reply_to = draft.in_reply_to;
@@ -3420,6 +3477,17 @@ impl AppState {
             return false;
         };
         let changed = composer.delete_at_focused_cursor();
+        if changed {
+            composer.dirty = true;
+        }
+        changed
+    }
+
+    pub(crate) fn delete_word_before_composer_cursor(&mut self) -> bool {
+        let Some(composer) = &mut self.composer else {
+            return false;
+        };
+        let changed = composer.delete_word_before_cursor();
         if changed {
             composer.dirty = true;
         }
@@ -3837,13 +3905,15 @@ impl AppState {
             );
         }
 
+        let focused_id = self.focused_conversation_message_id();
         let mut out = String::new();
         for (index, message) in self.messages.iter().enumerate() {
             if index > 0 {
                 out.push('\n');
             }
+            let focused = focused_id == Some(message.id);
             if self.is_conversation_message_expanded(message.id) {
-                out.push_str(&expanded_message_header(message));
+                out.push_str(&expanded_message_header(message, focused));
                 out.push('\n');
                 if let Some(detail) = self.conversation_detail.detail(message.id).or(self
                     .detail
@@ -3855,7 +3925,7 @@ impl AppState {
                     out.push_str(&message_summary_detail_text(message));
                 }
             } else {
-                out.push_str(&collapsed_message_header(message));
+                out.push_str(&collapsed_message_header(message, focused));
             }
         }
         Some(out)
@@ -4213,16 +4283,21 @@ fn message_summary_detail_text(message: &MessageItem) -> String {
     )
 }
 
-fn expanded_message_header(message: &MessageItem) -> String {
-    format!("[-] {} · {}", message.from, message.date)
+fn expanded_message_header(message: &MessageItem, focused: bool) -> String {
+    let prefix = if focused { "▶ " } else { "" };
+    format!("{prefix}[-] {} · {}", message.from, message.date)
 }
 
-fn collapsed_message_header(message: &MessageItem) -> String {
+fn collapsed_message_header(message: &MessageItem, focused: bool) -> String {
+    let prefix = if focused { "▶ " } else { "" };
     let snippet = first_chars_one_line(&message.snippet, 72);
     if snippet.is_empty() {
-        format!("[+] {} · {}", message.from, message.date)
+        format!("{prefix}[+] {} · {}", message.from, message.date)
     } else {
-        format!("[+] {} · {} · {}", message.from, message.date, snippet)
+        format!(
+            "{prefix}[+] {} · {} · {}",
+            message.from, message.date, snippet
+        )
     }
 }
 
@@ -5245,6 +5320,73 @@ mod tests {
     }
 
     #[test]
+    fn test_conversation_detail_focused_header_shows_marker() {
+        let thread_id = ThreadId::new();
+        let older = thread_message(thread_id, "older", "2026-05-07 09:00", &[SEEN_FLAG]);
+        let newer = thread_message(thread_id, "newer", "2026-05-07 10:00", &[SEEN_FLAG]);
+        let newer_id = newer.id;
+        let mut app = AppState::default();
+        app.apply_folder_messages(vec![newer, older]);
+        app.apply_detail(Some(detail(newer_id, "Newest body")));
+
+        // Default focus is the newest message which is expanded `[-]`.
+        let lines = app.detail_lines();
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("▶ [-]"),
+            "focused expanded header missing marker: {joined:?}"
+        );
+        assert!(
+            joined.contains("[+]"),
+            "non-focused message should still be collapsed: {joined:?}"
+        );
+        // The non-focused header is not prefixed with the marker.
+        let non_focused_header_line = lines
+            .iter()
+            .find(|line| line.contains("[+]"))
+            .expect("collapsed header line");
+        assert!(
+            !non_focused_header_line.starts_with('▶'),
+            "non-focused header has marker: {non_focused_header_line:?}"
+        );
+
+        // Moving focus to the older (collapsed) message shifts the marker.
+        assert!(app.move_conversation_detail_focus(-1));
+        let lines = app.detail_lines();
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("▶ [+]"),
+            "marker should prefix the focused collapsed header: {joined:?}"
+        );
+        // The newest message is now non-focused and expanded, so no marker.
+        let expanded_header_line = lines
+            .iter()
+            .find(|line| line.contains("[-]"))
+            .expect("expanded header line");
+        assert!(
+            !expanded_header_line.starts_with('▶'),
+            "non-focused expanded header has marker: {expanded_header_line:?}"
+        );
+    }
+
+    #[test]
+    fn test_conversation_detail_single_message_omits_marker() {
+        let thread_id = ThreadId::new();
+        let solo = thread_message(thread_id, "solo", "2026-05-07 09:00", &[SEEN_FLAG]);
+        let solo_id = solo.id;
+        let mut app = AppState::default();
+        app.apply_folder_messages(vec![solo]);
+        app.apply_detail(Some(detail(solo_id, "solo body")));
+
+        let lines = app.detail_lines();
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains('▶'),
+            "single-message detail must not show marker: {joined:?}"
+        );
+    }
+
+    #[test]
     fn test_move_conversation_detail_focus_updates_selected_message_for_attachments() {
         let thread_id = ThreadId::new();
         let older = thread_message(thread_id, "older", "2026-05-07 09:00", &[SEEN_FLAG]);
@@ -6210,6 +6352,93 @@ mod tests {
     }
 
     #[test]
+    fn test_composer_ctrl_w_deletes_trailing_whitespace_and_word() {
+        let mut app = AppState::default();
+        app.enter_composer(AccountId::new());
+        let composer = app.composer.as_mut().unwrap();
+        composer.focused = ComposeField::Body;
+        composer.body = "hello world ".into();
+        composer.refresh_body_line_cache();
+        composer.body_cursor = char_count(&composer.body);
+
+        assert!(app.delete_word_before_composer_cursor());
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.body, "hello ");
+        assert_eq!(composer.body_cursor, 6);
+    }
+
+    #[test]
+    fn test_composer_ctrl_w_at_start_of_field_is_noop() {
+        let mut app = AppState::default();
+        app.enter_composer(AccountId::new());
+        let composer = app.composer.as_mut().unwrap();
+        composer.focused = ComposeField::Body;
+        composer.body = String::new();
+        composer.refresh_body_line_cache();
+        composer.body_cursor = 0;
+
+        assert!(!app.delete_word_before_composer_cursor());
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.body, "");
+        assert_eq!(composer.body_cursor, 0);
+    }
+
+    #[test]
+    fn test_composer_ctrl_w_crosses_newline() {
+        let mut app = AppState::default();
+        app.enter_composer(AccountId::new());
+        let composer = app.composer.as_mut().unwrap();
+        composer.focused = ComposeField::Body;
+        composer.body = "first line\nlast".into();
+        composer.refresh_body_line_cache();
+        composer.body_cursor = char_count(&composer.body);
+
+        assert!(app.delete_word_before_composer_cursor());
+        assert_eq!(app.composer.as_ref().unwrap().body, "first line\n");
+
+        assert!(app.delete_word_before_composer_cursor());
+        assert_eq!(app.composer.as_ref().unwrap().body, "first ");
+    }
+
+    #[test]
+    fn test_composer_ctrl_w_only_whitespace_before_cursor() {
+        let mut app = AppState::default();
+        app.enter_composer(AccountId::new());
+        let composer = app.composer.as_mut().unwrap();
+        composer.focused = ComposeField::Body;
+        composer.body = "   ".into();
+        composer.refresh_body_line_cache();
+        composer.body_cursor = char_count(&composer.body);
+
+        assert!(app.delete_word_before_composer_cursor());
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.body, "");
+        assert_eq!(composer.body_cursor, 0);
+    }
+
+    #[test]
+    fn test_composer_ctrl_w_respects_focused_field() {
+        let mut app = AppState::default();
+        app.enter_composer(AccountId::new());
+        // Focus stays on the default `To` field; body should not be
+        // touched when Ctrl-W edits the focused field.
+        for ch in "alice@example.com".chars() {
+            assert!(app.push_composer_char(ch));
+        }
+        app.composer.as_mut().unwrap().body = "untouched body".into();
+        app.composer.as_mut().unwrap().refresh_body_line_cache();
+
+        assert!(app.delete_word_before_composer_cursor());
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.focused, ComposeField::To);
+        assert_eq!(composer.body, "untouched body");
+        // "alice@example.com" trims trailing-whitespace (none) then the
+        // contiguous non-whitespace word, so the entire To becomes empty.
+        assert_eq!(composer.to, "");
+        assert_eq!(composer.to_cursor, 0);
+    }
+
+    #[test]
     fn test_composer_body_line_navigation_preserves_column() {
         let mut app = AppState::default();
         app.enter_composer(AccountId::new());
@@ -6979,6 +7208,70 @@ mod tests {
         assert!(app.composer_is_dirty());
         // Save target stays the same draft so we hit `draft.update`.
         assert_eq!(app.composer_draft_id(), Some(draft_id));
+    }
+
+    #[test]
+    fn test_enter_composer_for_existing_draft_positions_cursor_at_top() {
+        let mut app = AppState::default();
+        let body: String = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let line_count = body.lines().count();
+        app.enter_composer_for_existing_draft(
+            DraftId::new(),
+            ComposerDraft {
+                account_id: AccountId::new(),
+                in_reply_to_msg: None,
+                to_addrs: Vec::new(),
+                cc_addrs: Vec::new(),
+                bcc_addrs: Vec::new(),
+                subject: None,
+                text_body: Some(body),
+                html_body: None,
+                attachments: Vec::new(),
+                in_reply_to: None,
+                references_header: None,
+            },
+            ComposeField::Body,
+        );
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.body_cursor, 0);
+        assert_eq!(composer.body_cursor_line_column(), (0, 0));
+        assert!(
+            composer.body_scroll > 0,
+            "long draft should pre-scroll to the bottom (line_count={line_count}, scroll={})",
+            composer.body_scroll
+        );
+        assert_eq!(
+            composer.body_scroll,
+            line_count.saturating_sub(VISIBLE_BODY_FALLBACK_LINES)
+        );
+    }
+
+    #[test]
+    fn test_enter_composer_for_existing_draft_short_body_no_scroll() {
+        let mut app = AppState::default();
+        app.enter_composer_for_existing_draft(
+            DraftId::new(),
+            ComposerDraft {
+                account_id: AccountId::new(),
+                in_reply_to_msg: None,
+                to_addrs: Vec::new(),
+                cc_addrs: Vec::new(),
+                bcc_addrs: Vec::new(),
+                subject: None,
+                text_body: Some("just one line".into()),
+                html_body: None,
+                attachments: Vec::new(),
+                in_reply_to: None,
+                references_header: None,
+            },
+            ComposeField::Body,
+        );
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.body_cursor, 0);
+        assert_eq!(composer.body_scroll, 0);
     }
 
     #[test]

@@ -1829,6 +1829,12 @@ async fn handle_composer_key<C: Mailbox + ?Sized>(
             app.toggle_composer_body_line_selection();
             false
         }
+        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl-W deletes the previous word (readline / bash
+            // semantics). Silent like single-char Backspace.
+            app.delete_word_before_composer_cursor();
+            false
+        }
         KeyCode::Char(ch) => {
             if !key.modifiers.contains(KeyModifiers::CONTROL) && !app.push_composer_char(ch) {
                 app.set_error("compose field is at its limit");
@@ -5174,6 +5180,45 @@ mod tests {
 
         assert_eq!(app.status, "No attachment to remove");
         assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_composer_ctrl_w_deletes_word() {
+        let account_id = AccountId::new();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        let mut client = MockMailbox::default();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert_eq!(app.mode, InputMode::Compose);
+        app.composer.as_mut().unwrap().focused = app::ComposeField::Body;
+
+        for ch in "hello world".chars() {
+            assert!(
+                !handle_key(
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                    &mut app,
+                    &mut client,
+                )
+                .await
+            );
+        }
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.composer.as_ref().unwrap().body, "hello ");
     }
 
     fn app_with_message_list_focused(
