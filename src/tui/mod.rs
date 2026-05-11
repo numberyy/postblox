@@ -659,6 +659,313 @@ fn parse_sync_state_str(state: &str) -> Option<SyncStateUi> {
     }
 }
 
+/// Resolved pane / virtual-folder context used by [`resolve_pane_action`].
+///
+/// Slice 2 of the keymap-disambiguation work centralises the dispatch
+/// for the overloaded `o`/`a`/`d`/`e`/`m` chords by reducing the
+/// `(ActivePane, FolderKind, FocusedSub)` matrix into this enum so the
+/// dispatcher is one switch instead of being spread across many
+/// handlers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneKind {
+    /// Accounts list focused.
+    Accounts,
+    /// Folders list focused.
+    Folders,
+    /// Conversations pane focused on a regular mail folder.
+    ConversationsMail,
+    /// Conversations pane focused on a folder whose role is `drafts`.
+    ConversationsDrafts,
+    /// Conversations pane focused on the virtual Approvals folder.
+    ConversationsApprovals,
+    /// Conversation-detail / message-stack pane focused on a regular
+    /// mail folder.
+    Details,
+    /// Conversation-detail pane while the virtual Approvals folder is
+    /// selected.
+    DetailsApprovals,
+    /// Attachments list / preview pane focused.
+    Attachments,
+    /// Search results pane focused.
+    Search,
+}
+
+/// Resolve the user's current pane + folder-kind context.
+///
+/// Encapsulates the `(ActivePane, drafts/approvals)` matrix into a
+/// single enum so the keymap dispatcher can switch on one value.
+fn current_pane_kind(app: &AppState) -> PaneKind {
+    match app.active {
+        ActivePane::Accounts => PaneKind::Accounts,
+        ActivePane::Folders => PaneKind::Folders,
+        ActivePane::Conversations => {
+            if app.approvals_folder_selected() {
+                PaneKind::ConversationsApprovals
+            } else if app.drafts_pane_active() {
+                PaneKind::ConversationsDrafts
+            } else {
+                PaneKind::ConversationsMail
+            }
+        }
+        ActivePane::Details => {
+            if app.approvals_folder_selected() {
+                PaneKind::DetailsApprovals
+            } else {
+                PaneKind::Details
+            }
+        }
+        ActivePane::Attachments => PaneKind::Attachments,
+        ActivePane::Search => PaneKind::Search,
+    }
+}
+
+/// Resolved action a `(pane, key)` pair maps to.
+///
+/// `Refuse(text)` means: emit a polite Info toast naming the right
+/// key/pane and do nothing else. Every cell in the disambiguation
+/// table from `plans/tui-ux-review.md` resolves to exactly one
+/// variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PaneAction {
+    /// Polite refusal: emit an Info toast (coalesced) with this text.
+    Refuse(String),
+    /// Open the selected attachment with `xdg-open` (after y/n confirm).
+    OpenAttachmentExternally,
+    /// Toggle the attachments pane.
+    ToggleAttachmentsPane,
+    /// Open delete-confirm modal for the currently selected message.
+    BeginMessageDelete,
+    /// Open delete-confirm modal for the currently selected draft.
+    BeginDraftDelete,
+    /// Archive the currently selected message (Conversations).
+    ArchiveSelectedMessage,
+    /// Export the currently selected attachment.
+    ExportSelectedAttachment,
+    /// Enter Command mode pre-filled with `move `.
+    OpenMoveCommand,
+    /// Toggle expansion of the focused conversation-stack message.
+    ToggleFocusedExpansion,
+    /// Expand every message in the conversation stack.
+    ExpandAllMessages,
+    /// Approve the highlighted pending approval.
+    ApproveSelectedApproval,
+    /// Deny the highlighted pending approval.
+    DenySelectedApproval,
+    /// Open the selected draft in the composer.
+    OpenSelectedDraft,
+}
+
+/// Resolve `(current pane, key chord)` into the single action that
+/// should run.
+///
+/// Returns `None` for keys that aren't part of the disambiguation
+/// table (`o`/`a`/`d`/`e`/`m`/`O`); the outer dispatcher falls through
+/// to its own match for those.
+fn resolve_pane_action(app: &AppState, key: KeyEvent) -> Option<PaneAction> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    let pane = current_pane_kind(app);
+    let action = match (pane, key.code) {
+        // --- `o` ---
+        (PaneKind::Details, KeyCode::Char('o')) => PaneAction::ToggleFocusedExpansion,
+        (PaneKind::DetailsApprovals, KeyCode::Char('o')) => {
+            PaneAction::Refuse("o: focus a message first (Approvals don't open files)".into())
+        }
+        (PaneKind::Attachments, KeyCode::Char('o')) => PaneAction::OpenAttachmentExternally,
+        (PaneKind::ConversationsDrafts, KeyCode::Char('o')) => PaneAction::OpenSelectedDraft,
+        (PaneKind::ConversationsMail, KeyCode::Char('o')) => {
+            PaneAction::Refuse("o: focus a message first (open works in Details)".into())
+        }
+        (PaneKind::ConversationsApprovals, KeyCode::Char('o')) => {
+            PaneAction::Refuse("o: approvals don't open files; press a to approve".into())
+        }
+        (PaneKind::Accounts | PaneKind::Folders, KeyCode::Char('o')) => {
+            PaneAction::Refuse("o: open is for the Attachments pane".into())
+        }
+        (PaneKind::Search, KeyCode::Char('o')) => {
+            PaneAction::Refuse("o: open is for the Attachments pane".into())
+        }
+
+        // --- Capital `O` ---
+        (PaneKind::Details, KeyCode::Char('O')) => PaneAction::ExpandAllMessages,
+        (_, KeyCode::Char('O')) => PaneAction::Refuse("O: expand-all only works in Details".into()),
+
+        // --- `a` ---
+        (PaneKind::ConversationsApprovals | PaneKind::DetailsApprovals, KeyCode::Char('a')) => {
+            PaneAction::ApproveSelectedApproval
+        }
+        (PaneKind::ConversationsDrafts, KeyCode::Char('a')) => {
+            PaneAction::Refuse("a: drafts have no attachments to toggle".into())
+        }
+        (PaneKind::ConversationsMail | PaneKind::Details, KeyCode::Char('a')) => {
+            PaneAction::ToggleAttachmentsPane
+        }
+        (PaneKind::Attachments, KeyCode::Char('a')) => PaneAction::ToggleAttachmentsPane,
+        (PaneKind::Accounts | PaneKind::Folders, KeyCode::Char('a')) => {
+            PaneAction::Refuse("a: attachments live on messages".into())
+        }
+        (PaneKind::Search, KeyCode::Char('a')) => {
+            PaneAction::Refuse("a: attachments live on messages".into())
+        }
+
+        // --- `d` ---
+        (PaneKind::ConversationsApprovals | PaneKind::DetailsApprovals, KeyCode::Char('d')) => {
+            PaneAction::DenySelectedApproval
+        }
+        (PaneKind::ConversationsDrafts, KeyCode::Char('d')) => PaneAction::BeginDraftDelete,
+        (PaneKind::ConversationsMail | PaneKind::Details, KeyCode::Char('d')) => {
+            PaneAction::BeginMessageDelete
+        }
+        (PaneKind::Attachments, KeyCode::Char('d')) => {
+            PaneAction::Refuse("d: attachments have no delete (e exports)".into())
+        }
+        (PaneKind::Accounts, KeyCode::Char('d')) => {
+            PaneAction::Refuse("d: switch to a message to delete".into())
+        }
+        (PaneKind::Folders, KeyCode::Char('d')) => {
+            PaneAction::Refuse("d: delete lives on messages".into())
+        }
+        (PaneKind::Search, KeyCode::Char('d')) => {
+            PaneAction::Refuse("d: delete lives on messages".into())
+        }
+
+        // --- `e` ---
+        (PaneKind::ConversationsMail | PaneKind::Details, KeyCode::Char('e')) => {
+            PaneAction::ArchiveSelectedMessage
+        }
+        (PaneKind::Attachments, KeyCode::Char('e')) => PaneAction::ExportSelectedAttachment,
+        (PaneKind::ConversationsDrafts, KeyCode::Char('e')) => {
+            PaneAction::Refuse("e: archive is not for drafts".into())
+        }
+        (PaneKind::ConversationsApprovals | PaneKind::DetailsApprovals, KeyCode::Char('e')) => {
+            PaneAction::Refuse("e: approvals don't archive".into())
+        }
+        (PaneKind::Accounts | PaneKind::Folders, KeyCode::Char('e')) => {
+            PaneAction::Refuse("e: archive lives on messages".into())
+        }
+        (PaneKind::Search, KeyCode::Char('e')) => {
+            PaneAction::Refuse("e: archive lives on messages".into())
+        }
+
+        // --- `m` ---
+        (PaneKind::ConversationsMail | PaneKind::Details, KeyCode::Char('m')) => {
+            PaneAction::OpenMoveCommand
+        }
+        (PaneKind::ConversationsDrafts, KeyCode::Char('m')) => {
+            PaneAction::Refuse("m: drafts can't be moved between folders".into())
+        }
+        (PaneKind::ConversationsApprovals | PaneKind::DetailsApprovals, KeyCode::Char('m')) => {
+            PaneAction::Refuse("m: approvals can't be moved".into())
+        }
+        (PaneKind::Attachments, KeyCode::Char('m')) => {
+            PaneAction::Refuse("m: move lives on messages".into())
+        }
+        (PaneKind::Accounts | PaneKind::Folders, KeyCode::Char('m')) => {
+            PaneAction::Refuse("m: move only valid in Conversations".into())
+        }
+        (PaneKind::Search, KeyCode::Char('m')) => {
+            PaneAction::Refuse("m: move only valid in Conversations".into())
+        }
+        _ => return None,
+    };
+    Some(action)
+}
+
+/// Run the resolved [`PaneAction`] against the current state.
+///
+/// Wraps the otherwise repetitive `match` for each runtime call site
+/// (the per-pane handlers and the catch-all in [`handle_key`]) so the
+/// dispatch table in [`resolve_pane_action`] stays the single source
+/// of truth for `o`/`a`/`d`/`e`/`m` semantics.
+async fn run_pane_action<C: Mailbox + ?Sized>(
+    action: PaneAction,
+    app: &mut AppState,
+    client: &mut C,
+) {
+    match action {
+        PaneAction::Refuse(text) => {
+            app.push_pane_refusal_toast(text);
+        }
+        PaneAction::OpenAttachmentExternally => {
+            if app.begin_open_attachment_confirmation() {
+                let filename = app
+                    .pending_open_attachment
+                    .as_ref()
+                    .map(|attachment| attachment.filename.clone())
+                    .unwrap_or_else(|| "attachment".into());
+                app.set_status(format!("Open {filename} with xdg-open? y/n"));
+            } else {
+                app.set_status("No attachment selected");
+            }
+        }
+        PaneAction::ToggleAttachmentsPane => {
+            if app.toggle_attachment_focus() {
+                app.set_status("Attachments");
+            } else {
+                app.set_status("No attachments for message");
+            }
+        }
+        PaneAction::BeginMessageDelete => {
+            if app.selected_message_id().is_some() {
+                begin_message_delete(app);
+            } else {
+                app.set_status("No message selected");
+            }
+        }
+        PaneAction::BeginDraftDelete => {
+            if let Some(draft_id) = app.selected_draft_id() {
+                app.begin_draft_delete(draft_id);
+                app.set_status("Delete draft? y/n");
+            } else {
+                app.set_status("No draft selected");
+            }
+        }
+        PaneAction::ArchiveSelectedMessage => {
+            execute_command(Command::Archive, app, client).await;
+        }
+        PaneAction::ExportSelectedAttachment => {
+            export_selected_attachment(app, client).await;
+        }
+        PaneAction::OpenMoveCommand => {
+            app.enter_command_mode();
+            for ch in "move ".chars() {
+                app.push_command_char(ch);
+            }
+            app.set_status("Command mode");
+        }
+        PaneAction::ToggleFocusedExpansion => match app.toggle_focused_message_expansion() {
+            Some(true) => {
+                refresh_missing_expanded_details(app, client).await;
+                app.set_status("Message expanded");
+            }
+            Some(false) => app.set_status("Message collapsed"),
+            None => app.set_status("No message selected"),
+        },
+        PaneAction::ExpandAllMessages => {
+            if app.expand_all_conversation_messages() {
+                refresh_missing_expanded_details(app, client).await;
+                app.set_status("Conversation expanded");
+            } else {
+                app.set_status("No message selected");
+            }
+        }
+        PaneAction::ApproveSelectedApproval => {
+            run_approval_decision(app, client, ApprovalState::Allowed).await;
+        }
+        PaneAction::DenySelectedApproval => {
+            run_approval_decision(app, client, ApprovalState::Denied).await;
+        }
+        PaneAction::OpenSelectedDraft => {
+            if app.selected_draft_id().is_some() {
+                open_selected_draft(app, client).await;
+            } else {
+                app.set_status("No draft selected");
+            }
+        }
+    }
+}
+
 async fn handle_key<C: Mailbox + ?Sized>(
     key: KeyEvent,
     app: &mut AppState,
@@ -701,10 +1008,12 @@ async fn handle_key<C: Mailbox + ?Sized>(
         return false;
     }
 
-    if app.approvals_folder_selected()
-        && matches!(app.active, ActivePane::Conversations | ActivePane::Details)
-        && handle_approvals_folder_key(key, app, client).await
-    {
+    // Pane-scoped disambiguation for `o`/`a`/`d`/`e`/`m`/`O`. The
+    // table lives in `resolve_pane_action`; running it here keeps the
+    // approvals / search / details / preview sub-handlers responsible
+    // only for non-overloaded chords (`j/k`, `Enter`, `Esc`, …).
+    if let Some(action) = resolve_pane_action(app, key) {
+        run_pane_action(action, app, client).await;
         return false;
     }
 
@@ -754,23 +1063,6 @@ async fn handle_key<C: Mailbox + ?Sized>(
         }
         KeyCode::Char('X') => {
             app.clear_toasts();
-            false
-        }
-        KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if drafts_list_focused(app) {
-                if let Some(draft_id) = app.selected_draft_id() {
-                    app.begin_draft_delete(draft_id);
-                    app.set_status("Delete draft? y/n");
-                } else {
-                    app.set_status("No draft selected");
-                }
-            } else if message_list_focused(app) && app.selected_message_id().is_some() {
-                begin_message_delete(app);
-            } else if app.focus_detail_pane() {
-                app.set_status("Details");
-            } else {
-                app.set_status("No message detail open");
-            }
             false
         }
         KeyCode::Down | KeyCode::Char('j') => {
@@ -823,32 +1115,6 @@ async fn handle_key<C: Mailbox + ?Sized>(
             execute_command(Command::ThemeNext, app, client).await;
             false
         }
-        KeyCode::Char('a') => {
-            if app.toggle_attachment_focus() {
-                app.set_status("Attachments");
-            } else {
-                app.set_status("No attachments for message");
-            }
-            false
-        }
-        KeyCode::Char('e') => {
-            if message_list_focused(app) {
-                execute_command(Command::Archive, app, client).await;
-            } else {
-                export_selected_attachment(app, client).await;
-            }
-            false
-        }
-        KeyCode::Char('m') => {
-            if message_list_focused(app) {
-                app.enter_command_mode();
-                for ch in "move ".chars() {
-                    app.push_command_char(ch);
-                }
-                app.set_status("Command mode");
-            }
-            false
-        }
         KeyCode::Char('*') => {
             if message_list_focused(app) {
                 let command = if app.selected_message_has_flag(FLAGGED_FLAG).unwrap_or(false) {
@@ -857,19 +1123,6 @@ async fn handle_key<C: Mailbox + ?Sized>(
                     Command::Flag
                 };
                 execute_command(command, app, client).await;
-            }
-            false
-        }
-        KeyCode::Char('o') => {
-            if app.begin_open_attachment_confirmation() {
-                let filename = app
-                    .pending_open_attachment
-                    .as_ref()
-                    .map(|attachment| attachment.filename.clone())
-                    .unwrap_or_else(|| "attachment".into());
-                app.set_status(format!("Open {filename} with xdg-open? y/n"));
-            } else {
-                app.set_status("No attachment selected");
             }
             false
         }
@@ -1174,26 +1427,6 @@ async fn handle_detail_key<C: Mailbox + ?Sized>(
                 refresh_detail(app, client).await;
             } else {
                 app.move_detail_line(-1, DETAIL_KEY_VIEWPORT_LINES);
-            }
-            true
-        }
-        KeyCode::Char('o') => {
-            match app.toggle_focused_message_expansion() {
-                Some(true) => {
-                    refresh_missing_expanded_details(app, client).await;
-                    app.set_status("Message expanded");
-                }
-                Some(false) => app.set_status("Message collapsed"),
-                None => app.set_status("No message selected"),
-            }
-            true
-        }
-        KeyCode::Char('O') => {
-            if app.expand_all_conversation_messages() {
-                refresh_missing_expanded_details(app, client).await;
-                app.set_status("Conversation expanded");
-            } else {
-                app.set_status("No message selected");
             }
             true
         }
@@ -2201,33 +2434,6 @@ async fn handle_search_pane_key<C: Mailbox + ?Sized>(
         }
         KeyCode::Char('r') => {
             refresh_search(app, client).await;
-            true
-        }
-        _ => false,
-    }
-}
-
-/// Handle approval-list keys while the virtual approvals folder is selected.
-async fn handle_approvals_folder_key<C: Mailbox + ?Sized>(
-    key: KeyEvent,
-    app: &mut AppState,
-    client: &mut C,
-) -> bool {
-    match key.code {
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.move_approval_selection(1);
-            true
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            app.move_approval_selection(-1);
-            true
-        }
-        KeyCode::Char('a') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            run_approval_decision(app, client, ApprovalState::Allowed).await;
-            true
-        }
-        KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            run_approval_decision(app, client, ApprovalState::Denied).await;
             true
         }
         _ => false,
@@ -4024,7 +4230,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_details_shortcut_requires_loaded_detail() {
+    async fn test_handle_key_d_on_empty_conversations_reports_no_message_selected() {
+        // After Slice 2 the top-level `d` no longer focuses Details;
+        // it opens the message-delete confirm modal in Conversations
+        // and Details, and emits a polite refusal toast in other
+        // panes. When no message is selected the dispatcher sets a
+        // status hint instead of crashing.
         let mut app = AppState {
             active: ActivePane::Conversations,
             ..Default::default()
@@ -4040,20 +4251,8 @@ mod tests {
             .await
         );
         assert_eq!(app.active, ActivePane::Conversations);
-        assert_eq!(app.status, "No message detail open");
-
-        app.apply_detail(Some(detail_with_body(MessageId::new(), "body")));
-
-        assert!(
-            !handle_key(
-                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
-                &mut app,
-                &mut client,
-            )
-            .await
-        );
-        assert_eq!(app.active, ActivePane::Details);
-        assert_eq!(app.status, "Details");
+        assert_eq!(app.status, "No message selected");
+        assert_eq!(app.mode, InputMode::Normal);
     }
 
     #[tokio::test]
@@ -4592,7 +4791,14 @@ mod tests {
         let message_id = MessageId::new();
         let first_id = AttachmentId::new();
         let second_id = AttachmentId::new();
-        let mut app = AppState::default();
+        let mut app = AppState {
+            // Slice 2: `a` is pane-scoped — it only toggles the
+            // attachments pane from Conversations / Details where a
+            // message is open. Pressing it on Accounts now emits a
+            // polite refusal toast (covered by its own test).
+            active: ActivePane::Conversations,
+            ..Default::default()
+        };
         app.apply_detail(Some(MessageDetail {
             id: message_id,
             subject: "hello".into(),
@@ -6556,5 +6762,547 @@ mod tests {
         )
         .await;
         assert!(!app.help_open);
+    }
+
+    // -- Slice 2: pane-scoped o/a/d/e/m disambiguation ----------------
+
+    /// Helper: build an app focused on the Accounts pane with two
+    /// pending approvals selected via the virtual Approvals folder.
+    fn app_with_approvals_focus(active: ActivePane) -> (AppState, Uuid, Uuid) {
+        let allow_id = Uuid::new_v4();
+        let deny_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.select_approvals_folder();
+        let now = chrono::Utc::now();
+        let mut allow = approval_item(allow_id, "postblox_message_send");
+        allow.created_at = now;
+        let mut deny = approval_item(deny_id, "postblox_draft_delete");
+        deny.created_at = now - chrono::Duration::seconds(1);
+        app.apply_approvals(vec![allow, deny]);
+        app.active = active;
+        (app, allow_id, deny_id)
+    }
+
+    async fn press(key: char, app: &mut AppState, client: &mut MockMailbox) {
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+            app,
+            client,
+        )
+        .await;
+    }
+
+    fn assert_refusal_toast(app: &AppState, fragment: &str) {
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.kind == app::ToastKind::Info && toast.text.contains(fragment)),
+            "expected refusal toast containing '{}' in {:?}",
+            fragment,
+            app.toasts
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_d_in_accounts_refuses_with_toast() {
+        let mut app = AppState::default();
+        // app.active defaults to Accounts.
+        assert_eq!(app.active, ActivePane::Accounts);
+        let mut client = MockMailbox::default();
+
+        press('d', &mut app, &mut client).await;
+
+        assert_refusal_toast(&app, "switch to a message to delete");
+        assert!(client.calls.is_empty());
+        assert_eq!(app.mode, InputMode::Normal);
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_a_in_folders_refuses_with_toast() {
+        let mut app = AppState {
+            active: ActivePane::Folders,
+            ..AppState::default()
+        };
+        let mut client = MockMailbox::default();
+
+        press('a', &mut app, &mut client).await;
+
+        assert_refusal_toast(&app, "attachments live on messages");
+        assert!(client.calls.is_empty());
+        assert_eq!(app.active, ActivePane::Folders);
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_e_in_accounts_refuses_with_toast() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        press('e', &mut app, &mut client).await;
+
+        assert_refusal_toast(&app, "archive lives on messages");
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_m_in_folders_refuses_with_toast() {
+        let mut app = AppState {
+            active: ActivePane::Folders,
+            ..AppState::default()
+        };
+        let mut client = MockMailbox::default();
+
+        press('m', &mut app, &mut client).await;
+
+        assert_refusal_toast(&app, "move only valid in Conversations");
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_o_in_conversations_mail_refuses() {
+        let mut app = AppState {
+            active: ActivePane::Conversations,
+            ..AppState::default()
+        };
+        let mut client = MockMailbox::default();
+
+        press('o', &mut app, &mut client).await;
+
+        assert_refusal_toast(&app, "focus a message first");
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_a_in_conversations_mail_toggles_attachments_pane() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        // Make the attachments pane visible so the toggle succeeds.
+        let attachment_id = AttachmentId::new();
+        app.apply_detail(Some(MessageDetail {
+            id: message.id,
+            subject: "hi".into(),
+            from: "alice@x.com".into(),
+            snippet: "hi".into(),
+            body: "body".into(),
+            flags: Vec::new(),
+        }));
+        app.apply_attachments(vec![attachment_item(attachment_id, message.id)]);
+        let mut client = MockMailbox::default();
+
+        press('a', &mut app, &mut client).await;
+
+        assert_eq!(app.active, ActivePane::Attachments);
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_d_in_conversations_mail_opens_delete_confirm() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox::default();
+
+        press('d', &mut app, &mut client).await;
+
+        assert_eq!(app.mode, InputMode::ConfirmDelete);
+        assert_eq!(app.pending_delete_message, Some(message.id));
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_m_in_conversations_mail_opens_move_command() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let (mut app, _) = app_with_message_list_focused(account_id, folder_id);
+        let mut client = MockMailbox::default();
+
+        press('m', &mut app, &mut client).await;
+
+        assert_eq!(app.mode, InputMode::Command);
+        assert_eq!(app.command_input, "move ");
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_o_in_drafts_opens_selected_draft() {
+        let account_id = AccountId::new();
+        let drafts_id = FolderId::new();
+        let draft_id = DraftId::new();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        app.apply_folders(vec![drafts_folder_item(drafts_id)]);
+        app.apply_drafts(vec![draft_item(draft_id, account_id, "Resume")]);
+        app.active = ActivePane::Conversations;
+        let mut client = MockMailbox {
+            draft_summary: Some(draft_summary(account_id, draft_id)),
+            ..Default::default()
+        };
+
+        press('o', &mut app, &mut client).await;
+
+        assert!(client.calls.contains(&Call::GetDraft(draft_id)));
+        assert_eq!(app.mode, InputMode::Compose);
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_d_in_drafts_opens_delete_confirm_for_draft() {
+        let account_id = AccountId::new();
+        let drafts_id = FolderId::new();
+        let draft_id = DraftId::new();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        app.apply_folders(vec![drafts_folder_item(drafts_id)]);
+        app.apply_drafts(vec![draft_item(draft_id, account_id, "Bye")]);
+        app.active = ActivePane::Conversations;
+        let mut client = MockMailbox::default();
+
+        press('d', &mut app, &mut client).await;
+
+        assert_eq!(app.mode, InputMode::ConfirmDelete);
+        assert_eq!(app.pending_delete_draft, Some(draft_id));
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_a_in_drafts_refuses_with_toast() {
+        let account_id = AccountId::new();
+        let drafts_id = FolderId::new();
+        let draft_id = DraftId::new();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        app.apply_folders(vec![drafts_folder_item(drafts_id)]);
+        app.apply_drafts(vec![draft_item(draft_id, account_id, "Bye")]);
+        app.active = ActivePane::Conversations;
+        let mut client = MockMailbox::default();
+
+        press('a', &mut app, &mut client).await;
+
+        assert_refusal_toast(&app, "drafts have no attachments");
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_e_in_drafts_refuses_with_toast() {
+        let account_id = AccountId::new();
+        let drafts_id = FolderId::new();
+        let draft_id = DraftId::new();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        app.apply_folders(vec![drafts_folder_item(drafts_id)]);
+        app.apply_drafts(vec![draft_item(draft_id, account_id, "Bye")]);
+        app.active = ActivePane::Conversations;
+        let mut client = MockMailbox::default();
+
+        press('e', &mut app, &mut client).await;
+
+        assert_refusal_toast(&app, "archive is not for drafts");
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_m_in_drafts_refuses_with_toast() {
+        let account_id = AccountId::new();
+        let drafts_id = FolderId::new();
+        let draft_id = DraftId::new();
+        let mut app = AppState::default();
+        app.apply_accounts(vec![account_item(account_id)]);
+        app.apply_folders(vec![drafts_folder_item(drafts_id)]);
+        app.apply_drafts(vec![draft_item(draft_id, account_id, "Bye")]);
+        app.active = ActivePane::Conversations;
+        let mut client = MockMailbox::default();
+
+        press('m', &mut app, &mut client).await;
+
+        assert_refusal_toast(&app, "drafts can't be moved");
+        assert_eq!(app.mode, InputMode::Normal);
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_o_in_approvals_refuses_with_toast() {
+        let (mut app, _allow_id, _deny_id) = app_with_approvals_focus(ActivePane::Conversations);
+        let mut client = MockMailbox::default();
+
+        press('o', &mut app, &mut client).await;
+
+        assert_refusal_toast(&app, "approvals don't open files");
+        assert_eq!(app.approvals.items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_a_d_in_approvals_decide_via_centralised_dispatch() {
+        let (mut app, allow_id, deny_id) = app_with_approvals_focus(ActivePane::Conversations);
+        let mut client = MockMailbox::default();
+
+        press('a', &mut app, &mut client).await;
+        press('d', &mut app, &mut client).await;
+
+        assert_eq!(
+            client.calls,
+            vec![
+                Call::DecideApproval(allow_id, ApprovalState::Allowed),
+                Call::DecideApproval(deny_id, ApprovalState::Denied),
+            ]
+        );
+        assert!(app.approvals.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_e_in_approvals_refuses_with_toast() {
+        let (mut app, _allow_id, _deny_id) = app_with_approvals_focus(ActivePane::Conversations);
+        let mut client = MockMailbox::default();
+
+        press('e', &mut app, &mut client).await;
+
+        assert_refusal_toast(&app, "approvals don't archive");
+        assert!(client.calls.is_empty());
+        assert_eq!(app.approvals.items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_m_in_approvals_refuses_with_toast() {
+        let (mut app, _allow_id, _deny_id) = app_with_approvals_focus(ActivePane::Conversations);
+        let mut client = MockMailbox::default();
+
+        press('m', &mut app, &mut client).await;
+
+        assert_refusal_toast(&app, "approvals can't be moved");
+        assert_eq!(app.mode, InputMode::Normal);
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_o_in_details_toggles_focused_expansion() {
+        let body = "alpha\nbeta\ngamma";
+        let message_id = MessageId::new();
+        let mut app = AppState {
+            active: ActivePane::Details,
+            ..Default::default()
+        };
+        app.apply_detail(Some(detail_with_body(message_id, body)));
+        let mut client = MockMailbox::default();
+
+        press('o', &mut app, &mut client).await;
+
+        // Single-message stack collapses → reflects in status.
+        assert!(
+            app.status == "Message collapsed" || app.status == "No message selected",
+            "unexpected status: {}",
+            app.status,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_capital_o_in_details_expands_all() {
+        let thread_id = ThreadId::new();
+        let mut app = AppState::default();
+        let messages = vec![
+            thread_message_item(thread_id, "Reply", "2026-05-07 11:00", vec!["\\Seen"]),
+            thread_message_item(thread_id, "Start", "2026-05-07 10:00", vec!["\\Seen"]),
+        ];
+        let first = messages[0].clone();
+        app.apply_folder_messages(messages);
+        // Load detail so Details pane is actually visible — `apply_folder_messages`
+        // normalises away from Details until a detail row exists.
+        app.apply_detail(Some(detail_for(&first)));
+        app.active = ActivePane::Details;
+        let mut client = MockMailbox::default();
+
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Char('O'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert_eq!(app.status, "Conversation expanded");
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_capital_o_outside_details_refuses() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        let _ = handle_key(
+            KeyEvent::new(KeyCode::Char('O'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+
+        assert_refusal_toast(&app, "expand-all only works in Details");
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_d_in_details_opens_delete_confirm() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        app.apply_detail(Some(detail_with_body(message.id, "body")));
+        app.active = ActivePane::Details;
+        let mut client = MockMailbox::default();
+
+        press('d', &mut app, &mut client).await;
+
+        assert_eq!(app.mode, InputMode::ConfirmDelete);
+        assert_eq!(app.pending_delete_message, Some(message.id));
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_e_in_details_archives_message() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        app.apply_detail(Some(detail_with_body(message.id, "body")));
+        app.active = ActivePane::Details;
+        let mut client = MockMailbox::default();
+
+        press('e', &mut app, &mut client).await;
+
+        assert!(client.calls.contains(&Call::ArchiveMessage(message.id)));
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_m_in_details_opens_move_command() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let (mut app, message) = app_with_message_list_focused(account_id, folder_id);
+        app.apply_detail(Some(detail_with_body(message.id, "body")));
+        app.active = ActivePane::Details;
+        let mut client = MockMailbox::default();
+
+        press('m', &mut app, &mut client).await;
+
+        assert_eq!(app.mode, InputMode::Command);
+        assert_eq!(app.command_input, "move ");
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_d_in_attachments_refuses_with_toast() {
+        let message_id = MessageId::new();
+        let attachment_id = AttachmentId::new();
+        let mut app = AppState::default();
+        app.apply_detail(Some(MessageDetail {
+            id: message_id,
+            subject: "hi".into(),
+            from: "alice@x.com".into(),
+            snippet: "hi".into(),
+            body: "body".into(),
+            flags: Vec::new(),
+        }));
+        app.apply_attachments(vec![attachment_item(attachment_id, message_id)]);
+        app.active = ActivePane::Attachments;
+        let mut client = MockMailbox::default();
+
+        press('d', &mut app, &mut client).await;
+
+        assert_refusal_toast(&app, "attachments have no delete");
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_e_in_attachments_exports() {
+        let message_id = MessageId::new();
+        let attachment_id = AttachmentId::new();
+        let mut app = AppState::default();
+        app.apply_detail(Some(MessageDetail {
+            id: message_id,
+            subject: "hi".into(),
+            from: "alice@x.com".into(),
+            snippet: "hi".into(),
+            body: "body".into(),
+            flags: Vec::new(),
+        }));
+        app.apply_attachments(vec![attachment_item(attachment_id, message_id)]);
+        app.active = ActivePane::Attachments;
+        let mut client = MockMailbox::default();
+
+        press('e', &mut app, &mut client).await;
+
+        assert!(matches!(
+            client.calls.first(),
+            Some(Call::ExportAttachment(id, _)) if *id == attachment_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_o_in_attachments_opens_confirmation() {
+        let message_id = MessageId::new();
+        let attachment_id = AttachmentId::new();
+        let mut app = AppState::default();
+        app.apply_detail(Some(MessageDetail {
+            id: message_id,
+            subject: "hi".into(),
+            from: "alice@x.com".into(),
+            snippet: "hi".into(),
+            body: "body".into(),
+            flags: Vec::new(),
+        }));
+        app.apply_attachments(vec![attachment_item(attachment_id, message_id)]);
+        app.active = ActivePane::Attachments;
+        let mut client = MockMailbox::default();
+
+        press('o', &mut app, &mut client).await;
+
+        assert!(app.pending_open_attachment.is_some());
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pane_dispatch_o_a_d_e_m_in_search_pane_refuses() {
+        let mut app = AppState::default();
+        app.begin_search("anything", None);
+        app.apply_search_hits(Vec::new());
+        let mut client = MockMailbox::default();
+
+        for (chord, fragment) in [
+            ('o', "open is for the Attachments pane"),
+            ('a', "attachments live on messages"),
+            ('d', "delete lives on messages"),
+            ('e', "archive lives on messages"),
+            ('m', "move only valid in Conversations"),
+        ] {
+            // Clear toasts between presses so the refusal is observed
+            // fresh — coalesce window would otherwise just bump TTLs.
+            app.clear_toasts();
+            press(chord, &mut app, &mut client).await;
+            assert_refusal_toast(&app, fragment);
+        }
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pane_refusal_toast_coalesces_repeated_press() {
+        let mut app = AppState {
+            active: ActivePane::Folders,
+            ..AppState::default()
+        };
+        let mut client = MockMailbox::default();
+
+        // Two presses in quick succession of the same chord must
+        // produce at most one toast — the second press refreshes the
+        // existing one rather than pushing a duplicate.
+        press('m', &mut app, &mut client).await;
+        let toast_count_after_first = app.toasts.len();
+        press('m', &mut app, &mut client).await;
+        let toast_count_after_second = app.toasts.len();
+        assert_eq!(toast_count_after_first, 1);
+        assert_eq!(toast_count_after_second, 1);
+    }
+
+    #[tokio::test]
+    async fn test_pane_refusal_uses_info_severity_not_error() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        press('a', &mut app, &mut client).await;
+
+        assert!(app
+            .toasts
+            .iter()
+            .all(|toast| toast.kind != app::ToastKind::Error));
+        assert!(app.error.is_none(), "polite refusal must not set app.error");
     }
 }

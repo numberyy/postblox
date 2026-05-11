@@ -58,6 +58,12 @@ pub(crate) const TOAST_TTL_ERROR: Duration = Duration::from_secs(6);
 /// duplicate.
 pub(crate) const COALESCE_ACCOUNT_SYNCED: Duration = Duration::from_secs(5);
 pub(crate) const COALESCE_SYNC_ERROR: Duration = Duration::from_secs(10);
+/// Coalescing window for repeated pane-scoped refusal toasts (`a here
+/// approves`, `move only valid in Conversations`, …). Three seconds is
+/// long enough that mashing the wrong key in quick succession doesn't
+/// pin the toast deque, short enough that a deliberate retry feels
+/// responsive.
+pub(crate) const COALESCE_PANE_REFUSAL: Duration = Duration::from_secs(3);
 
 /// Status pane icons.
 pub(crate) const ICON_IDLE: &str = "●";
@@ -2174,16 +2180,6 @@ impl AppState {
         self.approvals_folder_selected() || self.detail.is_some()
     }
 
-    pub(crate) fn focus_detail_pane(&mut self) -> bool {
-        if self.detail_pane_visible() {
-            self.active = ActivePane::Details;
-            true
-        } else {
-            self.normalize_active_pane();
-            false
-        }
-    }
-
     /// Cached message-detail body lines for the detail pane renderer.
     pub fn detail_lines(&self) -> Vec<String> {
         self.detail_text_cache
@@ -2599,6 +2595,27 @@ impl AppState {
         if !self.coalesce_toast(ToastKind::Info, &text, now, COALESCE_ACCOUNT_SYNCED) {
             self.push_toast(ToastKind::Info, text, now);
         }
+    }
+
+    /// Push a polite, pane-scoped refusal toast and mirror it onto the
+    /// status row.
+    ///
+    /// Used by the per-pane key dispatcher whenever the user presses
+    /// an overloaded chord (`o`/`a`/`d`/`e`/`m`) in a pane where that
+    /// chord has no action — instead of doing nothing silently, the
+    /// toast names the right key/pane so the user can self-correct.
+    ///
+    /// The toast is `Info`-severity (not `Error`) so the bottom bar
+    /// keeps its calm styling, and identical messages within
+    /// [`COALESCE_PANE_REFUSAL`] coalesce into a single row to avoid
+    /// pinning the toast deque when a key is mashed.
+    pub(crate) fn push_pane_refusal_toast(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        let now = Instant::now();
+        if !self.coalesce_toast(ToastKind::Info, &text, now, COALESCE_PANE_REFUSAL) {
+            self.push_toast(ToastKind::Info, text.clone(), now);
+        }
+        self.set_status(text);
     }
 
     fn account_label_for_toast(&self, account_id: AccountId) -> String {
@@ -5505,7 +5522,7 @@ mod tests {
     }
 
     #[test]
-    fn test_detail_pane_visibility_cycle_and_direct_focus_require_detail() {
+    fn test_detail_pane_visibility_cycle_skips_when_detail_missing() {
         let mut app = AppState {
             active: ActivePane::Conversations,
             ..Default::default()
@@ -5513,7 +5530,6 @@ mod tests {
         app.apply_messages(vec![message("hello")]);
 
         assert!(!app.detail_pane_visible());
-        assert!(!app.focus_detail_pane());
         assert_eq!(app.active, ActivePane::Conversations);
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
@@ -5528,10 +5544,6 @@ mod tests {
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
         app.cycle_active_pane_reverse();
-        assert_eq!(app.active, ActivePane::Details);
-
-        app.active = ActivePane::Accounts;
-        assert!(app.focus_detail_pane());
         assert_eq!(app.active, ActivePane::Details);
     }
 

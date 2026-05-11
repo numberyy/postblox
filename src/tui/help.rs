@@ -17,18 +17,18 @@
 ///
 /// The variants intentionally mirror [`super::app::ActivePane`] and
 /// [`super::app::InputMode`] so the drift tests can group rows by
-/// scope without re-encoding the dispatch logic. The renderer does
-/// not currently filter by this field — Slice 2 will pivot per-pane
-/// help on it; the field is kept stable so Slice 2 can land without
-/// re-touching every row.
+/// scope without re-encoding the dispatch logic. The renderer
+/// surfaces this field alongside each row's section header so users
+/// can match the chord to where it applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(dead_code)] // Slice 2 will dispatch on these variants.
 pub(crate) enum Applicability {
     /// Active in every normal-mode pane (Tab, q, refresh, etc.).
     Global,
-    /// Conversations / thread list (also Drafts and Approvals when
-    /// those virtual folders are selected).
+    /// Conversations / thread list (regular mail folders only).
     Conversations,
+    /// Conversations pane while the selected folder is a Drafts
+    /// folder (role = `drafts`).
+    ConversationsDrafts,
     /// Message detail and preview pane.
     Details,
     /// Attachments list and preview pane.
@@ -116,26 +116,121 @@ pub(crate) static HELP_ROWS: &[HelpSection] = &[
         ],
     },
     HelpSection {
-        title: "Conversations & detail",
+        title: "Conversations (mail folders)",
         entries: &[
             HelpEntry {
                 keys: "↑ / ↓ or j / k",
-                summary: "Move selection up / down in the focused list (in Details, j/k step messages then scroll text)",
+                summary: "Move selection up / down in the focused list",
                 applies_to: Applicability::Conversations,
             },
             HelpEntry {
                 keys: "Enter",
-                summary: "Open thread / focus preview / open draft (context-sensitive)",
+                summary: "Open the focused thread (refresh detail / focus preview)",
                 applies_to: Applicability::Conversations,
             },
             HelpEntry {
+                keys: "c / :compose",
+                summary: "Compose a new message in the active account",
+                applies_to: Applicability::Conversations,
+            },
+            HelpEntry {
+                keys: "R / :reply",
+                summary: "Reply to the selected message",
+                applies_to: Applicability::Conversations,
+            },
+            HelpEntry {
+                keys: "A / :reply-all",
+                summary: "Reply-all to the selected message",
+                applies_to: Applicability::Conversations,
+            },
+            HelpEntry {
+                keys: "F / :forward",
+                summary: "Forward the selected message (carries attachments)",
+                applies_to: Applicability::Conversations,
+            },
+            HelpEntry {
+                keys: "u / :seen / :unseen",
+                summary: "Toggle the Seen flag on the selected message",
+                applies_to: Applicability::Conversations,
+            },
+            HelpEntry {
+                keys: "f / * / :flag / :unflag",
+                summary: "Toggle the Flagged flag on the selected message",
+                applies_to: Applicability::Conversations,
+            },
+            HelpEntry {
+                keys: "a",
+                summary: "Toggle the attachments pane for the selected message",
+                applies_to: Applicability::Conversations,
+            },
+            HelpEntry {
+                keys: "d / :delete",
+                summary: "Open delete-confirm modal (y/n) for the selected message",
+                applies_to: Applicability::Conversations,
+            },
+            HelpEntry {
+                keys: "e / :archive",
+                summary: "Archive the selected message",
+                applies_to: Applicability::Conversations,
+            },
+            HelpEntry {
+                keys: "m / :move <folder>",
+                summary: "Open command bar pre-filled with `move `",
+                applies_to: Applicability::Conversations,
+            },
+        ],
+    },
+    HelpSection {
+        title: "Conversations (drafts folder)",
+        entries: &[
+            HelpEntry {
+                keys: "Enter / o",
+                summary: "Open the highlighted draft in the composer",
+                applies_to: Applicability::ConversationsDrafts,
+            },
+            HelpEntry {
+                keys: "d",
+                summary: "Open delete-confirm modal (y/n) for the highlighted draft",
+                applies_to: Applicability::ConversationsDrafts,
+            },
+        ],
+    },
+    HelpSection {
+        title: "Details / conversation stack",
+        entries: &[
+            HelpEntry {
+                keys: "j / k",
+                summary: "Step to next / previous message in the stack, then scroll text",
+                applies_to: Applicability::Details,
+            },
+            HelpEntry {
                 keys: "o",
-                summary: "In Details: toggle expansion of the focused message. Elsewhere: open the selected attachment with xdg-open (Linux, with y/n confirm)",
+                summary: "Toggle expansion of the focused message",
                 applies_to: Applicability::Details,
             },
             HelpEntry {
                 keys: "O",
                 summary: "Expand every message in the conversation stack",
+                applies_to: Applicability::Details,
+            },
+            HelpEntry {
+                keys: "a",
+                summary: "Toggle the attachments pane for the focused message",
+                applies_to: Applicability::Details,
+            },
+            HelpEntry {
+                keys: "d",
+                summary: "Open delete-confirm modal (y/n) for the focused message",
+                applies_to: Applicability::Details,
+            },
+            HelpEntry {
+                keys: "e",
+                summary: "Archive the focused message",
+                applies_to: Applicability::Details,
+            },
+            HelpEntry {
+                keys: "m",
+                summary: "Open command bar pre-filled with `move `",
                 applies_to: Applicability::Details,
             },
             HelpEntry {
@@ -161,82 +256,27 @@ pub(crate) static HELP_ROWS: &[HelpSection] = &[
         ],
     },
     HelpSection {
-        title: "Mail actions",
+        title: "Attachments",
         entries: &[
             HelpEntry {
-                keys: "c / :compose",
-                summary: "Compose a new message in the active account",
-                applies_to: Applicability::Conversations,
+                keys: "Enter",
+                summary: "Focus the preview pane (j/k scrolls, v selects, y copies)",
+                applies_to: Applicability::Attachments,
             },
             HelpEntry {
-                keys: "R / :reply",
-                summary: "Reply to the selected message",
-                applies_to: Applicability::Conversations,
-            },
-            HelpEntry {
-                keys: "A / :reply-all",
-                summary: "Reply-all to the selected message",
-                applies_to: Applicability::Conversations,
-            },
-            HelpEntry {
-                keys: "F / :forward",
-                summary: "Forward the selected message (carries attachments)",
-                applies_to: Applicability::Conversations,
-            },
-            HelpEntry {
-                keys: "s / :sync",
-                summary: "Sync the active folder (one-shot reconcile)",
-                applies_to: Applicability::Global,
-            },
-            HelpEntry {
-                keys: ":start-sync / :stop-sync",
-                summary: "Start or stop the IMAP IDLE worker for the active folder",
-                applies_to: Applicability::Global,
-            },
-            HelpEntry {
-                keys: "u / :seen / :unseen",
-                summary: "Toggle the Seen flag on the selected message",
-                applies_to: Applicability::Conversations,
-            },
-            HelpEntry {
-                keys: "f / * / :flag / :unflag",
-                summary: "Toggle the Flagged flag on the selected message",
-                applies_to: Applicability::Conversations,
-            },
-            HelpEntry {
-                keys: "e / :archive",
-                summary: "Archive selected message (Conversations) or export selected attachment (Attachments)",
-                applies_to: Applicability::Conversations,
-            },
-            HelpEntry {
-                keys: "m / :move <folder>",
-                summary: "Move selected message: `m` opens the command bar pre-filled with `move `",
-                applies_to: Applicability::Conversations,
+                keys: "o",
+                summary: "Open the selected attachment with xdg-open (Linux, y/n confirm)",
+                applies_to: Applicability::Attachments,
             },
             HelpEntry {
                 keys: "a",
-                summary: "Toggle the attachments pane (in Approvals folder: approve instead)",
-                applies_to: Applicability::Conversations,
+                summary: "Close the attachments pane (toggle back to Conversations)",
+                applies_to: Applicability::Attachments,
             },
             HelpEntry {
-                keys: "d / :delete",
-                summary: "Focus Details pane / delete in lists with y/n confirm (in Approvals folder: deny)",
-                applies_to: Applicability::Conversations,
-            },
-            HelpEntry {
-                keys: "/",
-                summary: "Quick-search the active account (Enter submits, Esc cancels)",
-                applies_to: Applicability::QuickSearch,
-            },
-            HelpEntry {
-                keys: ":search [--account <name>] <query>",
-                summary: "Run an FTS5 search (optionally scoped to a single account)",
-                applies_to: Applicability::CommandBar,
-            },
-            HelpEntry {
-                keys: "x / X",
-                summary: "Dismiss newest toast / clear all toasts",
-                applies_to: Applicability::Global,
+                keys: "e",
+                summary: "Export the selected attachment to the working directory",
+                applies_to: Applicability::Attachments,
             },
         ],
     },
@@ -257,6 +297,36 @@ pub(crate) static HELP_ROWS: &[HelpSection] = &[
                 keys: "d / :deny",
                 summary: "Deny the highlighted pending approval",
                 applies_to: Applicability::Approvals,
+            },
+        ],
+    },
+    HelpSection {
+        title: "Search & sync",
+        entries: &[
+            HelpEntry {
+                keys: "/",
+                summary: "Quick-search the active account (Enter submits, Esc cancels)",
+                applies_to: Applicability::QuickSearch,
+            },
+            HelpEntry {
+                keys: ":search [--account <name>] <query>",
+                summary: "Run an FTS5 search (optionally scoped to a single account)",
+                applies_to: Applicability::CommandBar,
+            },
+            HelpEntry {
+                keys: "s / :sync",
+                summary: "Sync the active folder (one-shot reconcile)",
+                applies_to: Applicability::Global,
+            },
+            HelpEntry {
+                keys: ":start-sync / :stop-sync",
+                summary: "Start or stop the IMAP IDLE worker for the active folder",
+                applies_to: Applicability::Global,
+            },
+            HelpEntry {
+                keys: "x / X",
+                summary: "Dismiss newest toast / clear all toasts",
+                applies_to: Applicability::Global,
             },
         ],
     },
@@ -358,9 +428,12 @@ pub(crate) static HELP_ROWS: &[HelpSection] = &[
 #[cfg(test)]
 pub(crate) const HELP_SECTION_TITLES: &[&str] = &[
     "Panes & navigation",
-    "Conversations & detail",
-    "Mail actions",
+    "Conversations (mail folders)",
+    "Conversations (drafts folder)",
+    "Details / conversation stack",
+    "Attachments",
     "Approvals",
+    "Search & sync",
     "Composer",
     "Theme",
     "Command bar (`:`)",
@@ -468,7 +541,7 @@ mod tests {
         let combined: String = HELP_ROWS
             .iter()
             .flat_map(|s| s.entries.iter())
-            .map(|e| e.summary)
+            .map(|e| e.summary.to_lowercase())
             .collect::<Vec<_>>()
             .join(" | ");
         assert!(
@@ -476,13 +549,13 @@ mod tests {
             "help overlay must document the export side of `e`"
         );
         assert!(
-            combined.contains("Archive") || combined.contains("archive"),
+            combined.contains("archive"),
             "help overlay must document the archive side of `e`"
         );
     }
 
     /// Smoke test that the `Applicability` taxonomy is exercised: every
-    /// non-trivial pane variant must be referenced by at least one row.
+    /// pane variant must be referenced by at least one row.
     /// Catches accidental enum-variant rename / removal that would
     /// silently strand whole panes from the help catalogue.
     #[test]
@@ -496,7 +569,9 @@ mod tests {
         for variant in [
             Applicability::Global,
             Applicability::Conversations,
+            Applicability::ConversationsDrafts,
             Applicability::Details,
+            Applicability::Attachments,
             Applicability::Approvals,
             Applicability::Composer,
             Applicability::CommandBar,
@@ -509,17 +584,102 @@ mod tests {
         }
     }
 
-    /// Compile-time exercise of the rarer `Attachments` variant so the
-    /// taxonomy stays exhaustive even before a row is added. The
-    /// renderer treats unmatched variants as Global, so the variant
-    /// remains useful as a placeholder for Slice 2 work.
+    /// Every overloaded single-letter chord (`o`/`a`/`d`/`e`/`m`) must
+    /// be documented under a concrete pane, never as `Global`. The
+    /// dispatcher in `src/tui/mod.rs::resolve_pane_action` resolves
+    /// each chord to one action per pane; the overlay must mirror the
+    /// table so the rows the user sees reflect where the binding is
+    /// active.
     #[test]
-    fn test_applicability_attachments_variant_constructible() {
-        let entry = HelpEntry {
-            keys: "(unused)",
-            summary: "placeholder for attachments-pane-specific rows in Slice 2",
-            applies_to: Applicability::Attachments,
-        };
-        assert_eq!(entry.applies_to, Applicability::Attachments);
+    fn test_pane_overloaded_chords_are_not_global() {
+        let chords = ["o", "a", "d", "e", "m"];
+        for section in HELP_ROWS {
+            for entry in section.entries {
+                for token in entry.keys.split('/').map(str::trim) {
+                    let head = token.split_whitespace().next().unwrap_or("");
+                    if chords.contains(&head) {
+                        assert_ne!(
+                            entry.applies_to,
+                            Applicability::Global,
+                            "row '{}' uses overloaded chord '{}' but is Global; \
+                             pin the row to its pane",
+                            entry.keys,
+                            head,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Approvals section must surface the approve/deny verbs so users
+    /// can self-rescue after the overload reversal (`a` = approve here,
+    /// not toggle attachments; `d` = deny, not delete).
+    #[test]
+    fn test_approvals_section_has_approve_and_deny_rows() {
+        let approvals: Vec<&HelpEntry> = HELP_ROWS
+            .iter()
+            .filter(|s| s.title == "Approvals")
+            .flat_map(|s| s.entries.iter())
+            .collect();
+        assert!(
+            approvals
+                .iter()
+                .any(|e| e.keys.contains('a') && e.summary.to_lowercase().contains("approve")),
+            "Approvals section missing an `a approve` row: {approvals:?}"
+        );
+        assert!(
+            approvals
+                .iter()
+                .any(|e| e.keys.contains('d') && e.summary.to_lowercase().contains("deny")),
+            "Approvals section missing a `d deny` row: {approvals:?}"
+        );
+    }
+
+    /// Drafts use of the Conversations pane has its own keymap (`o` /
+    /// `Enter` reopen; `d` deletes the highlighted draft). Document
+    /// both so the overlay matches the runtime dispatch.
+    #[test]
+    fn test_drafts_section_has_open_and_delete_rows() {
+        let drafts: Vec<&HelpEntry> = HELP_ROWS
+            .iter()
+            .filter(|s| s.title == "Conversations (drafts folder)")
+            .flat_map(|s| s.entries.iter())
+            .collect();
+        assert!(
+            drafts
+                .iter()
+                .any(|e| e.keys.contains('o') && e.summary.to_lowercase().contains("draft")),
+            "Drafts section missing an `o open draft` row: {drafts:?}"
+        );
+        assert!(
+            drafts
+                .iter()
+                .any(|e| e.keys.contains('d') && e.summary.to_lowercase().contains("draft")),
+            "Drafts section missing a `d delete draft` row: {drafts:?}"
+        );
+    }
+
+    /// Attachments section must surface `o` (xdg-open) and `e` (export)
+    /// so users don't have to discover the export verb by mashing keys.
+    #[test]
+    fn test_attachments_section_has_open_and_export_rows() {
+        let attachments: Vec<&HelpEntry> = HELP_ROWS
+            .iter()
+            .filter(|s| s.title == "Attachments")
+            .flat_map(|s| s.entries.iter())
+            .collect();
+        assert!(
+            attachments
+                .iter()
+                .any(|e| e.keys.contains('o') && e.summary.to_lowercase().contains("open")),
+            "Attachments section missing an `o open file` row: {attachments:?}"
+        );
+        assert!(
+            attachments
+                .iter()
+                .any(|e| e.keys.contains('e') && e.summary.to_lowercase().contains("export")),
+            "Attachments section missing an `e export` row: {attachments:?}"
+        );
     }
 }
