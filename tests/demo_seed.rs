@@ -118,6 +118,8 @@ struct SeededCounts {
     drafts: usize,
     gates: usize,
     pending_approvals: usize,
+    attachments: usize,
+    messages_with_attachments: usize,
 }
 
 async fn count_state(daemon: &Daemon) -> SeededCounts {
@@ -133,6 +135,8 @@ async fn count_state(daemon: &Daemon) -> SeededCounts {
     let mut folders_total = 0;
     let mut messages_total = 0;
     let mut drafts_total = 0;
+    let mut attachments_total = 0;
+    let mut messages_with_attachments = 0;
     for acc in &accounts {
         let acc_id = acc["id"].as_str().expect("account id is string");
         let folders_resp = client
@@ -156,7 +160,21 @@ async fn count_state(daemon: &Daemon) -> SeededCounts {
                 "message.list_by_folder: {:?}",
                 msgs_resp.error
             );
-            messages_total += msgs_resp.data.as_array().map(Vec::len).unwrap_or(0);
+            let msgs = msgs_resp.data.as_array().cloned().unwrap_or_default();
+            messages_total += msgs.len();
+            for msg in &msgs {
+                let msg_id = msg["id"].as_str().expect("message id is string");
+                let att_resp = client
+                    .request("attachment.list", json!({"message_id": msg_id}))
+                    .await
+                    .expect("attachment.list");
+                assert!(att_resp.ok, "attachment.list: {:?}", att_resp.error);
+                let count = att_resp.data.as_array().map(Vec::len).unwrap_or(0);
+                if count > 0 {
+                    messages_with_attachments += 1;
+                }
+                attachments_total += count;
+            }
         }
 
         let drafts_resp = client
@@ -192,6 +210,8 @@ async fn count_state(daemon: &Daemon) -> SeededCounts {
         drafts: drafts_total,
         gates,
         pending_approvals: pending,
+        attachments: attachments_total,
+        messages_with_attachments,
     }
 }
 
@@ -231,6 +251,29 @@ async fn test_demo_seed_populates_minimum_entity_counts() {
         "expected >=2 pending approvals, got {}",
         counts.pending_approvals
     );
+    // At least one seeded message has to carry an attachment row so the
+    // TUI's attachment pane has something to render in demo mode.
+    assert!(
+        counts.messages_with_attachments >= 1,
+        "expected >=1 message with attachments, got {}",
+        counts.messages_with_attachments
+    );
+    // The seed picks fixtures via `(account_idx + topic_idx + msg_idx) %
+    // FIXTURES.len()` where only `attachment_multipart.eml` (index 3 in
+    // an 8-slot table) carries an attachment part — `multipart.eml`
+    // and the other fixtures parse to zero attachments. Walking the
+    // INBOX/Sent/Archive grid for all 3 demo accounts at the
+    // documented `INBOX_MESSAGES_PER_THREAD = 6`, `SENT = 3`, `ARCHIVE
+    // = 2` shape yields 13 hits on fixture index 3 (10 INBOX + 2 Sent
+    // + 1 Archive). A floor of 3 keeps the assert resilient if the
+    // fixture table or per-account thread counts ever shift slightly,
+    // while still being well above the "single accidental insert"
+    // threshold.
+    assert!(
+        counts.attachments >= 3,
+        "expected >=3 attachment rows seeded, got {}",
+        counts.attachments
+    );
 }
 
 #[tokio::test]
@@ -247,4 +290,9 @@ async fn test_demo_seed_is_idempotent() {
     assert_eq!(second.drafts, first.drafts);
     assert_eq!(second.gates, first.gates);
     assert_eq!(second.pending_approvals, first.pending_approvals);
+    assert_eq!(second.attachments, first.attachments);
+    assert_eq!(
+        second.messages_with_attachments,
+        first.messages_with_attachments
+    );
 }
