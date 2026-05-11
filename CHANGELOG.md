@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `just demo` recipe and `postblox-demo-seed` binary that spin up a
+  self-contained local daemon, seed accounts/folders/messages/drafts/
+  MCP gates/approvals, and launch the TUI — no network, keyring, or
+  OAuth required.
 - `postbloxd` daemon: Unix-socket IPC, length-prefixed JSON frames,
   per-topic broadcast hub, length- and connection-bounded server.
 - `DaemonDispatcher` with read ops (`account.list`, `folder.list`,

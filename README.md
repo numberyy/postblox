@@ -62,6 +62,21 @@ Requires:
 ## Quick start
 
 ```sh
+just demo
+```
+
+`just demo` builds the workspace in release mode, spins up a fresh
+`postbloxd` against a tempdir, seeds it with three demo accounts
+(folders, threads, messages, drafts, MCP gates, pending approvals), and
+launches the TUI. Quit the TUI to tear everything down — no real IMAP,
+SMTP, OAuth, or keyring is touched.
+
+For day-to-day development, `just check` runs `cargo fmt --check`,
+workspace clippy with `-D warnings`, and the workspace test suite.
+
+### Connecting a real account
+
+```sh
 # Start the daemon (foreground; ctrl-c to stop).
 postbloxd
 ```
