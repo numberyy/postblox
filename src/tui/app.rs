@@ -136,7 +136,7 @@ pub enum InputMode {
 pub(crate) const MAX_SEARCH_CHARS: usize = 256;
 
 /// Maximum chars shown for an approval request's compact argument summary.
-pub(crate) const MAX_APPROVAL_ARGS_CHARS: usize = 80;
+pub(crate) const MAX_APPROVAL_ARGS_CHARS: usize = 48;
 
 /// Display name for the predefined virtual approvals folder.
 pub(crate) const APPROVALS_FOLDER_NAME: &str = "Approvals";
@@ -606,6 +606,11 @@ impl From<McpApproval> for ApprovalItem {
 }
 
 impl ApprovalItem {
+    /// Human-readable label for the internal MCP tool name.
+    pub(crate) fn tool_label(&self) -> String {
+        tool_label(&self.tool)
+    }
+
     /// Build a pending approval row from a live `mcp.approval_requested`
     /// event payload. Events omit `created_at`, so `now` becomes the
     /// local age anchor until the next authoritative refresh.
@@ -3700,13 +3705,24 @@ fn text_or_default(value: Option<&str>, default: &str) -> String {
 
 /// Render request args as a stable one-line summary for approval rows.
 pub(crate) fn compact_args_summary(args: &Value) -> String {
-    const PREFERRED_KEYS: &[&str] = &["to", "folder", "folder_name", "subject"];
+    const PREFERRED_KEYS: &[&str] = &[
+        "to",
+        "subject",
+        "folder",
+        "folder_name",
+        "message_id",
+        "draft_id",
+        "attachment_id",
+    ];
     if let Value::Object(map) = args {
+        if map.is_empty() {
+            return String::new();
+        }
         let parts: Vec<String> = PREFERRED_KEYS
             .iter()
             .filter_map(|key| {
                 map.get(*key)
-                    .map(|value| format!("{key}={}", compact_arg_value(value)))
+                    .map(|value| format!("{}={}", compact_arg_label(key), compact_arg_value(value)))
             })
             .collect();
         if !parts.is_empty() {
@@ -3715,6 +3731,7 @@ pub(crate) fn compact_args_summary(args: &Value) -> String {
     }
 
     let raw = serde_json::to_string(args).unwrap_or_else(|_| "<args>".into());
+    let raw = shorten_uuid_like_in_text(&raw);
     truncate_chars(&raw, MAX_APPROVAL_ARGS_CHARS)
 }
 
@@ -3722,22 +3739,106 @@ fn approval_args_json(args: &Value) -> String {
     serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string())
 }
 
+fn compact_arg_label(key: &str) -> &str {
+    match key {
+        "message_id" => "message",
+        "draft_id" => "draft",
+        "attachment_id" => "attachment",
+        other => other,
+    }
+}
+
 fn compact_arg_value(value: &Value) -> String {
     match value {
-        Value::String(value) => value.clone(),
+        Value::String(value) => shorten_uuid_like(value).unwrap_or_else(|| value.clone()),
         Value::Array(values) => {
             let parts: Vec<String> = values
                 .iter()
                 .map(|value| match value {
-                    Value::String(value) => value.clone(),
+                    Value::String(value) => {
+                        shorten_uuid_like(value).unwrap_or_else(|| value.clone())
+                    }
                     other => other.to_string(),
                 })
                 .collect();
-            format!("[{}]", parts.join(","))
+            parts.join(", ")
         }
         Value::Null => "null".into(),
         other => other.to_string(),
     }
+}
+
+fn shorten_uuid_like(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36 {
+        return None;
+    }
+    for (index, byte) in bytes.iter().enumerate() {
+        let is_hyphen_slot = matches!(index, 8 | 13 | 18 | 23);
+        if is_hyphen_slot {
+            if *byte != b'-' {
+                return None;
+            }
+        } else if !byte.is_ascii_hexdigit() {
+            return None;
+        }
+    }
+    Some(format!("…{}", &value[value.len() - 4..]))
+}
+
+fn shorten_uuid_like_in_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.char_indices().peekable();
+    while let Some((byte_index, ch)) = chars.next() {
+        if let Some(end) = byte_index.checked_add(36) {
+            if let Some(short) = value.get(byte_index..end).and_then(shorten_uuid_like) {
+                out.push_str(&short);
+                while chars
+                    .peek()
+                    .is_some_and(|(next_index, _)| *next_index < end)
+                {
+                    chars.next();
+                }
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn tool_label(tool: &str) -> String {
+    match tool {
+        "postblox_message_delete" => "Delete message".into(),
+        "postblox_message_send" => "Send message".into(),
+        "postblox_draft_create" => "Create draft".into(),
+        other => fallback_tool_label(other),
+    }
+}
+
+fn fallback_tool_label(tool: &str) -> String {
+    let normalized = tool.strip_prefix("postblox_").unwrap_or(tool);
+    let mut words = normalized.split('_').filter(|word| !word.is_empty());
+    let Some(first) = words.next() else {
+        return "Tool request".into();
+    };
+    let mut out = capitalize_first_word(first);
+    for word in words {
+        out.push(' ');
+        out.push_str(&word.to_lowercase());
+    }
+    out
+}
+
+fn capitalize_first_word(word: &str) -> String {
+    let lowered = word.to_lowercase();
+    let mut chars = lowered.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut out = first.to_uppercase().collect::<String>();
+    out.extend(chars);
+    out
 }
 
 fn optional_summary_label(summary: String) -> Option<String> {
@@ -4303,18 +4404,51 @@ mod tests {
         let args = serde_json::json!({
             "body": "long body that should not be shown first",
             "subject": "Status",
-            "to": ["alice@example.com", "bob@example.com"],
+            "to": "alice@example.com",
         });
 
         let summary = compact_args_summary(&args);
 
-        assert_eq!(
-            summary,
-            "to=[alice@example.com,bob@example.com], subject=Status"
-        );
+        assert_eq!(summary, "to=alice@example.com, subject=Status");
 
         let long = serde_json::json!({"zz": "x".repeat(200)});
         assert!(compact_args_summary(&long).chars().count() <= MAX_APPROVAL_ARGS_CHARS);
+    }
+
+    #[test]
+    fn test_compact_args_summary_shortens_uuid_like_ids_and_stays_below_max() {
+        let args = serde_json::json!({
+            "body": "long body that should not be shown first",
+            "message_id": "00000000-0000-0000-0000-0000000000bb",
+        });
+
+        let summary = compact_args_summary(&args);
+
+        assert_eq!(summary, "message=…00bb");
+        assert!(!summary.contains("00000000-0000-0000-0000-0000000000bb"));
+        assert!(summary.chars().count() <= MAX_APPROVAL_ARGS_CHARS);
+    }
+
+    #[test]
+    fn test_approval_item_tool_label_maps_known_tools_and_falls_back() {
+        let now = Utc::now();
+
+        assert_eq!(
+            approval("postblox_message_delete", now).tool_label(),
+            "Delete message"
+        );
+        assert_eq!(
+            approval("postblox_message_send", now).tool_label(),
+            "Send message"
+        );
+        assert_eq!(
+            approval("postblox_draft_create", now).tool_label(),
+            "Create draft"
+        );
+        assert_eq!(
+            approval("postblox_attachment_export", now).tool_label(),
+            "Attachment export"
+        );
     }
 
     #[test]

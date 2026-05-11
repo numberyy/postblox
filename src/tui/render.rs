@@ -17,8 +17,9 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use ratatui::Frame;
 
 use super::app::{
-    human_size, ActivePane, AppState, ComposeField, InputMode, SyncStateUi, ToastKind, ICON_ERROR,
-    ICON_IDLE, ICON_POLLING, ICON_SYNCING, MAX_COMPOSE_ATTACHMENT_BYTES, MAX_SELECTED_ERROR_CHARS,
+    human_size, ActivePane, AppState, ApprovalItem, ComposeField, InputMode, SyncStateUi,
+    ToastKind, ICON_ERROR, ICON_IDLE, ICON_POLLING, ICON_SYNCING, MAX_COMPOSE_ATTACHMENT_BYTES,
+    MAX_SELECTED_ERROR_CHARS,
 };
 use super::theme::Theme;
 
@@ -150,20 +151,17 @@ fn render_approval_list(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme
             .items
             .iter()
             .map(|approval| {
-                let mut line = vec![
+                let mut lines = vec![Line::from(vec![
                     Span::styled(
-                        approval.tool.as_str(),
+                        approval.tool_label(),
                         theme.text.add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(" — "),
-                    Span::raw(approval.args_summary.as_str()),
-                    Span::styled(format!("  {}", approval.age_label_at(now)), theme.muted),
-                ];
-                if let Some(summary) = approval.summary.as_deref() {
-                    line.push(Span::raw("  "));
-                    line.push(Span::styled(summary, theme.muted));
+                    Span::styled(format!(" {}", approval.age_label_at(now)), theme.muted),
+                ])];
+                if let Some(summary) = approval_target_rule_summary(approval) {
+                    lines.push(Line::styled(summary, theme.muted));
                 }
-                ListItem::new(Line::from(line))
+                ListItem::new(lines)
             })
             .collect()
     };
@@ -179,8 +177,8 @@ fn render_approval_list(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme
 fn render_approval_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
     let text = approval_detail_text(app);
     let paragraph = Paragraph::new(text)
-        .block(pane_block(
-            "Approval detail",
+        .block(pane_block_owned(
+            approval_detail_title(app),
             app.active == ActivePane::Details,
             theme,
         ))
@@ -273,10 +271,7 @@ fn render_folders(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
                 if folder.is_approvals_virtual() {
                     ListItem::new(Line::from(vec![
                         Span::raw(folder.name.as_str()),
-                        Span::styled(
-                            format!(" ({}) [system]", app.approvals_pending_count()),
-                            theme.muted,
-                        ),
+                        Span::styled(format!(" ({})", app.approvals_pending_count()), theme.muted),
                     ]))
                 } else {
                     ListItem::new(Line::from(vec![
@@ -478,20 +473,41 @@ fn approval_detail_text(app: &AppState) -> String {
     let Some(approval) = app.selected_approval() else {
         return format!("No pending approvals\n\n{hints}");
     };
-    let mut text = format!(
-        "Tool: {}\nCreated: {}\n\nArgs:\n{}\n\n{}",
-        approval.tool,
-        approval.age_label_at(Utc::now()),
-        approval.args_json,
-        hints
-    );
+    let mut lines = vec![
+        format!("Action: {}", approval.tool_label()),
+        format!("Tool: {}", approval.tool),
+        format!("Created: {}", approval.age_label_at(Utc::now())),
+    ];
     if let Some(summary) = approval.summary.as_deref() {
-        text.insert_str(
-            text.find("\n\nArgs:").unwrap_or(text.len()),
-            &format!("\nSummary: {summary}"),
-        );
+        lines.push(format!("Summary: {summary}"));
     }
-    text
+    lines.push(String::new());
+    lines.push("Arguments:".into());
+    lines.extend(approval.args_json.lines().map(str::to_string));
+    lines.push(String::new());
+    lines.push(hints.into());
+    lines.join("\n")
+}
+
+fn approval_detail_title(app: &AppState) -> String {
+    app.selected_approval()
+        .map(|approval| format!("Approval: {}", approval.tool_label()))
+        .unwrap_or_else(|| "Approval detail".into())
+}
+
+fn approval_target_rule_summary(approval: &ApprovalItem) -> Option<String> {
+    let args = approval.args_summary.trim();
+    let summary = approval
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (args.is_empty(), summary) {
+        (true, None) => None,
+        (false, None) => Some(args.to_string()),
+        (true, Some(summary)) => Some(summary.to_string()),
+        (false, Some(summary)) => Some(format!("{args} • {summary}")),
+    }
 }
 
 fn render_detail_with_attachments(
@@ -981,8 +997,8 @@ mod tests {
     use super::*;
     use crate::models::{AccountId, AttachmentId, FolderId, MessageId, ThreadId};
     use crate::tui::app::{
-        AccountItem, ApprovalItem, AttachmentItem, AttachmentPreviewItem, FolderItem, FolderKind,
-        MessageDetail, MessageItem,
+        compact_args_summary, AccountItem, ApprovalItem, AttachmentItem, AttachmentPreviewItem,
+        FolderItem, FolderKind, MessageDetail, MessageItem,
     };
     use crate::tui::theme::ThemeName;
 
@@ -999,6 +1015,30 @@ mod tests {
         terminal.draw(|frame| render(frame, app)).unwrap();
         let cursor = terminal.backend_mut().get_cursor_position().unwrap();
         (terminal.backend().buffer().clone(), cursor)
+    }
+
+    fn render_approval_list_to_buffer(app: &AppState) -> Buffer {
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let theme = app.theme.theme();
+                render_approval_list(frame, frame.area(), app, &theme);
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn render_approval_detail_to_buffer(app: &AppState) -> Buffer {
+        let backend = TestBackend::new(100, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let theme = app.theme.theme();
+                render_approval_detail(frame, frame.area(), app, &theme);
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
     }
 
     fn buffer_text(buffer: &Buffer) -> String {
@@ -1296,29 +1336,59 @@ mod tests {
 
         assert!(text.contains("Approvals"));
         assert!(text.contains("Approvals (0)"));
+        assert!(!text.contains("[system]"));
         assert!(text.contains("No pending approvals"));
     }
 
     #[test]
-    fn test_render_approvals_folder_row_includes_tool_args_and_detail() {
+    fn test_render_approvals_folder_list_uses_human_label_and_short_id() {
         let mut app = AppState::default();
         app.select_approvals_folder();
+        let message_id = "00000000-0000-0000-0000-0000000000bb";
         app.apply_approvals(vec![ApprovalItem {
             id: uuid::Uuid::new_v4(),
-            tool: "postblox_message_send".into(),
-            args_summary: "to=[alice@example.com], subject=Hi".into(),
-            args_json: "{\n  \"subject\": \"Hi\"\n}".into(),
-            summary: Some("send draft".into()),
+            tool: "postblox_message_delete".into(),
+            args_summary: compact_args_summary(&serde_json::json!({"message_id": message_id})),
+            args_json: format!("{{\n  \"message_id\": \"{message_id}\"\n}}"),
+            summary: Some("demo: never auto-delete from Trash".into()),
             created_at: Utc::now(),
         }]);
 
-        let text = buffer_text(&render_to_buffer(&app));
+        let text = buffer_text(&render_approval_list_to_buffer(&app));
 
-        assert!(text.contains("postblox_message_send"));
-        assert!(text.contains("to=[alice@example.com], subject=Hi"));
-        assert!(text.contains("Approvals (1)"));
-        assert!(text.contains("\"subject\": \"Hi\""));
-        assert!(text.contains("send draft"));
+        assert!(text.contains("Delete message"));
+        assert!(text.contains("message=…00bb"));
+        assert!(text.contains("demo: never auto-delete from Trash"));
+        assert!(!text.contains("postblox_message_delete"));
+        assert!(!text.contains(message_id));
+
+        let full_text = buffer_text(&render_to_buffer(&app));
+        assert!(full_text.contains("Approvals (1)"));
+        assert!(!full_text.contains("[system]"));
+    }
+
+    #[test]
+    fn test_render_approvals_folder_detail_shows_human_and_raw_tool_names() {
+        let mut app = AppState::default();
+        app.select_approvals_folder();
+        let message_id = "00000000-0000-0000-0000-0000000000bb";
+        app.apply_approvals(vec![ApprovalItem {
+            id: uuid::Uuid::new_v4(),
+            tool: "postblox_message_delete".into(),
+            args_summary: compact_args_summary(&serde_json::json!({"message_id": message_id})),
+            args_json: format!("{{\n  \"message_id\": \"{message_id}\"\n}}"),
+            summary: Some("demo: never auto-delete from Trash".into()),
+            created_at: Utc::now(),
+        }]);
+
+        let text = buffer_text(&render_approval_detail_to_buffer(&app));
+
+        assert!(text.contains("Approval: Delete message"));
+        assert!(text.contains("Action: Delete message"));
+        assert!(text.contains("Tool: postblox_message_delete"));
+        assert!(text.contains("Arguments:"));
+        assert!(text.contains("\"message_id\": \"00000000-0000-0000-0000-0000000000bb\""));
+        assert!(text.contains("demo: never auto-delete from Trash"));
     }
 
     #[test]
@@ -1345,7 +1415,7 @@ mod tests {
 
         let text = buffer_text(&render_to_buffer(&app));
 
-        assert!(text.contains("postblox_draft_delete"));
+        assert!(text.contains("Draft delete"));
         assert!(!text.contains("Mail subject"));
     }
 
