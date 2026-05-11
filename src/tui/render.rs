@@ -300,9 +300,19 @@ fn render_folders(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
             .collect()
     };
     let mut state = selection_state(app.folders.len(), app.selected_folder);
+    // Surface pending approvals alongside the bare "Folders" title so
+    // that a user on Inbox can still see N > 0 without scrolling to
+    // the virtual approvals row. The badge is suppressed at N = 0 to
+    // avoid permanent visual noise.
+    let pending = app.approvals_pending_count();
+    let title = if pending > 0 {
+        format!("Folders · Approvals ({pending})")
+    } else {
+        "Folders".to_string()
+    };
     let list = List::new(items)
-        .block(pane_block(
-            "Folders",
+        .block(pane_block_owned(
+            title,
             app.active == ActivePane::Folders,
             theme,
         ))
@@ -726,7 +736,11 @@ fn render_attachment_preview(frame: &mut Frame<'_>, area: Rect, app: &AppState, 
         .title_style(theme.pane);
 
     let Some(preview_text) = app.preview_text() else {
-        let paragraph = Paragraph::new("Select an attachment")
+        // Mirror the composer-attachments affordance pattern: name the
+        // chord that brings this pane to life so a first-time user
+        // doesn't have to read the source to discover Enter focuses
+        // the preview and j/k scroll it.
+        let paragraph = Paragraph::new("Select an attachment (Enter to focus, j/k to scroll)")
             .block(block)
             .style(theme.text)
             .wrap(Wrap { trim: false });
@@ -737,20 +751,32 @@ fn render_attachment_preview(frame: &mut Frame<'_>, area: Rect, app: &AppState, 
     let viewport_height = area.height.saturating_sub(2) as usize;
     let scroll = app.preview_visible_scroll(viewport_height.max(1));
     let selection = app.preview_selected_line_range();
-    let visible: Vec<Line> = lines
-        .iter()
-        .enumerate()
-        .skip(scroll)
-        .take(viewport_height.max(1))
-        .map(|(idx, line)| {
-            if selection.as_ref().is_some_and(|range| range.contains(&idx)) {
-                let visible = if line.is_empty() { " " } else { *line };
-                Line::styled(visible.to_string(), theme.selection)
-            } else {
-                Line::raw((*line).to_string())
-            }
-        })
-        .collect();
+    // Prepend a single muted hint line when a preview is loaded but
+    // the pane is not focused. The hint sits inside the bordered area
+    // so it consumes one viewport row only; the body still wraps and
+    // scrolls per its original rules.
+    let mut visible: Vec<Line> = Vec::new();
+    if !preview_focused {
+        visible.push(Line::styled(
+            "Preview ready — Enter to focus, j/k to scroll, v to select, y to copy".to_string(),
+            theme.muted,
+        ));
+    }
+    visible.extend(
+        lines
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(viewport_height.max(1))
+            .map(|(idx, line)| {
+                if selection.as_ref().is_some_and(|range| range.contains(&idx)) {
+                    let visible = if line.is_empty() { " " } else { *line };
+                    Line::styled(visible.to_string(), theme.selection)
+                } else {
+                    Line::raw((*line).to_string())
+                }
+            }),
+    );
     let paragraph = Paragraph::new(visible)
         .block(block)
         .style(theme.text)
@@ -891,6 +917,12 @@ fn render_compose_attachments(
         })
         .collect();
     let mut state = selection_state(count, composer.selected_attachment);
+    // Append `[i/total]` so the user can see which row the highlight
+    // sits on without counting. The selected index is 0-based in
+    // state but human-readable here, hence the +1. Empty and
+    // attach-prompt branches above keep the plain summary.
+    let current = composer.selected_attachment.min(count.saturating_sub(1)) + 1;
+    let summary = format!("{summary} [{current}/{count}]");
     let list = List::new(items)
         .block(pane_block_owned(format!(" {summary} "), false, theme))
         .highlight_style(theme.selection)
@@ -1442,6 +1474,67 @@ mod tests {
     }
 
     #[test]
+    fn test_folders_title_shows_approval_count_when_pending() {
+        let mut app = AppState::default();
+        app.apply_folders(vec![FolderItem {
+            kind: FolderKind::Mail,
+            id: FolderId::new(),
+            name: "INBOX".into(),
+            role: "inbox".into(),
+        }]);
+        app.apply_approvals(vec![
+            ApprovalItem {
+                id: uuid::Uuid::new_v4(),
+                tool: "postblox_message_send".into(),
+                args_summary: String::new(),
+                args_json: "{}".into(),
+                summary: None,
+                target: None,
+                created_at: Utc::now(),
+            },
+            ApprovalItem {
+                id: uuid::Uuid::new_v4(),
+                tool: "postblox_message_delete".into(),
+                args_summary: String::new(),
+                args_json: "{}".into(),
+                summary: None,
+                target: None,
+                created_at: Utc::now(),
+            },
+        ]);
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(
+            text.contains("Approvals (2)"),
+            "folders title must surface pending count; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn test_folders_title_omits_approvals_when_zero() {
+        let mut app = AppState::default();
+        app.apply_folders(vec![FolderItem {
+            kind: FolderKind::Mail,
+            id: FolderId::new(),
+            name: "INBOX".into(),
+            role: "inbox".into(),
+        }]);
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(text.contains("Folders"));
+        // The virtual approvals row still renders (`Approvals (0)`),
+        // but the pane title must NOT carry the badge — pinned via
+        // the exact `Folders · Approvals` separator that the badge
+        // injects.
+        assert!(
+            !text.contains("Folders · Approvals"),
+            "folders title must not show the badge at zero pending; got:\n{text}"
+        );
+    }
+
+    #[test]
     fn test_render_one_message_conversation_detail_expanded_without_collapsed_header() {
         let mut app = AppState::default();
         let thread_id = ThreadId::new();
@@ -1974,6 +2067,53 @@ mod tests {
     }
 
     #[test]
+    fn test_attachment_preview_empty_shows_in_panel_hint() {
+        let mut app = AppState::default();
+        let message_id = MessageId::new();
+        let attachment_id = AttachmentId::new();
+        app.apply_folder_messages(vec![MessageItem {
+            id: message_id,
+            thread_id: None,
+            subject: "No preview yet".into(),
+            from: "alice@example.com".into(),
+            date: "2026-05-07 10:00".into(),
+            snippet: "Preview".into(),
+            flags: Vec::new(),
+        }]);
+        app.apply_detail(Some(MessageDetail {
+            id: message_id,
+            subject: "No preview yet".into(),
+            from: "alice@example.com".into(),
+            snippet: "Preview".into(),
+            body: "Body".into(),
+            flags: Vec::new(),
+        }));
+        // Attachments exist so the split-preview pane is visible, but
+        // no preview is loaded yet — the empty branch is the one that
+        // must surface the affordances hint.
+        app.apply_attachments(vec![AttachmentItem {
+            id: attachment_id,
+            message_id,
+            filename: "notes.txt".into(),
+            content_type: "text/plain".into(),
+            size_bytes: 12,
+            disposition: "attachment".into(),
+            storage_path: "/tmp/notes.txt".into(),
+        }]);
+        app.active = ActivePane::Attachments;
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        // The hint wraps inside the narrow preview pane, so the
+        // line-break can split the assertion fragment. Pin only the
+        // chord keyword that survives the soft-wrap.
+        assert!(
+            text.contains("Enter to"),
+            "empty preview pane must name its affordances; got:\n{text}"
+        );
+    }
+
+    #[test]
     fn test_render_preview_focus_applies_scroll_offset_and_selection_style() {
         let mut app = AppState::default();
         let message_id = MessageId::new();
@@ -2140,6 +2280,51 @@ mod tests {
         let selected = buffer.cell((1, 15)).unwrap().style();
         assert_eq!(selected.fg, Some(Color::Black));
         assert_eq!(selected.bg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn test_compose_attachments_summary_includes_index_over_total() {
+        use crate::tui::app::ComposerAttachment;
+        use std::path::PathBuf;
+
+        let mut app = AppState::default();
+        app.enter_composer(AccountId::new());
+        let composer = app.composer.as_mut().unwrap();
+        composer.attachments.push(ComposerAttachment {
+            path: PathBuf::from("/tmp/a.txt"),
+            filename: "a.txt".into(),
+            size_bytes: 1,
+            content_type: "text/plain".into(),
+        });
+        composer.attachments.push(ComposerAttachment {
+            path: PathBuf::from("/tmp/b.txt"),
+            filename: "b.txt".into(),
+            size_bytes: 1,
+            content_type: "text/plain".into(),
+        });
+        composer.selected_attachment = 1;
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(
+            text.contains("[2/2]"),
+            "compose attachments summary must include `[i/total]`; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn test_compose_attachments_summary_empty_omits_index() {
+        let mut app = AppState::default();
+        app.enter_composer(AccountId::new());
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        // Empty + attach-prompt states keep the existing summary; the
+        // `[i/total]` fragment must not appear.
+        assert!(
+            !text.contains('['),
+            "empty composer attachments must not render `[i/total]`; got:\n{text}"
+        );
     }
 
     #[test]

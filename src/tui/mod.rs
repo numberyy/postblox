@@ -1057,6 +1057,17 @@ async fn handle_key<C: Mailbox + ?Sized>(
             false
         }
         KeyCode::Char('q') => true,
+        KeyCode::Esc => {
+            // Clears a sticky error banner once the sub-handlers
+            // (search/details/preview) have already had their crack at
+            // Esc. Only consume the key when there *is* an error so
+            // panes that expect Esc to be a no-op still see it as one.
+            if app.error.is_some() {
+                app.clear_error();
+                app.set_status("");
+            }
+            false
+        }
         KeyCode::Char('x') => {
             app.dismiss_newest_toast();
             false
@@ -2525,7 +2536,7 @@ async fn save_composer<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) 
     match result {
         Ok(draft_id) => {
             app.mark_composer_saved(draft_id);
-            app.set_status(format!("Draft saved {draft_id}"));
+            app.set_status(format!("Draft saved (in Drafts folder) {draft_id}"));
             Some(draft_id)
         }
         Err(error) => {
@@ -4910,6 +4921,16 @@ mod tests {
         assert_eq!(client.calls.len(), 2);
         assert!(matches!(client.calls[0], Call::CreateDraft(_)));
         assert!(matches!(client.calls[1], Call::UpdateDraft(id, _) if id == draft_id));
+        assert!(
+            app.status.contains("(in Drafts folder)"),
+            "status must name the Drafts folder; got: {:?}",
+            app.status
+        );
+        assert!(
+            app.status.contains(&draft_id.to_string()),
+            "status must still include the draft id; got: {:?}",
+            app.status
+        );
     }
 
     #[tokio::test]
@@ -6862,6 +6883,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_pane_dispatch_m_off_list_uses_canonical_wording() {
+        // Pin the exact phrase `move only valid in Conversations` for
+        // every pane that shares the canonical refusal. If any of
+        // these arms drift to a less informative or differently
+        // worded message, the help-overlay copy and this test will
+        // disagree.
+        for active in [ActivePane::Accounts, ActivePane::Folders] {
+            let mut app = AppState {
+                active,
+                ..AppState::default()
+            };
+            let mut client = MockMailbox::default();
+
+            press('m', &mut app, &mut client).await;
+
+            assert_refusal_toast(&app, "move only valid in Conversations");
+            assert_eq!(app.mode, InputMode::Normal);
+            assert!(client.calls.is_empty());
+        }
+
+        // Search is gated behind `begin_search` because the pane is
+        // only reachable while a search is open.
+        let mut app = AppState::default();
+        app.begin_search("anything", None);
+        app.apply_search_hits(Vec::new());
+        let mut client = MockMailbox::default();
+
+        press('m', &mut app, &mut client).await;
+
+        assert_refusal_toast(&app, "move only valid in Conversations");
+        assert_eq!(app.mode, InputMode::Normal);
+    }
+
+    #[tokio::test]
     async fn test_pane_dispatch_o_in_conversations_mail_refuses() {
         let mut app = AppState {
             active: ActivePane::Conversations,
@@ -7304,5 +7359,65 @@ mod tests {
             .iter()
             .all(|toast| toast.kind != app::ToastKind::Error));
         assert!(app.error.is_none(), "polite refusal must not set app.error");
+    }
+
+    #[tokio::test]
+    async fn test_normal_esc_clears_sticky_error() {
+        // With focus on a pane whose sub-handler does not consume Esc
+        // (Folders here), pressing Esc must clear a sticky error and
+        // wipe the matching status line.
+        let mut app = AppState {
+            active: ActivePane::Folders,
+            ..AppState::default()
+        };
+        app.set_error("daemon unavailable");
+        app.set_status("daemon unavailable");
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert!(app.error.is_none());
+        assert!(app.status.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_normal_esc_without_error_is_noop() {
+        // Without a sticky error, Esc must leave pane/mode/selection
+        // untouched. The sub-handlers (search/details/preview) own
+        // Esc when their pane is active; this assertion targets the
+        // top-level no-op path.
+        let mut app = AppState {
+            active: ActivePane::Folders,
+            ..AppState::default()
+        };
+        let initial_active = app.active;
+        let initial_mode = app.mode;
+        let initial_status = app.status.clone();
+        let initial_selected_folder = app.selected_folder;
+        let initial_selected_account = app.selected_account;
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert!(app.error.is_none());
+        assert_eq!(app.active, initial_active);
+        assert_eq!(app.mode, initial_mode);
+        assert_eq!(app.status, initial_status);
+        assert_eq!(app.selected_folder, initial_selected_folder);
+        assert_eq!(app.selected_account, initial_selected_account);
     }
 }
