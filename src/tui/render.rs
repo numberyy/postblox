@@ -174,8 +174,8 @@ fn render_approval_list(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme
 }
 
 fn render_approval_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
-    let text = approval_detail_text(app);
-    let paragraph = Paragraph::new(text)
+    let lines = approval_detail_lines(app, theme);
+    let paragraph = Paragraph::new(lines)
         .block(pane_block_owned(
             approval_detail_title(app),
             app.active == ActivePane::Details,
@@ -464,33 +464,180 @@ fn detail_text(app: &AppState) -> String {
     }
 }
 
-fn approval_detail_text(app: &AppState) -> String {
-    let hints = "Keys: j/k move • a approve • d deny • :approve/:deny";
+fn approval_detail_lines<'a>(app: &'a AppState, theme: &Theme) -> Vec<Line<'a>> {
     if app.approvals.pending && app.approvals.items.is_empty() {
-        return format!("Loading approvals…\n\n{hints}");
+        return vec![Line::styled("Loading approvals…", theme.muted)];
     }
     let Some(approval) = app.selected_approval() else {
-        return format!("No pending approvals\n\n{hints}");
+        return vec![Line::styled("No pending approvals", theme.muted)];
     };
-    let mut lines = vec![format!("Action: {}", approval.tool_label())];
-    lines.extend(approval.target_detail_lines());
-    if let Some(summary) = approval.summary.as_deref() {
-        lines.push(format!("Summary: {summary}"));
+
+    let action_label = approval.tool_label();
+    let target = approval.target.as_ref();
+    let header_subject = target
+        .and_then(super::app::ApprovalTargetContext::target)
+        .map(str::to_owned);
+    let header_attachment = target
+        .filter(|_| header_subject.is_none())
+        .and_then(super::app::ApprovalTargetContext::attachment)
+        .map(str::to_owned);
+
+    let mut lines: Vec<Line<'a>> = Vec::new();
+
+    // Header block: subject (bold) + " — <action>" (muted). When no
+    // resolved target subject exists, fall back to the action label as
+    // the headline.
+    if let Some(subject) = header_subject.as_deref().or(header_attachment.as_deref()) {
+        lines.push(Line::from(vec![
+            Span::styled(subject.to_owned(), theme.text.add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" — {action_label}"), theme.muted),
+        ]));
+    } else {
+        lines.push(Line::from(vec![Span::styled(
+            action_label.clone(),
+            theme.text.add_modifier(Modifier::BOLD),
+        )]));
     }
-    lines.push(format!("Tool: {}", approval.tool));
-    lines.push(format!("Created: {}", approval.age_label_at(Utc::now())));
-    lines.push(String::new());
-    lines.push("Arguments:".into());
-    lines.extend(approval.args_json.lines().map(str::to_string));
-    lines.push(String::new());
-    lines.push(hints.into());
-    lines.join("\n")
+
+    if let Some(meta) = approval_header_meta_line(target) {
+        lines.push(Line::styled(meta, theme.muted));
+    }
+
+    // Couldn't-resolve hint: when the approval references an entity by
+    // id (message/draft/attachment) but the daemon didn't return a
+    // human-readable target, surface a low-emphasis note.
+    if target.is_none() {
+        if let Some(note) = approval_unresolved_target_note(approval) {
+            lines.push(Line::styled(note, theme.muted));
+        }
+    }
+
+    // Snippet block.
+    let snippet = target.and_then(super::app::ApprovalTargetContext::snippet);
+    if let Some(snippet) = snippet {
+        lines.push(Line::raw(""));
+        for chunk in snippet.lines() {
+            lines.push(Line::from(vec![
+                Span::styled("▎ ", theme.muted),
+                Span::styled(chunk.to_owned(), theme.muted),
+            ]));
+        }
+    }
+
+    // Gate context.
+    if let Some(summary) = approval.summary.as_deref() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(format!("policy: {summary}"), theme.muted));
+    }
+
+    // Debug block — low-emphasis tool/args metadata + shortened JSON.
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!(
+            "tool={} · args={} · {}",
+            approval.tool,
+            approval_arg_count_label(approval),
+            approval.age_label_at(Utc::now())
+        ),
+        theme.muted,
+    ));
+    let shortened = shorten_uuid_in_json(&approval.args_json);
+    for chunk in shortened.lines() {
+        lines.push(Line::styled(chunk.to_owned(), theme.muted));
+    }
+
+    lines
 }
 
 fn approval_detail_title(app: &AppState) -> String {
-    app.selected_approval()
-        .map(|approval| format!("Approval: {}", approval.tool_label()))
-        .unwrap_or_else(|| "Approval detail".into())
+    let Some(approval) = app.selected_approval() else {
+        return "Approval detail".into();
+    };
+    let age = approval.age_label_at(Utc::now());
+    format!("{} — {age}", approval.tool_label())
+}
+
+/// Build the muted "from … · to …" line under the approval header.
+/// Returns `None` when neither field is resolved.
+fn approval_header_meta_line(target: Option<&super::app::ApprovalTargetContext>) -> Option<String> {
+    let target = target?;
+    let from = target.from();
+    let to = target.to();
+    match (from, to) {
+        (Some(from), Some(to)) => Some(format!("from {from} · to {to}")),
+        (Some(from), None) => Some(format!("from {from}")),
+        (None, Some(to)) => Some(format!("to {to}")),
+        (None, None) => None,
+    }
+}
+
+/// Best-effort note when an approval references an entity by id but
+/// the daemon hasn't enriched the target context yet. Renders only
+/// when the approval payload looks like it carried an id reference,
+/// so already-direct approvals (e.g. a `subject` argument) stay quiet.
+fn approval_unresolved_target_note(approval: &super::app::ApprovalItem) -> Option<&'static str> {
+    let value = approval.args_value()?;
+    let has_id = value.get("message_id").is_some()
+        || value.get("draft_id").is_some()
+        || value.get("attachment_id").is_some();
+    has_id.then_some("couldn't load message/draft target")
+}
+
+/// Compact "<n> keys" label for the muted debug line. Falls back to a
+/// generic "args" string when the payload is not a JSON object.
+fn approval_arg_count_label(approval: &super::app::ApprovalItem) -> String {
+    match approval.args_value() {
+        Some(serde_json::Value::Object(map)) => {
+            let n = map.len();
+            format!("{n} {}", if n == 1 { "key" } else { "keys" })
+        }
+        _ => "payload".into(),
+    }
+}
+
+/// Rewrite bare 36-char UUIDs inside a pretty-printed JSON blob to a
+/// compact `first8…last4` form. Keeps the JSON shape (quotes,
+/// indentation, commas) intact so consumers can still see which field
+/// the id belongs to.
+fn shorten_uuid_in_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 36 <= bytes.len() && looks_like_uuid(&bytes[i..i + 36]) {
+            // Replace the 36-char run with `<first8>…<last4>`.
+            // Both ends are pure ASCII because they came from a UUID.
+            out.push_str(&s[i..i + 8]);
+            out.push('…');
+            out.push_str(&s[i + 32..i + 36]);
+            i += 36;
+        } else {
+            // SAFETY: byte index is always at a char boundary because
+            // we either advanced by 36 ASCII chars above or by exactly
+            // one valid UTF-8 character below.
+            let ch = s[i..].chars().next().expect("non-empty remainder");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+fn looks_like_uuid(bytes: &[u8]) -> bool {
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (index, byte) in bytes.iter().enumerate() {
+        let is_hyphen = matches!(index, 8 | 13 | 18 | 23);
+        if is_hyphen {
+            if *byte != b'-' {
+                return false;
+            }
+        } else if !byte.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
 }
 
 fn render_detail_with_attachments(
@@ -1352,14 +1499,78 @@ mod tests {
         assert!(!list_text.contains(message_id));
 
         let detail_text = buffer_text(&render_approval_detail_to_buffer(&app));
-        assert!(detail_text.contains("Action: Delete message"));
-        assert!(detail_text.contains("Target: \"Quarterly review draft\""));
-        assert!(detail_text.contains("From: contact-0-1@demo.example"));
-        assert!(detail_text.contains("To: alice@demo.local"));
-        assert!(detail_text.contains("Snippet: Please review before Friday."));
-        assert!(detail_text.contains("Tool: postblox_message_delete"));
-        assert!(detail_text.contains("Arguments:"));
-        assert!(detail_text.contains("\"message_id\": \"00000000-0000-0000-0000-0000000000bb\""));
+        // Pane title leads with the human action, not "Approval: …".
+        assert!(detail_text.contains("Delete message"));
+        assert!(!detail_text.contains("Approval: Delete message"));
+        // Resolved subject appears once — as the bold header, NOT as
+        // a "Target: …" body row.
+        assert_eq!(detail_text.matches("Quarterly review draft").count(), 1);
+        assert!(!detail_text.contains("Action:"));
+        assert!(!detail_text.contains("Target:"));
+        assert!(!detail_text.contains("Keys:"));
+        // Muted context lines use lowercase prepositions.
+        assert!(detail_text.contains("from contact-0-1@demo.example"));
+        assert!(detail_text.contains("to alice@demo.local"));
+        // Snippet renders under a quote glyph, no leading "Snippet:".
+        assert!(detail_text.contains("▎ Please review before Friday."));
+        assert!(!detail_text.contains("Snippet:"));
+        // Policy summary is muted with a lower-case prefix.
+        assert!(detail_text.contains("policy: demo: never auto-delete from Trash"));
+        // Debug block: compact tool=… line, not a top-level "Tool: …" row.
+        assert!(detail_text.contains("tool=postblox_message_delete"));
+        assert!(!detail_text.contains("Tool: postblox_message_delete"));
+        assert!(detail_text.contains("args=1 key"));
+    }
+
+    #[test]
+    fn test_render_approval_detail_send_message_redesigned_layout() {
+        let mut app = AppState::default();
+        app.select_approvals_folder();
+        let account_id = "5accb2f6-0000-4000-8000-00000000aaaa";
+        let draft_id = "7c8051bd-0000-4000-8000-000000bbbbbb";
+        let target = serde_json::json!({
+            "subject": "Draft: weekly update",
+            "to": "partner-0@demo.example",
+            "snippet": "Hi team,",
+        });
+        let args = serde_json::json!({
+            "account_id": account_id,
+            "draft_id": draft_id,
+        });
+        app.apply_approvals(vec![ApprovalItem {
+            id: uuid::Uuid::new_v4(),
+            tool: "postblox_message_send".into(),
+            args_summary: compact_args_summary(&args),
+            args_json: serde_json::to_string_pretty(&args).unwrap(),
+            summary: Some("demo: auto-allow internal sends".into()),
+            target: ApprovalTargetContext::from_args(&target),
+            created_at: Utc::now(),
+        }]);
+
+        let text = buffer_text(&render_approval_detail_to_buffer(&app));
+
+        // Header carries the subject in bold + ` — Send message`, with
+        // the action only in the pane title afterwards.
+        assert!(text.contains("Draft: weekly update — Send message"));
+        assert_eq!(text.matches("Draft: weekly update").count(), 1);
+        assert!(text.contains("to partner-0@demo.example"));
+        assert!(text.contains("▎ Hi team,"));
+        assert!(text.contains("policy: demo: auto-allow internal sends"));
+        // Compact debug line replaces the "Tool: …" / "Created: …" rows.
+        assert!(text.contains("tool=postblox_message_send"));
+        assert!(text.contains("args=2 keys"));
+        // UUIDs in the JSON are abbreviated; the full string must not appear.
+        assert!(!text.contains(account_id));
+        assert!(!text.contains(draft_id));
+        assert!(text.contains("5accb2f6…aaaa"));
+        assert!(text.contains("7c8051bd…bbbb"));
+        // Forbidden labels.
+        for forbidden in ["Action:", "Target:", "Snippet:", "Keys:", "Approval:"] {
+            assert!(
+                !text.contains(forbidden),
+                "approval detail should not contain {forbidden:?}"
+            );
+        }
     }
 
     #[test]
@@ -1391,7 +1602,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_approvals_folder_detail_shows_human_and_raw_tool_names() {
+    fn test_render_approvals_folder_detail_shows_fallback_header_when_target_unresolved() {
         let mut app = AppState::default();
         app.select_approvals_folder();
         let message_id = "00000000-0000-0000-0000-0000000000bb";
@@ -1407,13 +1618,61 @@ mod tests {
 
         let text = buffer_text(&render_approval_detail_to_buffer(&app));
 
-        assert!(text.contains("Approval: Delete message"));
-        assert!(text.contains("Action: Delete message"));
-        assert!(text.contains("Target: message=…00bb"));
-        assert!(text.contains("Tool: postblox_message_delete"));
-        assert!(text.contains("Arguments:"));
-        assert!(text.contains("\"message_id\": \"00000000-0000-0000-0000-0000000000bb\""));
-        assert!(text.contains("demo: never auto-delete from Trash"));
+        // Title is action-first ("<action> — <age>") with no "Approval: …" prefix.
+        assert!(text.contains("Delete message"));
+        assert!(!text.contains("Approval: Delete message"));
+        // Header falls back to the action label, plus the unresolved hint.
+        assert!(text.contains("couldn't load message/draft target"));
+        // Compact debug block surfaces the raw tool name once.
+        assert!(text.contains("tool=postblox_message_delete"));
+        assert!(!text.contains("Tool: postblox_message_delete"));
+        // The full UUID is replaced with the abbreviated form.
+        assert!(!text.contains(message_id));
+        assert!(text.contains("00000000…00bb"));
+        assert!(text.contains("policy: demo: never auto-delete from Trash"));
+        for forbidden in ["Action:", "Target:", "Snippet:", "Keys:"] {
+            assert!(
+                !text.contains(forbidden),
+                "approval detail should not contain {forbidden:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_render_approval_detail_loading_renders_single_muted_line() {
+        let mut app = AppState::default();
+        app.select_approvals_folder();
+        app.approvals.pending = true;
+        app.approvals.items.clear();
+
+        let text = buffer_text(&render_approval_detail_to_buffer(&app));
+        assert!(text.contains("Loading approvals…"));
+        assert!(!text.contains("Keys:"));
+        assert!(!text.contains("Approval:"));
+    }
+
+    #[test]
+    fn test_render_approval_detail_empty_renders_single_muted_line() {
+        let mut app = AppState::default();
+        app.select_approvals_folder();
+        app.apply_approvals(Vec::new());
+
+        let text = buffer_text(&render_approval_detail_to_buffer(&app));
+        assert!(text.contains("No pending approvals"));
+        assert!(!text.contains("Keys:"));
+    }
+
+    #[test]
+    fn test_shorten_uuid_in_json_abbreviates_bare_uuids_only() {
+        let input =
+            "{\n  \"id\": \"5accb2f6-1111-4222-8333-44444444aaaa\",\n  \"note\": \"keep-this\"\n}";
+        let shortened = super::shorten_uuid_in_json(input);
+        assert!(shortened.contains("\"5accb2f6…aaaa\""));
+        assert!(!shortened.contains("5accb2f6-1111-4222-8333-44444444aaaa"));
+        assert!(shortened.contains("\"note\": \"keep-this\""));
+        // Non-uuid strings are untouched.
+        let none = super::shorten_uuid_in_json("\"plain text without ids\"");
+        assert_eq!(none, "\"plain text without ids\"");
     }
 
     #[test]

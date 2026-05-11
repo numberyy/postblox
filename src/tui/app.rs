@@ -686,30 +686,29 @@ impl ApprovalTargetContext {
         }
     }
 
-    /// Detail-pane lines describing this target.
-    pub(crate) fn detail_lines(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        if let Some(target) = self.target.as_deref() {
-            lines.push(format!("Target: \"{}\"", quote_inner(target)));
-        } else if let Some(attachment) = self.attachment.as_deref() {
-            lines.push(format!(
-                "Target: attachment \"{}\"",
-                quote_inner(attachment)
-            ));
-        }
-        if let Some(from) = self.from.as_deref() {
-            lines.push(format!("From: {from}"));
-        }
-        if let Some(to) = self.to.as_deref() {
-            lines.push(format!("To: {to}"));
-        }
-        if let Some(snippet) = self.snippet.as_deref() {
-            lines.push(format!("Snippet: {snippet}"));
-        }
-        if let Some(attachment) = self.attachment.as_deref() {
-            lines.push(format!("Attachment: {attachment}"));
-        }
-        lines
+    /// Subject-like target text (message/draft subject or attachment filename).
+    pub(crate) fn target(&self) -> Option<&str> {
+        self.target.as_deref()
+    }
+
+    /// Sender address resolved for this target, if any.
+    pub(crate) fn from(&self) -> Option<&str> {
+        self.from.as_deref()
+    }
+
+    /// Recipient address(es) resolved for this target, if any.
+    pub(crate) fn to(&self) -> Option<&str> {
+        self.to.as_deref()
+    }
+
+    /// Single-line message/draft body snippet, if any.
+    pub(crate) fn snippet(&self) -> Option<&str> {
+        self.snippet.as_deref()
+    }
+
+    /// Attachment label (filename plus content-type), if any.
+    pub(crate) fn attachment(&self) -> Option<&str> {
+        self.attachment.as_deref()
     }
 
     fn non_empty(context: Self) -> Option<Self> {
@@ -775,22 +774,6 @@ impl ApprovalItem {
                 (!args.is_empty()).then(|| args.to_string())
             });
         combine_target_and_summary(target, self.summary.as_deref())
-    }
-
-    /// Detail-pane target lines, falling back to the compact argument summary.
-    pub(crate) fn target_detail_lines(&self) -> Vec<String> {
-        if let Some(target) = self.target.as_ref() {
-            let lines = target.detail_lines();
-            if !lines.is_empty() {
-                return lines;
-            }
-        }
-        let args = self.args_summary.trim();
-        if args.is_empty() {
-            Vec::new()
-        } else {
-            vec![format!("Target: {args}")]
-        }
     }
 
     /// Build a pending approval row from a live `mcp.approval_requested`
