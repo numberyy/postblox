@@ -1,8 +1,8 @@
 //! Pure rendering of [`super::app::AppState`] onto a ratatui [`Frame`].
 //!
 //! The single entry point is `render`. It chooses between the normal
-//! four-pane layout (accounts / folders / threads / messages) and the
-//! full-screen composer view, then delegates to per-pane helpers.
+//! conversation-first layout (accounts / folders / conversations) and
+//! the full-screen composer view, then delegates to per-pane helpers.
 //! Rendering is read-only: it never mutates the app or talks to the
 //! daemon. Theme styling comes from `super::theme::Theme`; no colour
 //! literals leak into this module.
@@ -16,9 +16,8 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use ratatui::Frame;
 
 use super::app::{
-    human_size, ActivePane, AppState, ComposeField, InputMode, SyncStateUi, ToastKind,
-    FLAGGED_FLAG, ICON_ERROR, ICON_IDLE, ICON_POLLING, ICON_SYNCING, MAX_COMPOSE_ATTACHMENT_BYTES,
-    MAX_SELECTED_ERROR_CHARS, SEEN_FLAG,
+    human_size, ActivePane, AppState, ComposeField, InputMode, SyncStateUi, ToastKind, ICON_ERROR,
+    ICON_IDLE, ICON_POLLING, ICON_SYNCING, MAX_COMPOSE_ATTACHMENT_BYTES, MAX_SELECTED_ERROR_CHARS,
 };
 use super::theme::Theme;
 
@@ -44,35 +43,18 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &AppState) {
         .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
         .split(root[0]);
 
-    if app.threads_pane_visible() {
-        let top = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(26),
-                Constraint::Percentage(34),
-            ])
-            .split(main[0]);
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
+        ])
+        .split(main[0]);
 
-        render_accounts(frame, top[0], app, &theme);
-        render_folders(frame, top[1], app, &theme);
-        render_threads(frame, top[2], app, &theme);
-        render_messages(frame, top[3], app, &theme);
-    } else {
-        let top = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(50),
-            ])
-            .split(main[0]);
-
-        render_accounts(frame, top[0], app, &theme);
-        render_folders(frame, top[1], app, &theme);
-        render_messages(frame, top[2], app, &theme);
-    }
+    render_accounts(frame, top[0], app, &theme);
+    render_folders(frame, top[1], app, &theme);
+    render_conversations(frame, top[2], app, &theme);
     if app.search_pane_visible() {
         render_search(frame, main[1], app, &theme);
     } else if app.attachments_pane_visible() {
@@ -248,12 +230,17 @@ fn render_folders(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_threads(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+fn render_conversations(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    if app.drafts_pane_active() {
+        render_drafts(frame, area, app, theme);
+        return;
+    }
+
     let items: Vec<ListItem<'_>> = if app.threads.is_empty() {
         let text = if app.folders.is_empty() {
             "Select a folder"
         } else {
-            "No threads"
+            "No conversations"
         };
         vec![ListItem::new(text)]
     } else {
@@ -265,24 +252,30 @@ fn render_threads(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
                 } else {
                     theme.text
                 };
-                ListItem::new(Line::from(vec![
+                let mut line = vec![
                     Span::styled(if thread.unread { "● " } else { "  " }, theme.unread),
                     Span::styled(if thread.flagged { "★ " } else { "  " }, theme.flagged),
                     Span::styled(
                         thread.subject.as_str(),
                         subject_style.add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(format!(" ({})", thread.message_count)),
+                ];
+                if thread.message_count > 1 {
+                    line.push(Span::raw(format!(" ({})", thread.message_count)));
+                }
+                line.extend([
+                    Span::raw(format!(" — {}", thread.latest_from)),
                     Span::styled(format!(" {}", thread.latest_date), theme.muted),
-                ]))
+                ]);
+                ListItem::new(Line::from(line))
             })
             .collect()
     };
     let mut state = selection_state(app.threads.len(), app.selected_thread);
     let list = List::new(items)
         .block(pane_block(
-            "Threads",
-            app.active == ActivePane::Threads,
+            "Conversations",
+            app.active == ActivePane::Conversations,
             theme,
         ))
         .style(theme.text)
@@ -291,58 +284,9 @@ fn render_threads(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_messages(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
-    if app.drafts_pane_active() {
-        render_drafts(frame, area, app, theme);
-        return;
-    }
-    let items: Vec<ListItem<'_>> = if app.messages.is_empty() {
-        let text = if !app.threads_pane_visible() {
-            if app.folders.is_empty() {
-                "Select a folder"
-            } else {
-                "No messages in folder"
-            }
-        } else {
-            "No messages in thread"
-        };
-        vec![ListItem::new(text)]
-    } else {
-        app.messages
-            .iter()
-            .map(|message| {
-                let unread = !message.has_flag(SEEN_FLAG);
-                let flagged = message.has_flag(FLAGGED_FLAG);
-                let subject_style = if unread { theme.unread } else { theme.text };
-                ListItem::new(Line::from(vec![
-                    Span::styled(if unread { "● " } else { "  " }, theme.unread),
-                    Span::styled(if flagged { "★ " } else { "  " }, theme.flagged),
-                    Span::styled(
-                        message.subject.as_str(),
-                        subject_style.add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(format!(" — {}", message.from)),
-                    Span::styled(format!(" {}", message.date), theme.muted),
-                ]))
-            })
-            .collect()
-    };
-    let mut state = selection_state(app.messages.len(), app.selected_message);
-    let list = List::new(items)
-        .block(pane_block(
-            "Messages",
-            app.active == ActivePane::Messages,
-            theme,
-        ))
-        .style(theme.text)
-        .highlight_style(theme.selection)
-        .highlight_symbol("› ");
-    frame.render_stateful_widget(list, area, &mut state);
-}
-
-/// Render the Drafts pane in place of the regular messages list when
+/// Render the Drafts pane in place of the conversations list when
 /// the active folder has the `drafts` role. Same widget shape as
-/// `render_messages` so it slots into the existing layout, but the
+/// `render_conversations` so it slots into the existing layout, but the
 /// rows show the recipient + the first body line so users can spot
 /// the draft they want to resume.
 fn render_drafts(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
@@ -368,7 +312,7 @@ fn render_drafts(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
     let list = List::new(items)
         .block(pane_block(
             "Drafts",
-            app.active == ActivePane::Messages,
+            app.active == ActivePane::Conversations,
             theme,
         ))
         .style(theme.text)
@@ -1024,7 +968,7 @@ mod tests {
 
         assert!(text.contains("Work <work@example.com>"));
         assert!(text.contains("INBOX"));
-        assert!(text.contains("Threads"));
+        assert!(text.contains("Conversations"));
         assert!(text.contains("(2)"));
         assert!(text.contains("●"));
         assert!(text.contains("★"));
@@ -1033,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_hides_threads_title_for_singleton_only_folder() {
+    fn test_render_singleton_conversation_has_no_count_badge() {
         let mut app = AppState::default();
         app.apply_folders(vec![FolderItem {
             id: FolderId::new(),
@@ -1052,9 +996,55 @@ mod tests {
 
         let text = buffer_text(&render_to_buffer(&app));
 
-        assert!(!text.contains("Threads"));
-        assert!(text.contains("Messages"));
+        assert!(text.contains("Conversations"));
+        assert!(!text.contains("(1)"));
         assert!(text.contains("Solo update"));
+    }
+
+    #[test]
+    fn test_render_three_message_conversation_shows_count_badge() {
+        let mut app = AppState::default();
+        let thread_id = ThreadId::new();
+        app.apply_folders(vec![FolderItem {
+            id: FolderId::new(),
+            name: "INBOX".into(),
+            role: "inbox".into(),
+        }]);
+        app.apply_folder_messages(vec![
+            MessageItem {
+                id: MessageId::new(),
+                thread_id: Some(thread_id),
+                subject: "Launch reply two".into(),
+                from: "carol@example.com".into(),
+                date: "2026-05-07 12:00".into(),
+                snippet: "Preview".into(),
+                flags: Vec::new(),
+            },
+            MessageItem {
+                id: MessageId::new(),
+                thread_id: Some(thread_id),
+                subject: "Launch reply".into(),
+                from: "bob@example.com".into(),
+                date: "2026-05-07 11:00".into(),
+                snippet: "Preview".into(),
+                flags: Vec::new(),
+            },
+            MessageItem {
+                id: MessageId::new(),
+                thread_id: Some(thread_id),
+                subject: "Launch".into(),
+                from: "alice@example.com".into(),
+                date: "2026-05-07 10:00".into(),
+                snippet: "Preview".into(),
+                flags: Vec::new(),
+            },
+        ]);
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(text.contains("Conversations"));
+        assert!(text.contains("(3)"));
+        assert!(text.contains("carol@example.com"));
     }
 
     #[test]
@@ -1302,7 +1292,7 @@ mod tests {
         assert!(text.contains("Composer body"));
         assert!(text.contains("Ctrl-S save"));
         assert!(!text.contains("Accounts"));
-        assert!(!text.contains("Messages"));
+        assert!(!text.contains("Conversations"));
     }
 
     #[test]

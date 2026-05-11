@@ -1,8 +1,8 @@
 //! ratatui-based TUI app state machine that talks to the daemon over
 //! the IPC socket.
 //!
-//! [`AppState`] is the single source of truth for what the four-pane
-//! mail client is showing: accounts, folders, threads, messages, plus
+//! [`AppState`] is the single source of truth for what the mail client
+//! is showing: accounts, folders, conversations, message detail, plus
 //! the search/attachments/composer overlays and the toast queue.
 //! Keystrokes drive state transitions, and the command bar (`:`-mode)
 //! routes through [`super::command`]. All daemon I/O — list ops,
@@ -73,10 +73,10 @@ pub enum ActivePane {
     Accounts,
     /// Folders list for the active account.
     Folders,
-    /// Threads list for the active folder.
-    Threads,
-    /// Messages list for the active thread.
-    Messages,
+    /// Conversations (threads) list for the active folder — one row
+    /// per thread, Gmail-style. Doubles as the Drafts pane when a
+    /// drafts folder is active.
+    Conversations,
     /// Message detail / preview pane.
     Details,
     /// Attachments list for the selected message.
@@ -89,9 +89,8 @@ impl ActivePane {
     pub(crate) fn next(self) -> Self {
         match self {
             Self::Accounts => Self::Folders,
-            Self::Folders => Self::Threads,
-            Self::Threads => Self::Messages,
-            Self::Messages => Self::Details,
+            Self::Folders => Self::Conversations,
+            Self::Conversations => Self::Details,
             Self::Details => Self::Attachments,
             Self::Attachments => Self::Search,
             Self::Search => Self::Accounts,
@@ -102,9 +101,8 @@ impl ActivePane {
         match self {
             Self::Accounts => Self::Search,
             Self::Folders => Self::Accounts,
-            Self::Threads => Self::Folders,
-            Self::Messages => Self::Threads,
-            Self::Details => Self::Messages,
+            Self::Conversations => Self::Folders,
+            Self::Details => Self::Conversations,
             Self::Attachments => Self::Details,
             Self::Search => Self::Attachments,
         }
@@ -222,7 +220,7 @@ impl From<Folder> for FolderItem {
     }
 }
 
-/// Message row rendered in the messages pane.
+/// Message row retained for the selected conversation and detail pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageItem {
     pub(crate) id: MessageId,
@@ -278,7 +276,7 @@ impl MessageItem {
     }
 }
 
-/// Thread row rendered in the threads pane.
+/// Thread row rendered in the Conversations pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadItem {
     pub(crate) key: Uuid,
@@ -286,6 +284,10 @@ pub struct ThreadItem {
     pub(crate) subject: String,
     pub(crate) message_count: usize,
     pub(crate) latest_date: String,
+    /// Sender displayed alongside the conversation subject. Mirrors
+    /// the `from` of the most recent message in the thread so the
+    /// Conversations pane can show a Gmail-style row.
+    pub(crate) latest_from: String,
     pub(crate) unread: bool,
     pub(crate) flagged: bool,
 }
@@ -1382,14 +1384,6 @@ impl AppState {
         self.active = self.previous_visible_pane();
     }
 
-    pub(crate) fn has_threaded_conversations(&self) -> bool {
-        self.threads.iter().any(|thread| thread.message_count > 1)
-    }
-
-    pub(crate) fn threads_pane_visible(&self) -> bool {
-        self.has_threaded_conversations()
-    }
-
     pub(crate) fn move_selection(&mut self, delta: isize) -> bool {
         match self.active {
             ActivePane::Accounts => {
@@ -1420,20 +1414,7 @@ impl AppState {
                 }
                 changed
             }
-            ActivePane::Threads => {
-                if !self.threads_pane_visible() {
-                    self.normalize_active_pane();
-                    return false;
-                }
-                let changed = move_index(&mut self.selected_thread, self.threads.len(), delta);
-                if changed {
-                    self.selected_message = 0;
-                    self.refresh_visible_messages();
-                    self.clear_detail_state();
-                }
-                changed
-            }
-            ActivePane::Messages => {
+            ActivePane::Conversations => {
                 if self.drafts_pane_active() {
                     let changed = move_index(&mut self.selected_draft, self.drafts.len(), delta);
                     if changed {
@@ -1441,8 +1422,10 @@ impl AppState {
                     }
                     return changed;
                 }
-                let changed = move_index(&mut self.selected_message, self.messages.len(), delta);
+                let changed = move_index(&mut self.selected_thread, self.threads.len(), delta);
                 if changed {
+                    self.selected_message = 0;
+                    self.refresh_visible_messages();
                     self.clear_detail_state();
                 }
                 changed
@@ -1510,9 +1493,6 @@ impl AppState {
         let previous_key = self.selected_thread().map(|thread| thread.key);
         self.folder_messages = messages;
         self.rebuild_threads(previous_key);
-        if self.selected_thread().map(|thread| thread.key) != previous_key {
-            self.selected_message = 0;
-        }
         self.refresh_visible_messages();
         self.normalize_active_pane();
         self.clear_detail_state();
@@ -2036,7 +2016,7 @@ impl AppState {
         self.active = if self.active == ActivePane::Attachments {
             self.preview_focused = false;
             self.preview_selection = None;
-            ActivePane::Messages
+            ActivePane::Conversations
         } else {
             ActivePane::Attachments
         };
@@ -2446,7 +2426,7 @@ impl AppState {
             self.selected_message = message_index;
         }
         self.search = None;
-        self.active = ActivePane::Messages;
+        self.active = ActivePane::Conversations;
         self.normalize_active_pane();
         true
     }
@@ -2997,9 +2977,7 @@ impl AppState {
     }
 
     fn refresh_visible_messages(&mut self) {
-        if !self.threads_pane_visible() {
-            self.messages = self.folder_messages.clone();
-        } else if let Some(thread_key) = self.selected_thread().map(|thread| thread.key) {
+        if let Some(thread_key) = self.selected_thread().map(|thread| thread.key) {
             self.messages = self
                 .folder_messages
                 .iter()
@@ -3010,45 +2988,36 @@ impl AppState {
         } else {
             self.messages.clear();
         }
-        clamp_index(&mut self.selected_message, self.messages.len());
+        // Conversations show the latest message of the selected thread
+        // in the Detail pane. `sort_messages_oldest_first` puts the
+        // latest message at the end of `messages`, so point the
+        // selection cursor at it.
+        if self.messages.is_empty() {
+            self.selected_message = 0;
+        } else {
+            self.selected_message = self.messages.len() - 1;
+        }
     }
 
     fn normalize_active_pane(&mut self) {
-        if self.active == ActivePane::Threads && !self.threads_pane_visible() {
-            self.active = if self.messages.is_empty() {
-                ActivePane::Folders
-            } else {
-                ActivePane::Messages
-            };
-        }
         if self.active == ActivePane::Details && !self.detail_pane_visible() {
-            self.active = if self.messages.is_empty() {
-                ActivePane::Folders
-            } else {
-                ActivePane::Messages
-            };
+            self.active = ActivePane::Conversations;
         }
         if self.active == ActivePane::Attachments && !self.attachments_pane_visible() {
             self.active = if self.detail_pane_visible() {
                 ActivePane::Details
-            } else if self.messages.is_empty() {
-                ActivePane::Folders
             } else {
-                ActivePane::Messages
+                ActivePane::Conversations
             };
         }
         if self.active == ActivePane::Search && !self.search_pane_visible() {
-            self.active = if self.messages.is_empty() {
-                ActivePane::Folders
-            } else {
-                ActivePane::Messages
-            };
+            self.active = ActivePane::Conversations;
         }
     }
 
     fn next_visible_pane(&self) -> ActivePane {
         let mut pane = self.active;
-        for _ in 0..7 {
+        for _ in 0..6 {
             pane = pane.next();
             if self.pane_visible(pane) {
                 return pane;
@@ -3059,7 +3028,7 @@ impl AppState {
 
     fn previous_visible_pane(&self) -> ActivePane {
         let mut pane = self.active;
-        for _ in 0..7 {
+        for _ in 0..6 {
             pane = pane.previous();
             if self.pane_visible(pane) {
                 return pane;
@@ -3070,11 +3039,10 @@ impl AppState {
 
     fn pane_visible(&self, pane: ActivePane) -> bool {
         match pane {
-            ActivePane::Threads => self.threads_pane_visible(),
             ActivePane::Details => self.detail_pane_visible(),
             ActivePane::Attachments => self.attachments_pane_visible(),
             ActivePane::Search => self.search_pane_visible(),
-            ActivePane::Accounts | ActivePane::Folders | ActivePane::Messages => true,
+            ActivePane::Accounts | ActivePane::Folders | ActivePane::Conversations => true,
         }
     }
 
@@ -3148,6 +3116,7 @@ fn build_threads(messages: &[MessageItem]) -> Vec<ThreadItem> {
             if message.date > thread.latest_date {
                 thread.latest_date = message.date.clone();
                 thread.subject = text_or_default(Some(&message.subject), "(no subject)");
+                thread.latest_from = message.from.clone();
             }
             thread.unread |= !message.has_flag(SEEN_FLAG);
             thread.flagged |= message.has_flag(FLAGGED_FLAG);
@@ -3158,6 +3127,7 @@ fn build_threads(messages: &[MessageItem]) -> Vec<ThreadItem> {
                 subject: text_or_default(Some(&message.subject), "(no subject)"),
                 message_count: 1,
                 latest_date: message.date.clone(),
+                latest_from: message.from.clone(),
                 unread: !message.has_flag(SEEN_FLAG),
                 flagged: message.has_flag(FLAGGED_FLAG),
             });
@@ -3502,33 +3472,55 @@ mod tests {
     }
 
     #[test]
-    fn test_cycle_active_pane_skips_threads_when_hidden() {
+    fn test_active_pane_next_previous_cycle_uses_conversations() {
+        assert_eq!(ActivePane::Accounts.next(), ActivePane::Folders);
+        assert_eq!(ActivePane::Folders.next(), ActivePane::Conversations);
+        assert_eq!(ActivePane::Conversations.next(), ActivePane::Details);
+        assert_eq!(ActivePane::Details.next(), ActivePane::Attachments);
+        assert_eq!(ActivePane::Attachments.next(), ActivePane::Search);
+        assert_eq!(ActivePane::Search.next(), ActivePane::Accounts);
+
+        assert_eq!(ActivePane::Accounts.previous(), ActivePane::Search);
+        assert_eq!(ActivePane::Search.previous(), ActivePane::Attachments);
+        assert_eq!(ActivePane::Attachments.previous(), ActivePane::Details);
+        assert_eq!(ActivePane::Details.previous(), ActivePane::Conversations);
+        assert_eq!(ActivePane::Conversations.previous(), ActivePane::Folders);
+        assert_eq!(ActivePane::Folders.previous(), ActivePane::Accounts);
+    }
+
+    #[test]
+    fn test_cycle_active_pane_uses_conversations_when_detail_hidden() {
         let mut app = AppState::default();
         assert_eq!(app.active, ActivePane::Accounts);
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Folders);
         app.cycle_active_pane();
-        assert_eq!(app.active, ActivePane::Messages);
+        assert_eq!(app.active, ActivePane::Conversations);
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
     }
 
     #[test]
-    fn test_cycle_active_pane_includes_threads_when_visible() {
-        let thread_id = ThreadId::new();
+    fn test_cycle_active_pane_includes_optional_bottom_panes_after_conversations() {
         let mut app = AppState::default();
-        app.apply_folder_messages(vec![
-            thread_message(thread_id, "reply", "2026-05-07 11:00", &[SEEN_FLAG]),
-            thread_message(thread_id, "start", "2026-05-07 10:00", &[SEEN_FLAG]),
-        ]);
+        let message = message("with attachment");
+        let message_id = message.id;
+        let attachment = attachment("notes.txt");
+        app.apply_folder_messages(vec![message]);
+        app.apply_detail(Some(detail(message_id, "body")));
+        app.apply_attachments(vec![attachment]);
+        app.search = Some(SearchState::new("needle", None, ActivePane::Conversations));
 
-        assert!(app.threads_pane_visible());
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Folders);
         app.cycle_active_pane();
-        assert_eq!(app.active, ActivePane::Threads);
+        assert_eq!(app.active, ActivePane::Conversations);
         app.cycle_active_pane();
-        assert_eq!(app.active, ActivePane::Messages);
+        assert_eq!(app.active, ActivePane::Details);
+        app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Attachments);
+        app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Search);
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
     }
@@ -3576,10 +3568,10 @@ mod tests {
     #[test]
     fn test_move_message_clears_stale_detail() {
         let mut app = AppState {
-            active: ActivePane::Messages,
+            active: ActivePane::Conversations,
             ..Default::default()
         };
-        app.apply_messages(vec![message("one"), message("two")]);
+        app.apply_folder_messages(vec![message("one"), message("two")]);
         app.apply_detail(Some(MessageDetail {
             id: app.messages[0].id,
             subject: "one".into(),
@@ -3591,16 +3583,17 @@ mod tests {
 
         assert!(app.move_selection(1));
 
-        assert_eq!(app.selected_message, 1);
+        assert_eq!(app.selected_thread, 1);
+        assert_eq!(app.selected_message, 0);
         assert!(app.detail.is_none());
     }
 
     #[test]
-    fn test_move_thread_filters_messages_and_clears_stale_detail() {
+    fn test_move_conversation_filters_messages_selects_latest_and_clears_stale_detail() {
         let first_thread = ThreadId::new();
         let second_thread = ThreadId::new();
         let mut app = AppState {
-            active: ActivePane::Threads,
+            active: ActivePane::Conversations,
             ..Default::default()
         };
         app.apply_folder_messages(vec![
@@ -3623,6 +3616,7 @@ mod tests {
         assert_eq!(app.messages.len(), 2);
         assert_eq!(app.messages[0].subject, "old first");
         assert_eq!(app.messages[1].subject, "old latest");
+        assert_eq!(app.selected_message_id(), Some(app.messages[1].id));
         assert!(app.detail.is_none());
     }
 
@@ -3640,6 +3634,7 @@ mod tests {
             subject: "hello".into(),
             message_count: 1,
             latest_date: "2026-05-07 10:00".into(),
+            latest_from: "alice@example.com".into(),
             unread: true,
             flagged: false,
         });
@@ -3693,12 +3688,12 @@ mod tests {
             ),
         ]);
 
-        assert!(app.threads_pane_visible());
         assert_eq!(app.threads.len(), 3);
         assert_eq!(app.threads[0].thread_id, Some(latest_thread));
         assert_eq!(app.threads[0].subject, "latest");
         assert_eq!(app.threads[0].message_count, 1);
         assert_eq!(app.threads[0].latest_date, "2026-05-07 12:00");
+        assert_eq!(app.threads[0].latest_from, "alice@example.com");
         assert!(app.threads[0].unread);
         assert!(app.threads[0].flagged);
 
@@ -3713,65 +3708,62 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_folder_messages_singletons_hide_threads_and_show_all_messages() {
+    fn test_apply_folder_messages_singletons_show_conversations_and_selected_message() {
         let mut newer = message("newer");
         newer.date = "2026-05-07 12:00".into();
         let newer_id = newer.id;
         let mut older = message("older");
         older.date = "2026-05-07 09:00".into();
-        let older_id = older.id;
         let mut app = AppState::default();
 
         app.apply_folder_messages(vec![newer, older]);
 
-        assert!(!app.threads_pane_visible());
         assert_eq!(app.threads.len(), 2);
         assert_eq!(
             app.messages
                 .iter()
                 .map(|message| message.id)
                 .collect::<Vec<_>>(),
-            vec![newer_id, older_id]
+            vec![newer_id]
         );
+        assert_eq!(app.selected_message_id(), Some(newer_id));
     }
 
     #[test]
-    fn test_apply_folder_messages_moves_active_threads_when_pane_becomes_hidden() {
+    fn test_apply_folder_messages_keeps_conversations_active_for_singletons() {
         let thread_id = ThreadId::new();
         let mut app = AppState {
-            active: ActivePane::Threads,
+            active: ActivePane::Conversations,
             ..Default::default()
         };
         app.apply_folder_messages(vec![
             thread_message(thread_id, "reply", "2026-05-07 11:00", &[SEEN_FLAG]),
             thread_message(thread_id, "start", "2026-05-07 10:00", &[SEEN_FLAG]),
         ]);
-        app.active = ActivePane::Threads;
+        app.active = ActivePane::Conversations;
 
         app.apply_folder_messages(vec![message("single")]);
 
-        assert!(!app.threads_pane_visible());
-        assert_eq!(app.active, ActivePane::Messages);
+        assert_eq!(app.active, ActivePane::Conversations);
         assert_eq!(app.messages.len(), 1);
     }
 
     #[test]
-    fn test_apply_folder_messages_moves_active_threads_to_folders_when_empty() {
+    fn test_apply_folder_messages_keeps_conversations_active_when_empty() {
         let thread_id = ThreadId::new();
         let mut app = AppState {
-            active: ActivePane::Threads,
+            active: ActivePane::Conversations,
             ..Default::default()
         };
         app.apply_folder_messages(vec![
             thread_message(thread_id, "reply", "2026-05-07 11:00", &[SEEN_FLAG]),
             thread_message(thread_id, "start", "2026-05-07 10:00", &[SEEN_FLAG]),
         ]);
-        app.active = ActivePane::Threads;
+        app.active = ActivePane::Conversations;
 
         app.apply_folder_messages(Vec::new());
 
-        assert!(!app.threads_pane_visible());
-        assert_eq!(app.active, ActivePane::Folders);
+        assert_eq!(app.active, ActivePane::Conversations);
         assert!(app.messages.is_empty());
     }
 
@@ -3786,13 +3778,14 @@ mod tests {
             thread_message(first_thread, "start", "2026-05-07 09:00", &[SEEN_FLAG]),
         ]);
 
-        app.active = ActivePane::Threads;
+        app.active = ActivePane::Conversations;
         assert!(app.move_selection(1));
 
         assert_eq!(app.selected_thread().unwrap().thread_id, Some(first_thread));
         assert_eq!(app.messages.len(), 2);
         assert_eq!(app.messages[0].subject, "start");
         assert_eq!(app.messages[1].subject, "reply");
+        assert_eq!(app.selected_message_id(), Some(app.messages[1].id));
     }
 
     #[test]
@@ -3819,12 +3812,12 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_folder_messages_resets_selected_message_for_multi_message_replacement_thread() {
+    fn test_apply_folder_messages_selects_latest_message_for_replacement_conversation() {
         let top_thread = ThreadId::new();
         let disappearing_thread = ThreadId::new();
         let replacement_thread = ThreadId::new();
         let mut app = AppState {
-            active: ActivePane::Threads,
+            active: ActivePane::Conversations,
             ..Default::default()
         };
         app.apply_folder_messages(vec![
@@ -3865,7 +3858,7 @@ mod tests {
             app.selected_thread().unwrap().thread_id,
             Some(replacement_thread)
         );
-        assert_eq!(app.selected_message, 0);
+        assert_eq!(app.selected_message, 1);
         assert_eq!(app.messages.len(), 2);
         assert_eq!(app.messages[0].subject, "replacement first");
         assert_eq!(app.messages[1].subject, "replacement reply");
@@ -3968,7 +3961,7 @@ mod tests {
     #[test]
     fn test_selected_message_flag_update_preserves_existing_flags() {
         let mut app = AppState {
-            active: ActivePane::Messages,
+            active: ActivePane::Conversations,
             ..Default::default()
         };
         let mut selected = message("hello");
@@ -4024,14 +4017,15 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_message_flags_in_direct_message_mode_updates_messages_and_thread_state() {
+    fn test_apply_message_flags_updates_conversation_message_and_thread_state() {
         let mut selected = message("selected");
         selected.flags = vec![SEEN_FLAG.into()];
+        selected.date = "2026-05-07 12:00".into();
         let message_id = selected.id;
+        let mut other = message("other");
+        other.date = "2026-05-07 10:00".into();
         let mut app = AppState::default();
-        app.apply_folder_messages(vec![selected, message("other")]);
-
-        assert!(!app.threads_pane_visible());
+        app.apply_folder_messages(vec![selected, other]);
 
         app.apply_message_flags(message_id, vec![SEEN_FLAG.into(), FLAGGED_FLAG.into()]);
 
@@ -4083,7 +4077,7 @@ mod tests {
     fn test_attachment_pane_visibility_and_cycle_skips_hidden() {
         let mut app = AppState::default();
         app.apply_messages(vec![message("hello")]);
-        app.active = ActivePane::Messages;
+        app.active = ActivePane::Conversations;
 
         assert!(!app.attachments_pane_visible());
         app.cycle_active_pane();
@@ -4094,7 +4088,7 @@ mod tests {
         app.apply_attachments(vec![attachment("notes.txt")]);
 
         assert!(app.attachments_pane_visible());
-        app.active = ActivePane::Messages;
+        app.active = ActivePane::Conversations;
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Details);
         app.cycle_active_pane();
@@ -4149,20 +4143,20 @@ mod tests {
     #[test]
     fn test_detail_pane_visibility_cycle_and_direct_focus_require_detail() {
         let mut app = AppState {
-            active: ActivePane::Messages,
+            active: ActivePane::Conversations,
             ..Default::default()
         };
         app.apply_messages(vec![message("hello")]);
 
         assert!(!app.detail_pane_visible());
         assert!(!app.focus_detail_pane());
-        assert_eq!(app.active, ActivePane::Messages);
+        assert_eq!(app.active, ActivePane::Conversations);
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
 
         let message_id = app.messages[0].id;
         app.apply_detail(Some(detail(message_id, "body")));
-        app.active = ActivePane::Messages;
+        app.active = ActivePane::Conversations;
 
         assert!(app.detail_pane_visible());
         app.cycle_active_pane();
@@ -5638,6 +5632,35 @@ mod tests {
         assert_eq!(app.selected_draft_id(), Some(id_b));
         // No-op when already gone.
         assert!(!app.remove_draft_locally(id_c));
+    }
+
+    #[test]
+    fn test_conversations_pane_moves_draft_selection_when_drafts_folder_active() {
+        let mut app = AppState {
+            active: ActivePane::Conversations,
+            ..Default::default()
+        };
+        let first = DraftId::new();
+        let second = DraftId::new();
+        app.apply_folders(vec![FolderItem {
+            id: FolderId::new(),
+            name: "[Gmail]/Drafts".into(),
+            role: "drafts".into(),
+        }]);
+        let make = |id, subject: &str| DraftItem {
+            id,
+            account_id: AccountId::new(),
+            subject: subject.into(),
+            to: "t".into(),
+            date: "d".into(),
+            snippet: "x".into(),
+        };
+        app.apply_drafts(vec![make(first, "one"), make(second, "two")]);
+
+        assert!(app.move_selection(1));
+
+        assert_eq!(app.selected_draft_id(), Some(second));
+        assert_eq!(app.active, ActivePane::Conversations);
     }
 
     #[test]

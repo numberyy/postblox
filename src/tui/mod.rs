@@ -766,8 +766,10 @@ async fn handle_key<C: Mailbox + ?Sized>(
         KeyCode::Enter => {
             if drafts_list_focused(app) && app.selected_draft_id().is_some() {
                 open_selected_draft(app, client).await;
-            } else if app.active == ActivePane::Threads {
-                app.active = ActivePane::Messages;
+            } else if app.active == ActivePane::Conversations
+                && !app.drafts_pane_active()
+                && app.selected_thread().is_some()
+            {
                 refresh_detail(app, client).await;
             } else if app.active == ActivePane::Attachments {
                 if app.attachment_preview.is_some() && !app.preview_focused {
@@ -1863,14 +1865,14 @@ async fn run_message_move<C: Mailbox + ?Sized>(
 }
 
 fn message_list_focused(app: &AppState) -> bool {
-    matches!(app.active, ActivePane::Messages | ActivePane::Threads)
+    app.active == ActivePane::Conversations
 }
 
-/// True when the user is on the messages pane in a Drafts folder, so
-/// the Enter / d / etc. keybindings act on the drafts list instead of
-/// the regular message list.
+/// True when the user is on the Conversations pane in a Drafts folder,
+/// so the Enter / d / etc. keybindings act on the drafts list instead
+/// of the regular message list.
 fn drafts_list_focused(app: &AppState) -> bool {
-    app.active == ActivePane::Messages && app.drafts_pane_active()
+    app.active == ActivePane::Conversations && app.drafts_pane_active()
 }
 
 fn begin_message_delete(app: &mut AppState) {
@@ -2152,8 +2154,7 @@ async fn refresh_current_pane<C: Mailbox + ?Sized>(app: &mut AppState, client: &
     match app.active {
         ActivePane::Accounts => refresh_accounts(app, client).await,
         ActivePane::Folders => refresh_folders(app, client).await,
-        ActivePane::Threads => refresh_messages(app, client).await,
-        ActivePane::Messages => {
+        ActivePane::Conversations => {
             if app.drafts_pane_active() {
                 refresh_drafts(app, client).await;
             } else {
@@ -2183,8 +2184,7 @@ async fn refresh_after_selection_change<C: Mailbox + ?Sized>(app: &mut AppState,
                 refresh_messages(app, client).await;
             }
         }
-        ActivePane::Threads => refresh_detail(app, client).await,
-        ActivePane::Messages => {
+        ActivePane::Conversations => {
             if !app.drafts_pane_active() {
                 refresh_detail(app, client).await;
             }
@@ -2264,13 +2264,9 @@ async fn refresh_messages<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut 
             if message_count == 0 {
                 app.set_status("No messages in selected folder");
             } else {
-                if app.threads_pane_visible() {
-                    app.set_status(format!(
-                        "Loaded {thread_count} thread(s), {message_count} message(s)"
-                    ));
-                } else {
-                    app.set_status(format!("Loaded {message_count} message(s)"));
-                }
+                app.set_status(format!(
+                    "Loaded {thread_count} conversation(s), {message_count} message(s)"
+                ));
                 refresh_detail(app, client).await;
             }
         }
@@ -3015,8 +3011,8 @@ mod tests {
         let older = thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]);
         let newer = thread_message_item(thread_id, "Reply", "2026-05-07 10:00", vec![]);
         let mut client = MockMailbox {
-            messages: vec![newer, older.clone()],
-            detail: Some(detail_for(&older)),
+            messages: vec![newer.clone(), older.clone()],
+            detail: Some(detail_for(&newer)),
             ..Default::default()
         };
 
@@ -3026,20 +3022,22 @@ mod tests {
             client.calls,
             vec![
                 Call::ListMessages(folder_id),
-                Call::GetMessage(older.id),
-                Call::ListAttachments(older.id),
+                Call::GetMessage(newer.id),
+                Call::ListAttachments(newer.id),
             ]
         );
         assert_eq!(app.threads.len(), 1);
         assert_eq!(app.threads[0].message_count, 2);
         assert!(app.threads[0].unread);
         assert_eq!(app.messages[0].id, older.id);
-        assert_eq!(app.detail.as_ref().unwrap().id, older.id);
+        assert_eq!(app.messages[1].id, newer.id);
+        assert_eq!(app.selected_message_id(), Some(newer.id));
+        assert_eq!(app.detail.as_ref().unwrap().id, newer.id);
         assert_eq!(app.status, "Message loaded");
     }
 
     #[tokio::test]
-    async fn test_refresh_messages_moves_active_threads_to_messages_when_threads_hide() {
+    async fn test_refresh_messages_keeps_conversations_active_for_singletons() {
         let account_id = AccountId::new();
         let folder_id = FolderId::new();
         let thread_id = ThreadId::new();
@@ -3048,9 +3046,11 @@ mod tests {
             thread_message_item(thread_id, "Reply", "2026-05-07 10:00", vec!["\\Seen"]),
             thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]),
         ]);
-        app.active = ActivePane::Threads;
-        let first = message_item(MessageId::new(), vec!["\\Seen"]);
-        let second = message_item(MessageId::new(), vec![]);
+        app.active = ActivePane::Conversations;
+        let mut first = message_item(MessageId::new(), vec!["\\Seen"]);
+        first.date = "2026-05-07 12:00".into();
+        let mut second = message_item(MessageId::new(), vec![]);
+        second.date = "2026-05-07 10:00".into();
         let mut client = MockMailbox {
             messages: vec![first.clone(), second.clone()],
             detail: Some(detail_for(&first)),
@@ -3067,15 +3067,15 @@ mod tests {
                 Call::ListAttachments(first.id),
             ]
         );
-        assert!(!app.threads_pane_visible());
-        assert_eq!(app.active, ActivePane::Messages);
+        assert_eq!(app.active, ActivePane::Conversations);
         assert_eq!(
             app.messages
                 .iter()
                 .map(|message| message.id)
                 .collect::<Vec<_>>(),
-            vec![first.id, second.id]
+            vec![first.id]
         );
+        assert_eq!(app.threads.len(), 2);
         assert_eq!(app.detail.as_ref().unwrap().id, first.id);
     }
 
@@ -3152,7 +3152,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_key_details_shortcut_requires_loaded_detail() {
         let mut app = AppState {
-            active: ActivePane::Messages,
+            active: ActivePane::Conversations,
             ..Default::default()
         };
         let mut client = MockMailbox::default();
@@ -3165,7 +3165,7 @@ mod tests {
             )
             .await
         );
-        assert_eq!(app.active, ActivePane::Messages);
+        assert_eq!(app.active, ActivePane::Conversations);
         assert_eq!(app.status, "No message detail open");
 
         app.apply_detail(Some(detail_with_body(MessageId::new(), "body")));
@@ -3314,13 +3314,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_tab_skips_threads_pane_when_hidden() {
+    async fn test_handle_key_tab_cycles_through_conversations() {
         let mut app = AppState::default();
         let mut client = MockMailbox::default();
 
         for expected in [
             ActivePane::Folders,
-            ActivePane::Messages,
+            ActivePane::Conversations,
             ActivePane::Accounts,
             ActivePane::Folders,
         ] {
@@ -3337,15 +3337,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_tab_includes_threads_pane_when_visible() {
+    async fn test_handle_key_tab_uses_same_cycle_for_threaded_conversations() {
         let mut app = app_with_threaded_messages();
         let mut client = MockMailbox::default();
 
         for expected in [
             ActivePane::Folders,
-            ActivePane::Threads,
-            ActivePane::Messages,
+            ActivePane::Conversations,
             ActivePane::Accounts,
+            ActivePane::Folders,
         ] {
             assert!(
                 !handle_key(
@@ -3360,13 +3360,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_right_skips_threads_pane_when_hidden() {
+    async fn test_handle_key_right_cycles_through_conversations() {
         let mut app = AppState::default();
         let mut client = MockMailbox::default();
 
         for expected in [
             ActivePane::Folders,
-            ActivePane::Messages,
+            ActivePane::Conversations,
             ActivePane::Accounts,
             ActivePane::Folders,
         ] {
@@ -3383,15 +3383,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_right_includes_threads_pane_when_visible() {
+    async fn test_handle_key_right_uses_same_cycle_for_threaded_conversations() {
         let mut app = app_with_threaded_messages();
         let mut client = MockMailbox::default();
 
         for expected in [
             ActivePane::Folders,
-            ActivePane::Threads,
-            ActivePane::Messages,
+            ActivePane::Conversations,
             ActivePane::Accounts,
+            ActivePane::Folders,
         ] {
             assert!(
                 !handle_key(
@@ -3406,15 +3406,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_left_skips_threads_pane_when_hidden() {
+    async fn test_handle_key_left_cycles_through_conversations() {
         let mut app = AppState::default();
         let mut client = MockMailbox::default();
 
         for expected in [
-            ActivePane::Messages,
+            ActivePane::Conversations,
             ActivePane::Folders,
             ActivePane::Accounts,
-            ActivePane::Messages,
+            ActivePane::Conversations,
         ] {
             assert!(
                 !handle_key(
@@ -3429,15 +3429,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_left_includes_threads_pane_when_visible() {
+    async fn test_handle_key_left_uses_same_cycle_for_threaded_conversations() {
         let mut app = app_with_threaded_messages();
         let mut client = MockMailbox::default();
 
         for expected in [
-            ActivePane::Messages,
-            ActivePane::Threads,
+            ActivePane::Conversations,
             ActivePane::Folders,
             ActivePane::Accounts,
+            ActivePane::Conversations,
         ] {
             assert!(
                 !handle_key(
@@ -3456,7 +3456,7 @@ mod tests {
         let first_thread = ThreadId::new();
         let second_thread = ThreadId::new();
         let mut app = AppState {
-            active: ActivePane::Threads,
+            active: ActivePane::Conversations,
             ..Default::default()
         };
         app.apply_folder_messages(vec![
@@ -3479,7 +3479,7 @@ mod tests {
             )
             .await
         );
-        assert_eq!(app.active, ActivePane::Threads);
+        assert_eq!(app.active, ActivePane::Conversations);
         assert_eq!(app.selected_thread, 1);
 
         assert!(
@@ -3490,7 +3490,7 @@ mod tests {
             )
             .await
         );
-        assert_eq!(app.active, ActivePane::Threads);
+        assert_eq!(app.active, ActivePane::Conversations);
         assert_eq!(app.selected_thread, 0);
     }
 
@@ -3499,7 +3499,7 @@ mod tests {
         let first_thread = ThreadId::new();
         let second_thread = ThreadId::new();
         let mut app = AppState {
-            active: ActivePane::Threads,
+            active: ActivePane::Conversations,
             ..Default::default()
         };
         app.apply_folder_messages(vec![
@@ -3522,7 +3522,7 @@ mod tests {
             )
             .await
         );
-        assert_eq!(app.active, ActivePane::Threads);
+        assert_eq!(app.active, ActivePane::Conversations);
         assert_eq!(app.selected_thread, 1);
 
         assert!(
@@ -3533,7 +3533,7 @@ mod tests {
             )
             .await
         );
-        assert_eq!(app.active, ActivePane::Threads);
+        assert_eq!(app.active, ActivePane::Conversations);
         assert_eq!(app.selected_thread, 0);
     }
 
@@ -3562,17 +3562,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_key_enter_on_thread_focuses_messages_and_loads_detail() {
+    async fn test_handle_key_enter_on_conversation_loads_latest_detail() {
         let thread_id = ThreadId::new();
-        let selected = thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]);
+        let start = thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]);
         let reply = thread_message_item(thread_id, "Reply", "2026-05-07 10:00", vec!["\\Seen"]);
         let mut app = AppState {
-            active: ActivePane::Threads,
+            active: ActivePane::Conversations,
             ..Default::default()
         };
-        app.apply_folder_messages(vec![reply, selected.clone()]);
+        app.apply_folder_messages(vec![reply.clone(), start]);
         let mut client = MockMailbox {
-            detail: Some(detail_for(&selected)),
+            detail: Some(detail_for(&reply)),
             ..Default::default()
         };
 
@@ -3585,15 +3585,12 @@ mod tests {
             .await
         );
 
-        assert_eq!(app.active, ActivePane::Messages);
+        assert_eq!(app.active, ActivePane::Conversations);
         assert_eq!(
             client.calls,
-            vec![
-                Call::GetMessage(selected.id),
-                Call::ListAttachments(selected.id),
-            ]
+            vec![Call::GetMessage(reply.id), Call::ListAttachments(reply.id),]
         );
-        assert_eq!(app.detail.as_ref().unwrap().id, selected.id);
+        assert_eq!(app.detail.as_ref().unwrap().id, reply.id);
     }
 
     #[tokio::test]
@@ -4033,7 +4030,7 @@ mod tests {
         let mut app = app_with_account_folder(account_id, folder_id);
         let message = message_item(MessageId::new(), vec!["\\Seen"]);
         app.apply_folder_messages(vec![message.clone()]);
-        app.active = ActivePane::Messages;
+        app.active = ActivePane::Conversations;
         (app, message)
     }
 
@@ -4252,7 +4249,7 @@ mod tests {
         let mut app = app_with_account_folder(account_id, folder_id);
         let message = message_item(MessageId::new(), vec!["\\Flagged"]);
         app.apply_messages(vec![message.clone()]);
-        app.active = ActivePane::Messages;
+        app.active = ActivePane::Conversations;
         let mut client = MockMailbox::default();
 
         assert!(
@@ -4404,7 +4401,7 @@ mod tests {
             flags: vec!["\\Seen".into()],
         };
         app.apply_folder_messages(vec![message]);
-        app.active = ActivePane::Messages;
+        app.active = ActivePane::Conversations;
         app
     }
 
@@ -5323,7 +5320,7 @@ mod tests {
         app.apply_accounts(vec![account_item(account_id)]);
         app.apply_folders(vec![drafts_folder_item(drafts_id)]);
         app.apply_drafts(vec![draft_item(draft_id, account_id, "Resume")]);
-        app.active = ActivePane::Messages;
+        app.active = ActivePane::Conversations;
 
         let mut client = MockMailbox {
             draft_summary: Some(draft_summary(account_id, draft_id)),
@@ -5354,7 +5351,7 @@ mod tests {
         app.apply_accounts(vec![account_item(account_id)]);
         app.apply_folders(vec![drafts_folder_item(drafts_id)]);
         app.apply_drafts(vec![draft_item(draft_id, account_id, "Resume")]);
-        app.active = ActivePane::Messages;
+        app.active = ActivePane::Conversations;
 
         let mut summary = draft_summary(account_id, draft_id);
         summary.attachments.push(app::DraftAttachmentBytes {
@@ -5403,7 +5400,7 @@ mod tests {
             draft_item(draft_id, account_id, "to-delete"),
             draft_item(other_id, account_id, "keeper"),
         ]);
-        app.active = ActivePane::Messages;
+        app.active = ActivePane::Conversations;
         let mut client = MockMailbox::default();
 
         let _ = handle_key(
@@ -5435,7 +5432,7 @@ mod tests {
         app.apply_accounts(vec![account_item(account_id)]);
         app.apply_folders(vec![drafts_folder_item(drafts_id)]);
         app.apply_drafts(vec![draft_item(draft_id, account_id, "keep me")]);
-        app.active = ActivePane::Messages;
+        app.active = ActivePane::Conversations;
         let mut client = MockMailbox::default();
 
         let _ = handle_key(
