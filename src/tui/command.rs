@@ -54,6 +54,8 @@ pub enum Command {
     Forward,
     /// `:goto <folder>` — switch the active folder to `<folder>`.
     Goto(String),
+    /// `:help` — open the modal help overlay (mirrors the `?` chord).
+    Help,
     /// `:account <name|email>` — switch the active account.
     Account(String),
     /// `:search [--account <name>] <query>` — run an FTS5 search.
@@ -82,6 +84,7 @@ pub(crate) const COMMAND_NAMES: &[&str] = &[
     "flag",
     "forward",
     "goto",
+    "help",
     "move",
     "reply",
     "reply-all",
@@ -144,6 +147,7 @@ pub fn parse_command(input: &str) -> Result<Command, CommandError> {
         "reply" => parse_no_args(Command::Reply, "reply", parts),
         "reply-all" => parse_no_args(Command::ReplyAll, "reply-all", parts),
         "forward" => parse_no_args(Command::Forward, "forward", parts),
+        "help" => parse_no_args(Command::Help, "help", parts),
         "w" => parse_no_args(Command::Write, "w", parts),
         "move" => parse_remainder(input, "move", parts).map(Command::Move),
         "goto" => parse_remainder(input, "goto", parts).map(Command::Goto),
@@ -636,5 +640,30 @@ mod tests {
         let completion = complete_command("w").unwrap();
         assert_eq!(completion.text, "w");
         assert!(completion.unique);
+    }
+
+    #[test]
+    fn test_parse_command_help_takes_no_args() {
+        assert_eq!(parse_command("help").unwrap(), Command::Help);
+        assert_eq!(
+            parse_command("help extra").unwrap_err(),
+            CommandError::Usage("help")
+        );
+    }
+
+    #[test]
+    fn test_complete_command_help_prefix_resolves_uniquely() {
+        let completion = complete_command("hel").unwrap();
+        assert_eq!(completion.text, "help");
+        assert!(completion.unique);
+    }
+
+    #[test]
+    fn test_command_names_remain_sorted() {
+        // The tab-completion contract depends on COMMAND_NAMES being
+        // sorted ASCII-ascending. Guard against a careless insert.
+        let mut sorted = COMMAND_NAMES.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(sorted.as_slice(), COMMAND_NAMES);
     }
 }

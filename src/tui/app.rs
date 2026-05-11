@@ -1682,6 +1682,15 @@ pub struct AppState {
     /// Pending draft to delete; mirrors `pending_delete_message` so
     /// the same y/n confirmation flow can be reused.
     pub(crate) pending_delete_draft: Option<DraftId>,
+    /// True while the modal help overlay is open. Set by [`AppState::open_help`]
+    /// and cleared by [`AppState::close_help`]; the dispatcher in
+    /// `tui::mod` routes all key events through the help handler while
+    /// this is true so underlying panes don't react.
+    pub(crate) help_open: bool,
+    /// Top-line offset into the help overlay body. Clamped to the
+    /// overlay viewport at render time; stays at zero when the
+    /// overlay isn't open.
+    pub(crate) help_scroll: usize,
 }
 
 impl Default for AppState {
@@ -1729,6 +1738,8 @@ impl Default for AppState {
             pending_delete_draft: None,
             search_input: String::new(),
             search_input_previous_pane: ActivePane::Accounts,
+            help_open: false,
+            help_scroll: 0,
         }
     }
 }
@@ -2398,6 +2409,69 @@ impl AppState {
 
     pub(crate) fn set_status(&mut self, status: impl Into<String>) {
         self.status = status.into();
+    }
+
+    /// Open the modal help overlay, if the current state permits.
+    ///
+    /// The overlay is suppressed when:
+    /// - the composer is open (`?` is a literal in the body), or
+    /// - the input mode is anything other than [`InputMode::Normal`]
+    ///   (Command, ComposeAttachPath, ConfirmDiscard, ConfirmDelete,
+    ///   QuickSearch — those modes own their key dispatch and the
+    ///   `?` chord may carry user-meaningful input there).
+    ///
+    /// Returns `true` if the overlay was opened (or already open),
+    /// `false` if the call was a no-op due to the gating rules.
+    pub(crate) fn open_help(&mut self) -> bool {
+        if self.composer.is_some() || self.mode != InputMode::Normal {
+            return false;
+        }
+        self.help_open = true;
+        self.help_scroll = 0;
+        true
+    }
+
+    /// Close the help overlay and reset its scroll. Safe to call when
+    /// the overlay is already closed (no-op).
+    pub(crate) fn close_help(&mut self) {
+        self.help_open = false;
+        self.help_scroll = 0;
+    }
+
+    /// Toggle the help overlay. Honours the same gating rules as
+    /// [`AppState::open_help`] when opening; close always succeeds.
+    /// Returns the post-toggle `help_open` value.
+    pub(crate) fn toggle_help(&mut self) -> bool {
+        if self.help_open {
+            self.close_help();
+            false
+        } else {
+            self.open_help()
+        }
+    }
+
+    /// Scroll the help overlay down by `lines` rows. Caller bounds the
+    /// final value to the renderer's viewport in `render::render_help_overlay`;
+    /// this method only updates the raw offset.
+    pub(crate) fn scroll_help_down(&mut self, lines: usize) {
+        self.help_scroll = self.help_scroll.saturating_add(lines);
+    }
+
+    /// Scroll the help overlay up by `lines` rows (clamped at zero).
+    pub(crate) fn scroll_help_up(&mut self, lines: usize) {
+        self.help_scroll = self.help_scroll.saturating_sub(lines);
+    }
+
+    /// Jump the help overlay scroll to the very top.
+    pub(crate) fn scroll_help_home(&mut self) {
+        self.help_scroll = 0;
+    }
+
+    /// Jump the help overlay scroll to a caller-provided maximum.
+    /// The renderer is the only place that knows the exact line count
+    /// and viewport height, so it passes the bound in here.
+    pub(crate) fn scroll_help_end(&mut self, max: usize) {
+        self.help_scroll = max;
     }
 
     pub(crate) fn set_error(&mut self, error: impl Into<String>) {
@@ -6999,5 +7073,106 @@ mod tests {
         app.push_command_char('s');
         let _ = app.finish_command();
         assert_eq!(app.mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_open_help_opens_in_normal_mode() {
+        let mut app = AppState::default();
+        assert!(!app.help_open);
+        assert!(app.open_help());
+        assert!(app.help_open);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn test_open_help_is_noop_when_composer_is_open() {
+        let mut app = AppState::default();
+        app.enter_composer(AccountId::new());
+        assert!(!app.open_help());
+        assert!(!app.help_open);
+    }
+
+    #[test]
+    fn test_open_help_is_noop_in_command_mode() {
+        let mut app = AppState::default();
+        app.enter_command_mode();
+        assert!(!app.open_help());
+        assert!(!app.help_open);
+    }
+
+    #[test]
+    fn test_open_help_is_noop_in_quick_search_mode() {
+        let mut app = AppState::default();
+        app.enter_quick_search();
+        assert!(!app.open_help());
+        assert!(!app.help_open);
+    }
+
+    #[test]
+    fn test_open_help_is_noop_in_confirm_delete_mode() {
+        let mut app = AppState {
+            mode: InputMode::ConfirmDelete,
+            ..Default::default()
+        };
+        assert!(!app.open_help());
+        assert!(!app.help_open);
+    }
+
+    #[test]
+    fn test_open_help_is_noop_in_confirm_discard_mode() {
+        let mut app = AppState {
+            mode: InputMode::ConfirmDiscard,
+            ..Default::default()
+        };
+        assert!(!app.open_help());
+        assert!(!app.help_open);
+    }
+
+    #[test]
+    fn test_open_help_is_noop_in_compose_attach_path_mode() {
+        let mut app = AppState {
+            mode: InputMode::ComposeAttachPath,
+            ..Default::default()
+        };
+        assert!(!app.open_help());
+        assert!(!app.help_open);
+    }
+
+    #[test]
+    fn test_close_help_resets_scroll() {
+        let mut app = AppState::default();
+        assert!(app.open_help());
+        app.scroll_help_down(7);
+        assert_eq!(app.help_scroll, 7);
+        app.close_help();
+        assert!(!app.help_open);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn test_toggle_help_roundtrip() {
+        let mut app = AppState::default();
+        assert!(app.toggle_help());
+        assert!(app.help_open);
+        assert!(!app.toggle_help());
+        assert!(!app.help_open);
+    }
+
+    #[test]
+    fn test_scroll_help_up_clamps_at_zero() {
+        let mut app = AppState::default();
+        app.open_help();
+        app.scroll_help_up(5);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[test]
+    fn test_scroll_help_end_sets_caller_provided_max() {
+        let mut app = AppState::default();
+        app.open_help();
+        app.scroll_help_end(42);
+        assert_eq!(app.help_scroll, 42);
+        app.scroll_help_home();
+        assert_eq!(app.help_scroll, 0);
     }
 }

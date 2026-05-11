@@ -13,19 +13,32 @@ use chrono::Utc;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::app::{
     human_size, ActivePane, AppState, ComposeField, InputMode, SyncStateUi, ToastKind, ICON_ERROR,
     ICON_IDLE, ICON_POLLING, ICON_SYNCING, MAX_COMPOSE_ATTACHMENT_BYTES, MAX_SELECTED_ERROR_CHARS,
 };
+use super::help::{HelpEntry, HELP_ROWS};
 use super::theme::Theme;
+
+/// Footer text rendered along the bottom border of the modal help
+/// overlay. Kept as a `const` so the snapshot tests can pin the exact
+/// wording without scraping the layout.
+pub(crate) const HELP_FOOTER_TEXT: &str =
+    "j/k scroll · PgUp/PgDn page · Home/End jump · Esc / ? close";
+
+/// Title rendered at the top of the modal help overlay.
+pub(crate) const HELP_TITLE_TEXT: &str = "Help — ? to close";
 
 pub(crate) fn render(frame: &mut Frame<'_>, app: &AppState) {
     let theme = app.theme.theme();
     if app.composer.is_some() {
         render_composer(frame, app, &theme);
+        if app.help_open {
+            render_help_overlay(frame, frame.area(), app, &theme);
+        }
         return;
     }
 
@@ -67,6 +80,11 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &AppState) {
     }
     render_toasts(frame, root[1], app, &theme);
     render_status(frame, root[2], app, &theme);
+    // Help overlay is drawn last so it sits on top of every other
+    // pane, including the toast row and status bar.
+    if app.help_open {
+        render_help_overlay(frame, frame.area(), app, &theme);
+    }
 }
 
 fn render_search(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
@@ -992,22 +1010,18 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
             let status: &str = error_status
                 .as_deref()
                 .unwrap_or(app.status.as_str());
+            // Compact summary: `<theme> · <pane> · <account>/<folder> · ? for help`.
+            // The verbose key manual now lives in the modal help overlay
+            // (src/tui/help.rs::HELP_ROWS); the status bar is reserved
+            // for what the user is looking at, not how to navigate it.
+            // Preview focus keeps its existing one-liner because the
+            // selection/yank chords are not in the rest of the app.
             let body = if app.is_preview_focus_active() {
-                format!(
-                    " {status} | Preview: j/k scroll • PgUp/PgDn page • g/G top/bottom • v select • y copy • Esc cancel "
-                )
-            } else if app.approvals_folder_selected()
-                && matches!(app.active, ActivePane::Conversations | ActivePane::Details)
-            {
-                format!(" {status} | Approvals: j/k move • a approve • d deny • :approve/:deny ")
-            } else if app.active == ActivePane::Details {
-                format!(
-                    " {status} | Details: Tab pane • d details • j/k msg/scroll • o toggle • O expand all • PgUp/PgDn page • ←/→ cursor • v select • a attach • q quit "
-                )
+                format!(" {status} | Preview: j/k scroll • v select • y copy • Esc cancel ")
             } else {
-                format!(
-                    " {status} | q quit • c compose • Ctrl-P approvals • : command • ←/→ pane • Tab pane • ↑/↓ move • j/k move • Enter open • d details/delete • a attach • e export/archive • m move • o open • r refresh • s sync • u seen • f/* flag • t theme "
-                )
+                let pane_label = pane_label_for_status(app);
+                let summary = compose_summary_text(app, pane_label);
+                format!(" {status} · {summary} ")
             };
             let icons = sync_state_prefix(app);
             let text = compose_status_text(&icons, &body, area.width as usize);
@@ -1020,6 +1034,153 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
         }
     };
     frame.render_widget(Paragraph::new(text).style(style), area);
+}
+
+/// Human-readable label for the currently focused pane, used in the
+/// compact status-bar summary. Approvals and Drafts share the
+/// `Conversations` pane but render different list bodies — surface
+/// the virtual-folder name so the user can tell which is active.
+fn pane_label_for_status(app: &AppState) -> &'static str {
+    match app.active {
+        ActivePane::Accounts => "Accounts",
+        ActivePane::Folders => "Folders",
+        ActivePane::Conversations => {
+            if app.approvals_folder_selected() {
+                "Approvals"
+            } else if app.drafts_pane_active() {
+                "Drafts"
+            } else {
+                "Conversations"
+            }
+        }
+        ActivePane::Details => "Details",
+        ActivePane::Attachments => "Attachments",
+        ActivePane::Search => "Search",
+    }
+}
+
+/// Compact `<theme> · <pane> · <account>/<folder> · ? for help` summary
+/// rendered on the right-hand side of the bottom status bar. Approval
+/// folder mode collapses the account/folder pair into `Approvals` so
+/// users see the virtual folder rather than the underlying account.
+fn compose_summary_text(app: &AppState, pane_label: &str) -> String {
+    let theme = app.theme.to_string();
+    if app.approvals_folder_selected() {
+        return format!("{theme} · Approvals · ? for help");
+    }
+    let account = app
+        .accounts
+        .get(app.selected_account)
+        .map(|a| a.label.as_str())
+        .unwrap_or("(no account)");
+    let folder = app.selected_folder_name().unwrap_or("(no folder)");
+    format!("{theme} · {pane_label} · {account}/{folder} · ? for help")
+}
+
+/// Draw the modal help overlay on top of the current frame.
+///
+/// The overlay is centered (~75% width × ~80% height with a 16-row
+/// minimum), wipes its area with [`Clear`] so background panes don't
+/// bleed through, and renders [`HELP_ROWS`] inside a bordered
+/// [`Block`]. The footer line documents the scroll bindings; the
+/// title shows the close hint. Scroll state lives on [`AppState`];
+/// the renderer clamps it via [`AppState::clamp_help_scroll`] so a
+/// terminal resize can't strand the offset off the end.
+pub(crate) fn render_help_overlay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &AppState,
+    theme: &Theme,
+) {
+    let overlay_area = help_overlay_rect(area);
+    let lines = build_help_lines();
+    let total_lines = lines.len();
+    // Inner viewport height = block height minus two border rows.
+    let viewport_height = overlay_area.height.saturating_sub(2) as usize;
+    let max_scroll = total_lines.saturating_sub(viewport_height);
+    // The render path cannot mutate AppState, but we still need to
+    // clamp the displayed offset against the current viewport. Read
+    // the raw value and clamp here for display only.
+    let scroll = app.help_scroll.min(max_scroll);
+
+    let title = Line::from(Span::styled(
+        format!(" {HELP_TITLE_TEXT} "),
+        theme.command.add_modifier(Modifier::BOLD),
+    ));
+    let footer = Line::from(Span::styled(format!(" {HELP_FOOTER_TEXT} "), theme.command));
+    let block = Block::default()
+        .title(title)
+        .title_bottom(footer)
+        .borders(Borders::ALL)
+        .style(theme.text)
+        .border_style(theme.command);
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(theme.text)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll as u16, 0));
+
+    // Clear the underlying region so the overlay never looks
+    // translucent — `Clear` paints the background style of whatever
+    // block follows it.
+    frame.render_widget(Clear, overlay_area);
+    frame.render_widget(paragraph, overlay_area);
+}
+
+/// Compute the centered rectangle for the help overlay. Targets ~75%
+/// width × ~80% height with a 16-row minimum; falls back to the full
+/// area minus one trailing row when the frame is too small.
+fn help_overlay_rect(area: Rect) -> Rect {
+    const MIN_HEIGHT: u16 = 16;
+    const MIN_WIDTH: u16 = 40;
+
+    if area.width < MIN_WIDTH || area.height < 6 {
+        // Frame is too small for a centered overlay — fall back to the
+        // whole area minus one trailing row to keep the status line
+        // visible. Callers should still get a sane render.
+        let height = area.height.saturating_sub(1).max(1);
+        return Rect::new(area.x, area.y, area.width, height);
+    }
+
+    let width = (area.width.saturating_mul(75) / 100).max(MIN_WIDTH);
+    let mut height = (area.height.saturating_mul(80) / 100).max(MIN_HEIGHT);
+    if height > area.height {
+        height = area.height;
+    }
+
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect::new(x, y, width, height)
+}
+
+/// Render [`HELP_ROWS`] into the line list shown inside the overlay.
+fn build_help_lines() -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut first = true;
+    for section in HELP_ROWS {
+        if !first {
+            lines.push(Line::raw(""));
+        }
+        first = false;
+        lines.push(Line::from(Span::styled(
+            section.title,
+            ratatui::style::Style::default().add_modifier(Modifier::BOLD),
+        )));
+        for entry in section.entries {
+            lines.push(help_entry_line(entry));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(
+        "Source: src/tui/help.rs::HELP_ROWS — keep parser & overlay in sync.",
+    ));
+    lines
+}
+
+/// Format a single [`HelpEntry`] as `  <keys>  —  <summary>`.
+fn help_entry_line(entry: &HelpEntry) -> Line<'static> {
+    Line::raw(format!("  {}  —  {}", entry.keys, entry.summary))
 }
 
 /// Build the per-account icon prefix shown at the start of the normal-mode
@@ -1216,9 +1377,9 @@ mod tests {
         let text = buffer_text(&render_to_buffer(&app));
 
         assert!(text.contains("No accounts yet"));
-        assert!(text.contains("q quit"));
-        assert!(text.contains("←/→ pane"));
-        assert!(text.contains("↑/↓ move"));
+        // The compact status bar advertises `? for help` instead of
+        // the per-key manual that used to live here.
+        assert!(text.contains("? for help"));
         assert!(text.contains("Connected to /tmp/postblox.sock"));
     }
 
@@ -1902,7 +2063,9 @@ mod tests {
         assert!(text.contains("detail line 12"));
         assert!(text.contains("detail line 13"));
         assert!(!text.contains("detail line 01"));
-        assert!(text.contains("d details"));
+        // The compact status bar replaced per-pane key hints with
+        // `? for help`; the long manual no longer leaks through.
+        assert!(text.contains("? for help"));
 
         assert_eq!(cursor, Position::new(1, 16));
         let selected = buffer.cell((1, 16)).unwrap().style();
@@ -2099,5 +2262,49 @@ mod tests {
         // appear once each in the buffer.
         let synced_count = text.matches("Synced Work").count();
         assert_eq!(synced_count, 1);
+    }
+
+    #[test]
+    fn test_render_status_compact_replaces_verbose_manual() {
+        let app = AppState::default();
+        let buffer = render_to_buffer(&app);
+        let text = buffer_text(&buffer);
+
+        // The compact status bar must advertise the new help affordance.
+        assert!(
+            text.contains("? for help"),
+            "compact status bar must mention `? for help`; got:\n{text}"
+        );
+        // And the old verbose key manual must be gone — pin to a stable
+        // canary fragment that lived in the old long status string.
+        assert!(
+            !text.contains("e export/archive"),
+            "old verbose key manual leaked into the status bar"
+        );
+    }
+
+    #[test]
+    fn test_render_help_overlay_includes_header_and_footer_when_open() {
+        let mut app = AppState::default();
+        app.open_help();
+        let buffer = render_to_buffer(&app);
+        let text = buffer_text(&buffer);
+
+        // Overlay title (canonical), footer hint, and at least one
+        // section header from HELP_ROWS must all render.
+        assert!(text.contains(HELP_TITLE_TEXT), "title missing:\n{text}");
+        assert!(text.contains("j/k scroll"), "footer hint missing:\n{text}");
+        assert!(
+            text.contains("Panes & navigation"),
+            "section header missing:\n{text}"
+        );
+    }
+
+    #[test]
+    fn test_render_help_overlay_hidden_by_default() {
+        let app = AppState::default();
+        let buffer = render_to_buffer(&app);
+        let text = buffer_text(&buffer);
+        assert!(!text.contains(HELP_TITLE_TEXT));
     }
 }

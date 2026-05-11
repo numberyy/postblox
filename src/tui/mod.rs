@@ -1,5 +1,6 @@
 pub mod app;
 pub mod command;
+pub(crate) mod help;
 pub mod ipc;
 pub mod render;
 pub mod theme;
@@ -663,6 +664,14 @@ async fn handle_key<C: Mailbox + ?Sized>(
     app: &mut AppState,
     client: &mut C,
 ) -> bool {
+    // Modal help overlay owns key dispatch when open. Routed before the
+    // pending-attachment modal so `?`/`Esc` can't fall through to the
+    // y/n confirmation while the overlay is up.
+    if app.help_open {
+        handle_help_key(key, app);
+        return false;
+    }
+
     if app.pending_open_attachment.is_some() {
         return handle_open_confirmation_key(key, app).await;
     }
@@ -670,6 +679,10 @@ async fn handle_key<C: Mailbox + ?Sized>(
     match app.mode {
         InputMode::Command => return handle_command_key(key, app, client).await,
         InputMode::Compose | InputMode::ConfirmDiscard => {
+            // Per the help-overlay spec: while composer is open, `?`
+            // remains a literal character — do not steal it. The
+            // overlay is only reachable from Normal mode (via `?` or
+            // `:help`), so we always fall through to the composer.
             return handle_composer_key(key, app, client).await;
         }
         InputMode::ComposeAttachPath => {
@@ -711,6 +724,14 @@ async fn handle_key<C: Mailbox + ?Sized>(
     }
 
     match key.code {
+        KeyCode::Char('?') => {
+            // Toggle the modal help overlay. Gated on Normal mode + no
+            // composer (composer falls through above and keeps `?` as a
+            // literal). `:help` opens the same overlay via the command
+            // bar — see `execute_command`.
+            app.toggle_help();
+            false
+        }
         KeyCode::Char(':') => {
             app.enter_command_mode();
             false
@@ -1247,6 +1268,35 @@ async fn refresh_missing_expanded_details<C: Mailbox + ?Sized>(app: &mut AppStat
     }
 }
 
+/// Route key events while the modal help overlay is open.
+///
+/// Consumes every key so nothing leaks back into the underlying
+/// dispatcher. The viewport bound for PageUp/PageDown is unknown
+/// here (the renderer owns the layout), so paging falls back to the
+/// constant [`HELP_PAGE_LINES`]; the renderer re-clamps the offset
+/// before drawing.
+fn handle_help_key(key: KeyEvent, app: &mut AppState) {
+    match key.code {
+        KeyCode::Char('?') | KeyCode::Esc => app.close_help(),
+        KeyCode::Char('j') | KeyCode::Down => app.scroll_help_down(1),
+        KeyCode::Char('k') | KeyCode::Up => app.scroll_help_up(1),
+        KeyCode::PageDown => app.scroll_help_down(HELP_PAGE_LINES),
+        KeyCode::PageUp => app.scroll_help_up(HELP_PAGE_LINES),
+        KeyCode::Home => app.scroll_help_home(),
+        KeyCode::End => app.scroll_help_end(usize::MAX),
+        _ => {
+            // Swallow every other key so it can't reach the pane below
+            // (e.g. `c` must not open the composer while help is up).
+        }
+    }
+}
+
+/// Lines moved per Page key while the help overlay is open. The
+/// renderer clamps the resulting scroll to the actual viewport before
+/// drawing, so being slightly off here is harmless — it just means the
+/// next press doesn't visually move.
+const HELP_PAGE_LINES: usize = 10;
+
 async fn handle_open_confirmation_key(key: KeyEvent, app: &mut AppState) -> bool {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -1702,6 +1752,13 @@ async fn execute_command<C: Mailbox + ?Sized>(
         Command::ReplyAll => run_reply(app, client, true).await,
         Command::Forward => run_forward(app, client).await,
         Command::Goto(folder) => run_goto_folder(app, client, &folder).await,
+        Command::Help => {
+            // `:help` from the command bar opens the modal overlay just
+            // like the `?` chord. open_help() honours its own gating
+            // rules; if it refuses (composer open, non-Normal mode) the
+            // user simply doesn't see the overlay — no error toast.
+            app.open_help();
+        }
         Command::Account(name) => run_select_account(app, client, &name).await,
         Command::Search { account, query } => {
             run_search(app, client, account, query).await;
@@ -6372,5 +6429,132 @@ mod tests {
         run_command_line("w".into(), &mut app, &mut client).await;
         assert!(client.calls.is_empty());
         assert!(app.status.contains(":w only valid"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_question_mark_toggles_help_overlay() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+
+        assert!(!app.help_open);
+        handle_key(
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert!(app.help_open);
+        handle_key(
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert!(!app.help_open);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_help_open_j_scrolls_and_esc_closes() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+        app.open_help();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert!(app.help_open);
+        assert_eq!(app.help_scroll, 1);
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert_eq!(app.help_scroll, 2);
+
+        handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert!(!app.help_open);
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_help_open_consumes_unrelated_keys() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+        app.open_help();
+
+        // While help is up, `c` must NOT open the composer.
+        handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert!(app.help_open, "help should stay open");
+        assert!(app.composer.is_none(), "c must not reach composer");
+
+        // Same for `:` — must not enter command mode.
+        handle_key(
+            KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert!(app.help_open);
+        assert_eq!(app.mode, InputMode::Normal);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_help_open_swallows_q_without_quitting() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+        app.open_help();
+
+        let quit = handle_key(
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        // `q` must not propagate to the quit handler while help is up;
+        // user must Esc / ? out first.
+        assert!(!quit);
+        assert!(app.help_open);
+    }
+
+    #[tokio::test]
+    async fn test_help_command_opens_overlay() {
+        let mut app = AppState::default();
+        let mut client = MockMailbox::default();
+        run_command_line("help".into(), &mut app, &mut client).await;
+        assert!(app.help_open);
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_question_mark_inside_composer_falls_through() {
+        let mut app = AppState::default();
+        app.enter_composer(AccountId::new());
+        assert!(app.composer.is_some());
+        let mut client = MockMailbox::default();
+
+        // Composer-mode `?` must not open the help overlay; it should
+        // be writable into the active composer field.
+        handle_key(
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            &mut app,
+            &mut client,
+        )
+        .await;
+        assert!(!app.help_open);
     }
 }
