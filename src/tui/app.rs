@@ -16,11 +16,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::models::{
-    Account, AccountId, AddressList, Attachment, AttachmentId, Draft, DraftId, Folder, FolderId,
-    Message, MessageFlags, MessageId, MessageSummary, ThreadId,
+    Account, AccountId, AddressList, ApprovalState as McpApprovalState, Attachment, AttachmentId,
+    Draft, DraftId, Folder, FolderId, McpApproval, Message, MessageFlags, MessageId,
+    MessageSummary, ThreadId,
 };
 
 use super::theme::ThemeName;
@@ -83,6 +86,8 @@ pub enum ActivePane {
     Attachments,
     /// Quick-search results pane.
     Search,
+    /// Pending MCP approval requests.
+    Approvals,
 }
 
 impl ActivePane {
@@ -93,18 +98,20 @@ impl ActivePane {
             Self::Conversations => Self::Details,
             Self::Details => Self::Attachments,
             Self::Attachments => Self::Search,
-            Self::Search => Self::Accounts,
+            Self::Search => Self::Approvals,
+            Self::Approvals => Self::Accounts,
         }
     }
 
     pub(crate) fn previous(self) -> Self {
         match self {
-            Self::Accounts => Self::Search,
+            Self::Accounts => Self::Approvals,
             Self::Folders => Self::Accounts,
             Self::Conversations => Self::Folders,
             Self::Details => Self::Conversations,
             Self::Attachments => Self::Details,
             Self::Search => Self::Attachments,
+            Self::Approvals => Self::Search,
         }
     }
 }
@@ -130,6 +137,9 @@ pub enum InputMode {
 
 /// Maximum chars accepted in the `/` quick-search input.
 pub(crate) const MAX_SEARCH_CHARS: usize = 256;
+
+/// Maximum chars shown for an approval request's compact argument summary.
+pub(crate) const MAX_APPROVAL_ARGS_CHARS: usize = 80;
 
 /// Field currently focused in the composer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -538,6 +548,91 @@ impl SearchState {
             selected: 0,
             pending: true,
             previous_pane,
+        }
+    }
+}
+
+/// One pending MCP approval row rendered in the Approvals pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalItem {
+    pub(crate) id: Uuid,
+    pub(crate) tool: String,
+    pub(crate) args_summary: String,
+    pub(crate) summary: Option<String>,
+    pub(crate) created_at: DateTime<Utc>,
+}
+
+impl From<McpApproval> for ApprovalItem {
+    fn from(approval: McpApproval) -> Self {
+        Self {
+            id: approval.id,
+            tool: approval.tool,
+            args_summary: compact_args_summary(&approval.args),
+            summary: optional_summary_label(approval.summary),
+            created_at: approval.created_at,
+        }
+    }
+}
+
+impl ApprovalItem {
+    /// Build a pending approval row from a live `mcp.approval_requested`
+    /// event payload. Events omit `created_at`, so `now` becomes the
+    /// local age anchor until the next authoritative refresh.
+    pub(crate) fn from_requested_event(data: &Value, now: DateTime<Utc>) -> Option<Self> {
+        if data
+            .get("state")
+            .and_then(Value::as_str)
+            .is_some_and(|state| state != McpApprovalState::Pending.as_str())
+        {
+            return None;
+        }
+        let id = data
+            .get("approval_id")
+            .or_else(|| data.get("id"))
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())?;
+        let tool = data.get("tool").and_then(Value::as_str)?.to_string();
+        let args = data
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        let summary = data
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .and_then(optional_summary_label);
+        Some(Self {
+            id,
+            tool,
+            args_summary: compact_args_summary(&args),
+            summary,
+            created_at: now,
+        })
+    }
+
+    /// Human-readable age label relative to `now`.
+    pub(crate) fn age_label_at(&self, now: DateTime<Utc>) -> String {
+        age_label(self.created_at, now)
+    }
+}
+
+/// Pending MCP approvals plus cursor and previous-pane state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ApprovalsState {
+    pub(crate) items: Vec<ApprovalItem>,
+    pub(crate) selected: usize,
+    pub(crate) pending: bool,
+    /// Pane to restore when the user closes approvals via Esc.
+    pub(crate) previous_pane: ActivePane,
+}
+
+impl Default for ApprovalsState {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            selected: 0,
+            pending: false,
+            previous_pane: ActivePane::Accounts,
         }
     }
 }
@@ -1384,6 +1479,7 @@ pub struct AppState {
     pub(crate) next_toast_id: u64,
     pub(crate) account_states: HashMap<AccountId, AccountStatus>,
     pub(crate) search: Option<SearchState>,
+    pub(crate) approvals: ApprovalsState,
     pub(crate) search_input: String,
     pub(crate) search_input_previous_pane: ActivePane,
     /// Drafts list when the Drafts folder is selected. Disjoint from
@@ -1435,6 +1531,7 @@ impl Default for AppState {
             next_toast_id: 0,
             account_states: HashMap::new(),
             search: None,
+            approvals: ApprovalsState::default(),
             drafts: Vec::new(),
             selected_draft: 0,
             pending_delete_draft: None,
@@ -1446,11 +1543,21 @@ impl Default for AppState {
 
 impl AppState {
     pub(crate) fn cycle_active_pane(&mut self) {
+        let previous = self.active;
         self.active = self.next_visible_pane();
+        self.record_approvals_previous_pane(previous);
     }
 
     pub(crate) fn cycle_active_pane_reverse(&mut self) {
+        let previous = self.active;
         self.active = self.previous_visible_pane();
+        self.record_approvals_previous_pane(previous);
+    }
+
+    fn record_approvals_previous_pane(&mut self, previous: ActivePane) {
+        if self.active == ActivePane::Approvals && previous != ActivePane::Approvals {
+            self.approvals.previous_pane = previous;
+        }
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) -> bool {
@@ -1517,6 +1624,7 @@ impl AppState {
                 changed
             }
             ActivePane::Search => self.move_search_selection(delta),
+            ActivePane::Approvals => self.move_approval_selection(delta),
         }
     }
 
@@ -2438,6 +2546,99 @@ impl AppState {
         self.search.as_ref().is_some_and(|state| state.pending)
     }
 
+    pub(crate) fn approvals_pane_visible(&self) -> bool {
+        true
+    }
+
+    /// Focus the Approvals pane and mark its list as refreshing.
+    pub(crate) fn begin_approvals(&mut self) {
+        if self.active != ActivePane::Approvals {
+            self.approvals.previous_pane = self.active;
+        }
+        self.approvals.pending = true;
+        self.active = ActivePane::Approvals;
+        self.clear_error();
+    }
+
+    /// Replace pending approvals with an authoritative daemon list.
+    pub(crate) fn apply_approvals(&mut self, approvals: Vec<ApprovalItem>) {
+        self.approvals.items = sorted_approvals(approvals);
+        self.approvals.pending = false;
+        clamp_index(&mut self.approvals.selected, self.approvals.items.len());
+    }
+
+    /// Restore the pane that was active before Approvals opened.
+    pub(crate) fn close_approvals(&mut self) {
+        let previous = self.approvals.previous_pane;
+        self.active = if previous == ActivePane::Approvals {
+            ActivePane::Accounts
+        } else {
+            previous
+        };
+        self.normalize_active_pane();
+    }
+
+    pub(crate) fn move_approval_selection(&mut self, delta: isize) -> bool {
+        if self.approvals.items.is_empty() {
+            self.approvals.selected = 0;
+            return false;
+        }
+        move_index(
+            &mut self.approvals.selected,
+            self.approvals.items.len(),
+            delta,
+        )
+    }
+
+    pub(crate) fn selected_approval(&self) -> Option<&ApprovalItem> {
+        self.approvals.items.get(self.approvals.selected)
+    }
+
+    /// Optimistically remove the highlighted approval row.
+    pub(crate) fn remove_selected_approval(&mut self) -> Option<ApprovalItem> {
+        if self.approvals.items.is_empty() {
+            self.approvals.selected = 0;
+            return None;
+        }
+        let index = self
+            .approvals
+            .selected
+            .min(self.approvals.items.len().saturating_sub(1));
+        let removed = self.approvals.items.remove(index);
+        clamp_index(&mut self.approvals.selected, self.approvals.items.len());
+        Some(removed)
+    }
+
+    /// Remove one approval row by id, returning true if it was present.
+    pub(crate) fn remove_approval_by_id(&mut self, approval_id: Uuid) -> bool {
+        let before = self.approvals.items.len();
+        self.approvals
+            .items
+            .retain(|approval| approval.id != approval_id);
+        let removed = self.approvals.items.len() != before;
+        if removed {
+            clamp_index(&mut self.approvals.selected, self.approvals.items.len());
+        }
+        removed
+    }
+
+    /// Merge a live pending-approval event by replacing any existing
+    /// row with the same id, then sorting newest-first.
+    pub(crate) fn merge_approval_request(&mut self, approval: ApprovalItem) {
+        if let Some(existing) = self
+            .approvals
+            .items
+            .iter_mut()
+            .find(|existing| existing.id == approval.id)
+        {
+            *existing = approval;
+        } else {
+            self.approvals.items.push(approval);
+        }
+        self.approvals.items = sorted_approvals(std::mem::take(&mut self.approvals.items));
+        clamp_index(&mut self.approvals.selected, self.approvals.items.len());
+    }
+
     /// Refocus a hit's location: switch active account / folder /
     /// selected message and close the search pane. Returns true when
     /// either a target hit was found and applied or the caller passed
@@ -3159,7 +3360,7 @@ impl AppState {
 
     fn next_visible_pane(&self) -> ActivePane {
         let mut pane = self.active;
-        for _ in 0..6 {
+        for _ in 0..7 {
             pane = pane.next();
             if self.pane_visible(pane) {
                 return pane;
@@ -3170,7 +3371,7 @@ impl AppState {
 
     fn previous_visible_pane(&self) -> ActivePane {
         let mut pane = self.active;
-        for _ in 0..6 {
+        for _ in 0..7 {
             pane = pane.previous();
             if self.pane_visible(pane) {
                 return pane;
@@ -3184,6 +3385,7 @@ impl AppState {
             ActivePane::Details => self.detail_pane_visible(),
             ActivePane::Attachments => self.attachments_pane_visible(),
             ActivePane::Search => self.search_pane_visible(),
+            ActivePane::Approvals => self.approvals_pane_visible(),
             ActivePane::Accounts | ActivePane::Folders | ActivePane::Conversations => true,
         }
     }
@@ -3356,6 +3558,17 @@ impl AppState {
     }
 }
 
+fn sorted_approvals(mut approvals: Vec<ApprovalItem>) -> Vec<ApprovalItem> {
+    approvals.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| left.tool.cmp(&right.tool))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    approvals
+}
+
 fn build_threads(messages: &[MessageItem]) -> Vec<ThreadItem> {
     let mut threads = Vec::<ThreadItem>::new();
 
@@ -3415,6 +3628,79 @@ fn text_or_default(value: Option<&str>, default: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or(default)
         .to_string()
+}
+
+/// Render request args as a stable one-line summary for approval rows.
+pub(crate) fn compact_args_summary(args: &Value) -> String {
+    const PREFERRED_KEYS: &[&str] = &["to", "folder", "folder_name", "subject"];
+    if let Value::Object(map) = args {
+        let parts: Vec<String> = PREFERRED_KEYS
+            .iter()
+            .filter_map(|key| {
+                map.get(*key)
+                    .map(|value| format!("{key}={}", compact_arg_value(value)))
+            })
+            .collect();
+        if !parts.is_empty() {
+            return truncate_chars(&parts.join(", "), MAX_APPROVAL_ARGS_CHARS);
+        }
+    }
+
+    let raw = serde_json::to_string(args).unwrap_or_else(|_| "<args>".into());
+    truncate_chars(&raw, MAX_APPROVAL_ARGS_CHARS)
+}
+
+fn compact_arg_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Array(values) => {
+            let parts: Vec<String> = values
+                .iter()
+                .map(|value| match value {
+                    Value::String(value) => value.clone(),
+                    other => other.to_string(),
+                })
+                .collect();
+            format!("[{}]", parts.join(","))
+        }
+        Value::Null => "null".into(),
+        other => other.to_string(),
+    }
+}
+
+fn optional_summary_label(summary: String) -> Option<String> {
+    let summary = summary.trim();
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary.to_string())
+    }
+}
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_string();
+    }
+    let keep = limit.saturating_sub(1);
+    let mut out: String = value.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
+fn age_label(created_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let seconds = now.signed_duration_since(created_at).num_seconds().max(0);
+    if seconds < 60 {
+        return format!("{seconds}s ago");
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m ago");
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    format!("{}d ago", hours / 24)
 }
 
 fn detail_text(detail: &MessageDetail) -> String {
@@ -3710,6 +3996,16 @@ mod tests {
         }
     }
 
+    fn approval(tool: &str, created_at: DateTime<Utc>) -> ApprovalItem {
+        ApprovalItem {
+            id: Uuid::new_v4(),
+            tool: tool.into(),
+            args_summary: "subject=Hello".into(),
+            summary: Some("send draft".into()),
+            created_at,
+        }
+    }
+
     fn draft_attachment_payload(content_base64: &str) -> crate::tui::ipc::DraftAttachmentPayload {
         crate::tui::ipc::DraftAttachmentPayload {
             id: Uuid::new_v4(),
@@ -3772,9 +4068,11 @@ mod tests {
         assert_eq!(ActivePane::Conversations.next(), ActivePane::Details);
         assert_eq!(ActivePane::Details.next(), ActivePane::Attachments);
         assert_eq!(ActivePane::Attachments.next(), ActivePane::Search);
-        assert_eq!(ActivePane::Search.next(), ActivePane::Accounts);
+        assert_eq!(ActivePane::Search.next(), ActivePane::Approvals);
+        assert_eq!(ActivePane::Approvals.next(), ActivePane::Accounts);
 
-        assert_eq!(ActivePane::Accounts.previous(), ActivePane::Search);
+        assert_eq!(ActivePane::Accounts.previous(), ActivePane::Approvals);
+        assert_eq!(ActivePane::Approvals.previous(), ActivePane::Search);
         assert_eq!(ActivePane::Search.previous(), ActivePane::Attachments);
         assert_eq!(ActivePane::Attachments.previous(), ActivePane::Details);
         assert_eq!(ActivePane::Details.previous(), ActivePane::Conversations);
@@ -3790,6 +4088,8 @@ mod tests {
         assert_eq!(app.active, ActivePane::Folders);
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Conversations);
+        app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Approvals);
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
     }
@@ -3816,7 +4116,172 @@ mod tests {
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Search);
         app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Approvals);
+        app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
+    }
+
+    #[test]
+    fn test_cycle_active_pane_records_approvals_previous_pane_for_escape() {
+        let mut app = AppState {
+            active: ActivePane::Search,
+            search: Some(SearchState::new("needle", None, ActivePane::Conversations)),
+            ..Default::default()
+        };
+
+        app.cycle_active_pane();
+
+        assert_eq!(app.active, ActivePane::Approvals);
+        assert_eq!(app.approvals.previous_pane, ActivePane::Search);
+        app.close_approvals();
+        assert_eq!(app.active, ActivePane::Search);
+
+        app.active = ActivePane::Accounts;
+        app.cycle_active_pane_reverse();
+
+        assert_eq!(app.active, ActivePane::Approvals);
+        assert_eq!(app.approvals.previous_pane, ActivePane::Accounts);
+        app.close_approvals();
+        assert_eq!(app.active, ActivePane::Accounts);
+    }
+
+    #[test]
+    fn test_approvals_state_empty_one_and_many_selection() {
+        let mut app = AppState {
+            active: ActivePane::Approvals,
+            ..Default::default()
+        };
+        assert!(!app.move_selection(1));
+        assert!(app.selected_approval().is_none());
+
+        let now = Utc::now();
+        let only = approval("postblox_message_send", now);
+        let only_id = only.id;
+        app.apply_approvals(vec![only]);
+        assert_eq!(
+            app.selected_approval().map(|approval| approval.id),
+            Some(only_id)
+        );
+        assert!(!app.move_selection(1));
+
+        let oldest = approval("oldest", now - chrono::Duration::minutes(2));
+        let newest = approval("newest", now);
+        let middle = approval("middle", now - chrono::Duration::minutes(1));
+        app.apply_approvals(vec![oldest.clone(), newest.clone(), middle.clone()]);
+
+        assert_eq!(
+            app.selected_approval().map(|approval| approval.id),
+            Some(newest.id)
+        );
+        assert!(app.move_selection(1));
+        assert_eq!(
+            app.selected_approval().map(|approval| approval.id),
+            Some(middle.id)
+        );
+        assert!(app.move_selection(1));
+        assert_eq!(
+            app.selected_approval().map(|approval| approval.id),
+            Some(oldest.id)
+        );
+        assert!(!app.move_selection(1));
+    }
+
+    #[test]
+    fn test_approval_remove_selected_clamps_and_empty_is_none() {
+        let now = Utc::now();
+        let first = approval("first", now);
+        let second = approval("second", now - chrono::Duration::seconds(1));
+        let mut app = AppState::default();
+        app.apply_approvals(vec![first.clone(), second.clone()]);
+        app.approvals.selected = 1;
+
+        let removed = app.remove_selected_approval().expect("selected approval");
+
+        assert_eq!(removed.id, second.id);
+        assert_eq!(
+            app.selected_approval().map(|approval| approval.id),
+            Some(first.id)
+        );
+        assert_eq!(
+            app.remove_selected_approval().map(|approval| approval.id),
+            Some(first.id)
+        );
+        assert!(app.remove_selected_approval().is_none());
+        assert_eq!(app.approvals.selected, 0);
+    }
+
+    #[test]
+    fn test_approval_event_merge_replaces_appends_and_decided_removes() {
+        let now = Utc::now();
+        let mut app = AppState::default();
+        let mut first = approval("first", now - chrono::Duration::minutes(1));
+        let first_id = first.id;
+        app.merge_approval_request(first.clone());
+        assert_eq!(app.approvals.items.len(), 1);
+
+        first.args_summary = "subject=Updated".into();
+        app.merge_approval_request(first.clone());
+        assert_eq!(app.approvals.items.len(), 1);
+        assert_eq!(app.approvals.items[0].args_summary, "subject=Updated");
+
+        let second = approval("second", now);
+        let second_id = second.id;
+        app.merge_approval_request(second);
+        assert_eq!(
+            app.approvals
+                .items
+                .iter()
+                .map(|approval| approval.id)
+                .collect::<Vec<_>>(),
+            vec![second_id, first_id]
+        );
+
+        assert!(app.remove_approval_by_id(first_id));
+        assert_eq!(app.approvals.items.len(), 1);
+        assert!(!app.remove_approval_by_id(first_id));
+    }
+
+    #[test]
+    fn test_compact_args_summary_prefers_stable_simple_keys_and_truncates() {
+        let args = serde_json::json!({
+            "body": "long body that should not be shown first",
+            "subject": "Status",
+            "to": ["alice@example.com", "bob@example.com"],
+        });
+
+        let summary = compact_args_summary(&args);
+
+        assert_eq!(
+            summary,
+            "to=[alice@example.com,bob@example.com], subject=Status"
+        );
+
+        let long = serde_json::json!({"zz": "x".repeat(200)});
+        assert!(compact_args_summary(&long).chars().count() <= MAX_APPROVAL_ARGS_CHARS);
+    }
+
+    #[test]
+    fn test_approval_item_from_requested_event_uses_local_timestamp() {
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let event = serde_json::json!({
+            "approval_id": id,
+            "tool": "postblox_message_send",
+            "args": {"subject": "Hello"},
+            "summary": "send hello",
+            "state": "pending",
+        });
+
+        let item = ApprovalItem::from_requested_event(&event, now).expect("event item");
+
+        assert_eq!(item.id, id);
+        assert_eq!(item.tool, "postblox_message_send");
+        assert_eq!(item.args_summary, "subject=Hello");
+        assert_eq!(item.summary.as_deref(), Some("send hello"));
+        assert_eq!(
+            item.age_label_at(now + chrono::Duration::minutes(2)),
+            "2m ago"
+        );
     }
 
     #[test]
@@ -4503,7 +4968,7 @@ mod tests {
 
         assert!(!app.attachments_pane_visible());
         app.cycle_active_pane();
-        assert_eq!(app.active, ActivePane::Accounts);
+        assert_eq!(app.active, ActivePane::Approvals);
 
         let message_id = app.messages[0].id;
         app.apply_detail(Some(detail(message_id, "body")));
@@ -4516,7 +4981,11 @@ mod tests {
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Attachments);
         app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Approvals);
+        app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
+        app.cycle_active_pane_reverse();
+        assert_eq!(app.active, ActivePane::Approvals);
         app.cycle_active_pane_reverse();
         assert_eq!(app.active, ActivePane::Attachments);
         app.cycle_active_pane_reverse();
@@ -4574,7 +5043,7 @@ mod tests {
         assert!(!app.focus_detail_pane());
         assert_eq!(app.active, ActivePane::Conversations);
         app.cycle_active_pane();
-        assert_eq!(app.active, ActivePane::Accounts);
+        assert_eq!(app.active, ActivePane::Approvals);
 
         let message_id = app.messages[0].id;
         app.apply_detail(Some(detail(message_id, "body")));
@@ -4584,7 +5053,11 @@ mod tests {
         app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Details);
         app.cycle_active_pane();
+        assert_eq!(app.active, ActivePane::Approvals);
+        app.cycle_active_pane();
         assert_eq!(app.active, ActivePane::Accounts);
+        app.cycle_active_pane_reverse();
+        assert_eq!(app.active, ActivePane::Approvals);
         app.cycle_active_pane_reverse();
         assert_eq!(app.active, ActivePane::Details);
 

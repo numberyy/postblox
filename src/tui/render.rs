@@ -9,6 +9,7 @@
 
 use std::fmt::Write as _;
 
+use chrono::Utc;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
@@ -55,7 +56,9 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &AppState) {
     render_accounts(frame, top[0], app, &theme);
     render_folders(frame, top[1], app, &theme);
     render_conversations(frame, top[2], app, &theme);
-    if app.search_pane_visible() {
+    if app.active == ActivePane::Approvals {
+        render_approvals(frame, main[1], app, &theme);
+    } else if app.search_pane_visible() {
         render_search(frame, main[1], app, &theme);
     } else if app.attachments_pane_visible() {
         render_detail_with_attachments(frame, main[1], app, &theme);
@@ -121,6 +124,50 @@ fn render_search(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
         .map(|state| state.hits.len())
         .unwrap_or(0);
     let mut state = selection_state(len, selected);
+    let list = List::new(items)
+        .block(pane_block_owned(title, active, theme))
+        .style(theme.text)
+        .highlight_style(theme.selection)
+        .highlight_symbol("› ");
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_approvals(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    let active = app.active == ActivePane::Approvals;
+    let count = app.approvals.items.len();
+    let title = if app.approvals.pending {
+        format!("Approvals • {count} pending • loading…")
+    } else {
+        format!("Approvals • {count} pending")
+    };
+    let now = Utc::now();
+    let items: Vec<ListItem<'_>> = if app.approvals.pending && app.approvals.items.is_empty() {
+        vec![ListItem::new("Loading approvals…")]
+    } else if app.approvals.items.is_empty() {
+        vec![ListItem::new("No pending approvals")]
+    } else {
+        app.approvals
+            .items
+            .iter()
+            .map(|approval| {
+                let mut line = vec![
+                    Span::styled(
+                        approval.tool.as_str(),
+                        theme.text.add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" — "),
+                    Span::raw(approval.args_summary.as_str()),
+                    Span::styled(format!("  {}", approval.age_label_at(now)), theme.muted),
+                ];
+                if let Some(summary) = approval.summary.as_deref() {
+                    line.push(Span::raw("  "));
+                    line.push(Span::styled(summary, theme.muted));
+                }
+                ListItem::new(Line::from(line))
+            })
+            .collect()
+    };
+    let mut state = selection_state(count, app.approvals.selected);
     let list = List::new(items)
         .block(pane_block_owned(title, active, theme))
         .style(theme.text)
@@ -751,13 +798,15 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
                 format!(
                     " {status} | Preview: j/k scroll • PgUp/PgDn page • g/G top/bottom • v select • y copy • Esc cancel "
                 )
+            } else if app.active == ActivePane::Approvals {
+                format!(" {status} | Approvals: j/k move • a approve • d deny • Esc back ")
             } else if app.active == ActivePane::Details {
                 format!(
                     " {status} | Details: Tab pane • d details • j/k msg/scroll • o toggle • O expand all • PgUp/PgDn page • ←/→ cursor • v select • a attach • q quit "
                 )
             } else {
                 format!(
-                    " {status} | q quit • c compose • : command • ←/→ pane • Tab pane • ↑/↓ move • j/k move • Enter open • d details/delete • a attach • e export/archive • m move • o open • r refresh • s sync • u seen • f/* flag • t theme "
+                    " {status} | q quit • c compose • Ctrl-P approvals • : command • ←/→ pane • Tab pane • ↑/↓ move • j/k move • Enter open • d details/delete • a attach • e export/archive • m move • o open • r refresh • s sync • u seen • f/* flag • t theme "
                 )
             };
             let icons = sync_state_prefix(app);
@@ -878,7 +927,8 @@ mod tests {
     use super::*;
     use crate::models::{AccountId, AttachmentId, FolderId, MessageId, ThreadId};
     use crate::tui::app::{
-        AccountItem, AttachmentItem, AttachmentPreviewItem, FolderItem, MessageDetail, MessageItem,
+        AccountItem, ApprovalItem, AttachmentItem, AttachmentPreviewItem, FolderItem,
+        MessageDetail, MessageItem,
     };
     use crate::tui::theme::ThemeName;
 
@@ -1177,6 +1227,41 @@ mod tests {
 
         assert!(text.contains("Error"));
         assert!(text.contains("malformed data"));
+    }
+
+    #[test]
+    fn test_render_empty_approvals_pane_says_no_pending_approvals() {
+        let mut app = AppState {
+            active: ActivePane::Approvals,
+            ..Default::default()
+        };
+        app.apply_approvals(Vec::new());
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(text.contains("Approvals"));
+        assert!(text.contains("No pending approvals"));
+    }
+
+    #[test]
+    fn test_render_approvals_row_includes_tool_and_args_summary() {
+        let mut app = AppState {
+            active: ActivePane::Approvals,
+            ..Default::default()
+        };
+        app.apply_approvals(vec![ApprovalItem {
+            id: uuid::Uuid::new_v4(),
+            tool: "postblox_message_send".into(),
+            args_summary: "to=[alice@example.com], subject=Hi".into(),
+            summary: Some("send draft".into()),
+            created_at: Utc::now(),
+        }]);
+
+        let text = buffer_text(&render_to_buffer(&app));
+
+        assert!(text.contains("postblox_message_send"));
+        assert!(text.contains("to=[alice@example.com], subject=Hi"));
+        assert!(text.contains("send draft"));
     }
 
     #[test]

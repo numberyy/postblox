@@ -30,8 +30,14 @@ pub enum Command {
     Unflag,
     /// `:archive` — move the selected message to the archive folder.
     Archive,
+    /// `:approvals` — open pending MCP approvals.
+    Approvals,
+    /// `:approve` — allow the highlighted pending approval.
+    Approve,
     /// `:delete` — move the selected message to the trash folder.
     Delete,
+    /// `:deny` — deny the highlighted pending approval.
+    Deny,
     /// `:move <folder>` — move the selected message to `<folder>`.
     Move(String),
     /// `:theme next` — advance to the next theme in the rotation.
@@ -67,9 +73,12 @@ pub enum Command {
 /// Tab-completion has a deterministic match order.
 pub(crate) const COMMAND_NAMES: &[&str] = &[
     "account",
+    "approvals",
+    "approve",
     "archive",
     "compose",
     "delete",
+    "deny",
     "flag",
     "forward",
     "goto",
@@ -127,7 +136,10 @@ pub fn parse_command(input: &str) -> Result<Command, CommandError> {
         "flag" => parse_no_args(Command::Flag, "flag", parts),
         "unflag" => parse_no_args(Command::Unflag, "unflag", parts),
         "archive" => parse_no_args(Command::Archive, "archive", parts),
+        "approvals" => parse_no_args(Command::Approvals, "approvals", parts),
+        "approve" => parse_no_args(Command::Approve, "approve", parts),
         "delete" => parse_no_args(Command::Delete, "delete", parts),
+        "deny" => parse_no_args(Command::Deny, "deny", parts),
         "compose" => parse_no_args(Command::Compose, "compose", parts),
         "reply" => parse_no_args(Command::Reply, "reply", parts),
         "reply-all" => parse_no_args(Command::ReplyAll, "reply-all", parts),
@@ -395,6 +407,25 @@ mod tests {
         assert_eq!(
             parse_command("delete now").unwrap_err(),
             CommandError::Usage("delete")
+        );
+    }
+
+    #[test]
+    fn test_parse_command_approvals_approve_and_deny_take_no_args() {
+        assert_eq!(parse_command("approvals").unwrap(), Command::Approvals);
+        assert_eq!(parse_command("approve").unwrap(), Command::Approve);
+        assert_eq!(parse_command("deny").unwrap(), Command::Deny);
+        assert_eq!(
+            parse_command("approvals now").unwrap_err(),
+            CommandError::Usage("approvals")
+        );
+        assert_eq!(
+            parse_command("approve now").unwrap_err(),
+            CommandError::Usage("approve")
+        );
+        assert_eq!(
+            parse_command("deny now").unwrap_err(),
+            CommandError::Usage("deny")
         );
     }
 

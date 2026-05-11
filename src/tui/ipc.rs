@@ -18,13 +18,13 @@ use uuid::Uuid;
 use crate::ipc::client::{Client, ClientError};
 use crate::ipc::{Event, Response, RpcError, Topic};
 use crate::models::{
-    Account, AccountId, Attachment, AttachmentId, Draft, DraftId, Folder, FolderId, Message,
-    MessageId, MessageSummary,
+    Account, AccountId, ApprovalState, Attachment, AttachmentId, Draft, DraftId, Folder, FolderId,
+    McpApproval, Message, MessageId, MessageSummary,
 };
 
 use super::app::{
-    AccountItem, AttachmentItem, AttachmentPreviewItem, ComposerDraft, DraftItem, DraftSummary,
-    FolderItem, MessageDetail, MessageItem, SearchHit,
+    AccountItem, ApprovalItem, AttachmentItem, AttachmentPreviewItem, ComposerDraft, DraftItem,
+    DraftSummary, FolderItem, MessageDetail, MessageItem, SearchHit,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -108,6 +108,11 @@ pub(crate) struct ForwardAttachmentFailure {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 struct SendResult {
     message_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct ApprovalDecisionResult {
+    decided: bool,
 }
 
 /// Decoded `draft.get` response. The daemon sends attachment bytes as
@@ -648,6 +653,56 @@ impl MailboxClient {
         Ok(hits.into_iter().map(SearchHit::from).collect())
     }
 
+    /// List pending MCP approvals newest-first.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as `Vec<McpApproval>`.
+    pub(crate) async fn list_pending_approvals(
+        &mut self,
+    ) -> Result<Vec<ApprovalItem>, MailboxError> {
+        let response = self
+            .request(
+                "mcp.approval.list",
+                json!({ "state": "pending", "limit": 100, "offset": 0 }),
+            )
+            .await?;
+        let approvals: Vec<McpApproval> = decode_response("mcp.approval.list", response)?;
+        Ok(approvals
+            .into_iter()
+            .filter(|approval| approval.state == ApprovalState::Pending)
+            .map(ApprovalItem::from)
+            .collect())
+    }
+
+    /// Decide a pending MCP approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns:
+    /// - [`MailboxError::Request`] if the IPC request itself fails.
+    /// - [`MailboxError::Server`] if the daemon returned `ok = false`.
+    /// - [`MailboxError::Decode`] if the response payload cannot be
+    ///   decoded as the expected decision result.
+    pub(crate) async fn decide_approval(
+        &mut self,
+        approval_id: Uuid,
+        state: ApprovalState,
+    ) -> Result<bool, MailboxError> {
+        let response = self
+            .request(
+                "mcp.approval.decide",
+                approval_decide_args(approval_id, state),
+            )
+            .await?;
+        let result: ApprovalDecisionResult = decode_response("mcp.approval.decide", response)?;
+        Ok(result.decided)
+    }
+
     /// Build a reply skeleton (subject, recipients, headers, quoted
     /// body) for `message_id`. `reply_all` controls whether the
     /// original `Cc` recipients are included.
@@ -893,6 +948,15 @@ pub(crate) fn search_args(query: &str, account_id: Option<AccountId>) -> Value {
     }
 }
 
+/// Build `mcp.approval.decide` args for the TUI actor.
+pub(crate) fn approval_decide_args(approval_id: Uuid, state: ApprovalState) -> Value {
+    json!({
+        "id": approval_id,
+        "state": state.as_str(),
+        "decided_by": "tui",
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -1078,6 +1142,28 @@ mod tests {
         assert_eq!(
             message_send_args(account_id, draft_id),
             json!({ "account_id": account_id, "draft_id": draft_id })
+        );
+    }
+
+    #[test]
+    fn test_approval_decide_args_match_daemon_payload() {
+        let approval_id = Uuid::new_v4();
+
+        assert_eq!(
+            approval_decide_args(approval_id, ApprovalState::Allowed),
+            json!({
+                "id": approval_id,
+                "state": "allowed",
+                "decided_by": "tui",
+            })
+        );
+        assert_eq!(
+            approval_decide_args(approval_id, ApprovalState::Denied),
+            json!({
+                "id": approval_id,
+                "state": "denied",
+                "decided_by": "tui",
+            })
         );
     }
 }

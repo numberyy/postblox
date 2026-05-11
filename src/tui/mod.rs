@@ -20,7 +20,9 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::ipc::Topic;
-use crate::models::{AccountId, AddressList, AttachmentId, DraftId, FolderId, MessageId};
+use crate::models::{
+    AccountId, AddressList, ApprovalState, AttachmentId, DraftId, FolderId, MessageId,
+};
 use app::{ActivePane, AppState, InputMode, SyncStateUi, FLAGGED_FLAG, SEEN_FLAG};
 use command::{parse_command, Command};
 use ipc::MailboxClient;
@@ -147,6 +149,13 @@ trait Mailbox {
         query: &str,
         account_id: Option<AccountId>,
     ) -> Result<Vec<app::SearchHit>, ipc::MailboxError>;
+    async fn list_pending_approvals(&mut self)
+        -> Result<Vec<app::ApprovalItem>, ipc::MailboxError>;
+    async fn decide_approval(
+        &mut self,
+        approval_id: Uuid,
+        state: ApprovalState,
+    ) -> Result<bool, ipc::MailboxError>;
     async fn prepare_reply(
         &mut self,
         message_id: MessageId,
@@ -331,6 +340,20 @@ impl Mailbox for MailboxClient {
         MailboxClient::search(self, query, account_id).await
     }
 
+    async fn list_pending_approvals(
+        &mut self,
+    ) -> Result<Vec<app::ApprovalItem>, ipc::MailboxError> {
+        MailboxClient::list_pending_approvals(self).await
+    }
+
+    async fn decide_approval(
+        &mut self,
+        approval_id: Uuid,
+        state: ApprovalState,
+    ) -> Result<bool, ipc::MailboxError> {
+        MailboxClient::decide_approval(self, approval_id, state).await
+    }
+
     async fn prepare_reply(
         &mut self,
         message_id: MessageId,
@@ -397,7 +420,13 @@ pub async fn run_with_theme(
             path: socket_path.clone(),
             source,
         })?;
-    for topic in [Topic::MailNew, Topic::AccountSynced, Topic::SyncState] {
+    for topic in [
+        Topic::MailNew,
+        Topic::AccountSynced,
+        Topic::SyncState,
+        Topic::McpApprovalRequested,
+        Topic::McpApprovalDecided,
+    ] {
         if let Err(error) = client.subscribe(topic).await {
             tracing::warn!(error = %error, topic = ?topic, "tui subscribe failed");
         }
@@ -543,6 +572,23 @@ pub fn on_daemon_event(app: &mut AppState, event: &crate::ipc::Event) {
                 .map(|s| s.to_string());
             app.apply_sync_state(account_id, state, last_error, now);
         }
+        "mcp.approval_requested" => {
+            if let Some(approval) =
+                app::ApprovalItem::from_requested_event(&event.data, chrono::Utc::now())
+            {
+                app.merge_approval_request(approval);
+            }
+        }
+        "mcp.approval_decided" => {
+            if let Some(approval_id) = event
+                .data
+                .get("approval_id")
+                .or_else(|| event.data.get("id"))
+                .and_then(parse_uuid_value)
+            {
+                app.remove_approval_by_id(approval_id);
+            }
+        }
         _ => {}
     }
 }
@@ -592,6 +638,15 @@ async fn handle_key<C: Mailbox + ?Sized>(
         }
         InputMode::QuickSearch => return handle_quick_search_key(key, app, client).await,
         InputMode::Normal => {}
+    }
+
+    if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        open_approvals(app, client).await;
+        return false;
+    }
+
+    if app.active == ActivePane::Approvals && handle_approvals_pane_key(key, app, client).await {
+        return false;
     }
 
     if app.active == ActivePane::Search && handle_search_pane_key(key, app, client).await {
@@ -665,10 +720,16 @@ async fn handle_key<C: Mailbox + ?Sized>(
         }
         KeyCode::Right | KeyCode::Tab => {
             app.cycle_active_pane();
+            if app.active == ActivePane::Approvals {
+                refresh_approvals(app, client).await;
+            }
             false
         }
         KeyCode::Left => {
             app.cycle_active_pane_reverse();
+            if app.active == ActivePane::Approvals {
+                refresh_approvals(app, client).await;
+            }
             false
         }
         KeyCode::Char('r') => {
@@ -1570,6 +1631,8 @@ async fn execute_command<C: Mailbox + ?Sized>(
             run_flag_write(app, client, FLAGGED_FLAG, false, "Unflagged message").await;
         }
         Command::Archive => run_message_remove(app, client, MessageRemove::Archive).await,
+        Command::Approvals => open_approvals(app, client).await,
+        Command::Approve => run_approval_decision(app, client, ApprovalState::Allowed).await,
         Command::Delete => {
             if let Some(message_id) = app.selected_message_id() {
                 app.begin_delete_confirmation(message_id);
@@ -1577,6 +1640,7 @@ async fn execute_command<C: Mailbox + ?Sized>(
                 record_command_run_error(app, CommandRunError::MessageMissing);
             }
         }
+        Command::Deny => run_approval_decision(app, client, ApprovalState::Denied).await,
         Command::Move(folder) => run_message_move(app, client, &folder).await,
         Command::ThemeNext => {
             let theme = app.cycle_theme();
@@ -2042,6 +2106,100 @@ async fn handle_search_pane_key<C: Mailbox + ?Sized>(
     }
 }
 
+/// Handle keys while the Approvals pane is focused.
+async fn handle_approvals_pane_key<C: Mailbox + ?Sized>(
+    key: KeyEvent,
+    app: &mut AppState,
+    client: &mut C,
+) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.close_approvals();
+            app.set_status("Approvals closed");
+            true
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.move_approval_selection(1);
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.move_approval_selection(-1);
+            true
+        }
+        KeyCode::Char('a') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            run_approval_decision(app, client, ApprovalState::Allowed).await;
+            true
+        }
+        KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            run_approval_decision(app, client, ApprovalState::Denied).await;
+            true
+        }
+        _ => false,
+    }
+}
+
+async fn open_approvals<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
+    app.begin_approvals();
+    refresh_approvals(app, client).await;
+}
+
+async fn run_approval_decision<C: Mailbox + ?Sized>(
+    app: &mut AppState,
+    client: &mut C,
+    decision: ApprovalState,
+) {
+    if app.selected_approval().is_none() {
+        let message = "No pending approval selected".to_string();
+        app.push_toast(app::ToastKind::Warn, message.clone(), Instant::now());
+        app.set_status(message);
+        return;
+    }
+    let Some(approval) = app.remove_selected_approval() else {
+        return;
+    };
+
+    app.clear_error();
+    let action = approval_decision_verb(decision);
+    app.set_status(format!("{action} {}", approval.tool));
+    match client.decide_approval(approval.id, decision).await {
+        Ok(true) => {
+            let past = approval_decision_past_tense(decision);
+            app.push_toast(
+                app::ToastKind::Success,
+                format!("{past} {}", approval.tool),
+                Instant::now(),
+            );
+            app.set_status(format!("{past} {}", approval.tool));
+        }
+        Ok(false) => {
+            let message = "Approval was already decided".to_string();
+            app.push_toast(app::ToastKind::Warn, message.clone(), Instant::now());
+            app.set_status(message);
+            refresh_approvals(app, client).await;
+        }
+        Err(error) => {
+            record_error(app, error);
+            refresh_approvals(app, client).await;
+        }
+    }
+}
+
+fn approval_decision_verb(decision: ApprovalState) -> &'static str {
+    match decision {
+        ApprovalState::Allowed => "Approving",
+        ApprovalState::Denied => "Denying",
+        ApprovalState::Pending | ApprovalState::Expired => "Deciding",
+    }
+}
+
+fn approval_decision_past_tense(decision: ApprovalState) -> &'static str {
+    match decision {
+        ApprovalState::Allowed => "Approved",
+        ApprovalState::Denied => "Denied",
+        ApprovalState::Pending | ApprovalState::Expired => "Decided",
+    }
+}
+
 async fn save_composer<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) -> Option<DraftId> {
     let Some(draft) = app.composer_draft() else {
         app.set_status("No composer open");
@@ -2222,6 +2380,7 @@ async fn refresh_current_pane<C: Mailbox + ?Sized>(app: &mut AppState, client: &
         }
         ActivePane::Attachments => refresh_attachments(app, client).await,
         ActivePane::Search => refresh_search(app, client).await,
+        ActivePane::Approvals => refresh_approvals(app, client).await,
     }
 }
 
@@ -2243,6 +2402,7 @@ async fn refresh_after_selection_change<C: Mailbox + ?Sized>(app: &mut AppState,
         ActivePane::Details => refresh_detail(app, client).await,
         ActivePane::Attachments => refresh_attachment_preview(app, client).await,
         ActivePane::Search => {}
+        ActivePane::Approvals => {}
     }
 }
 
@@ -2254,6 +2414,27 @@ async fn refresh_search<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C)
     };
     let scope = app.search_scope_account();
     submit_search(app, client, query, scope).await;
+}
+
+async fn refresh_approvals<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
+    app.approvals.pending = true;
+    app.set_status("Loading approvals");
+    match client.list_pending_approvals().await {
+        Ok(approvals) => {
+            let count = approvals.len();
+            app.clear_error();
+            app.apply_approvals(approvals);
+            if count == 0 {
+                app.set_status("No pending approvals");
+            } else {
+                app.set_status(format!("{count} pending approval(s)"));
+            }
+        }
+        Err(error) => {
+            app.approvals.pending = false;
+            record_error(app, error);
+        }
+    }
 }
 
 async fn refresh_accounts<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
@@ -2511,6 +2692,8 @@ mod tests {
         UpdateDraft(DraftId, app::ComposerDraft),
         SendDraft(AccountId, DraftId),
         Search(String, Option<AccountId>),
+        ListPendingApprovals,
+        DecideApproval(Uuid, ApprovalState),
         PrepareReply(MessageId, bool),
         PrepareForward(MessageId),
         FetchAttachmentForForward(AttachmentId),
@@ -2530,6 +2713,7 @@ mod tests {
         draft_id: Option<DraftId>,
         send_message_id: Option<String>,
         search_hits: Vec<app::SearchHit>,
+        approvals: Vec<app::ApprovalItem>,
         reply_prepared: Option<ipc::ReplyPrepared>,
         forward_prepared: Option<ipc::ForwardPrepared>,
         forward_attachment_bytes: Option<ipc::ForwardAttachmentBytes>,
@@ -2544,6 +2728,8 @@ mod tests {
         fail_draft: bool,
         fail_send: bool,
         fail_search: bool,
+        fail_list_approvals: bool,
+        fail_decide_approval: bool,
         fail_prepare_reply: bool,
         fail_prepare_forward: bool,
         fail_fetch_attachment_for_forward: bool,
@@ -2753,6 +2939,30 @@ mod tests {
                 Err(server_error("search"))
             } else {
                 Ok(self.search_hits.clone())
+            }
+        }
+
+        async fn list_pending_approvals(
+            &mut self,
+        ) -> Result<Vec<app::ApprovalItem>, ipc::MailboxError> {
+            self.calls.push(Call::ListPendingApprovals);
+            if self.fail_list_approvals {
+                Err(server_error("mcp.approval.list"))
+            } else {
+                Ok(self.approvals.clone())
+            }
+        }
+
+        async fn decide_approval(
+            &mut self,
+            approval_id: Uuid,
+            state: ApprovalState,
+        ) -> Result<bool, ipc::MailboxError> {
+            self.calls.push(Call::DecideApproval(approval_id, state));
+            if self.fail_decide_approval {
+                Err(server_error("mcp.approval.decide"))
+            } else {
+                Ok(true)
             }
         }
 
@@ -2978,6 +3188,16 @@ mod tests {
         }
     }
 
+    fn approval_item(id: Uuid, tool: &str) -> app::ApprovalItem {
+        app::ApprovalItem {
+            id,
+            tool: tool.into(),
+            args_summary: "subject=Hello".into(),
+            summary: Some("send draft".into()),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
     fn app_with_threaded_messages() -> AppState {
         let thread_id = ThreadId::new();
         let mut app = AppState::default();
@@ -3184,6 +3404,190 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_execute_command_approvals_opens_and_refreshes_pane() {
+        let approval_id = Uuid::new_v4();
+        let mut app = AppState {
+            active: ActivePane::Folders,
+            ..Default::default()
+        };
+        let mut client = MockMailbox {
+            approvals: vec![approval_item(approval_id, "postblox_message_send")],
+            ..Default::default()
+        };
+
+        execute_command(Command::Approvals, &mut app, &mut client).await;
+
+        assert_eq!(app.active, ActivePane::Approvals);
+        assert_eq!(app.approvals.previous_pane, ActivePane::Folders);
+        assert_eq!(
+            app.selected_approval().map(|approval| approval.id),
+            Some(approval_id)
+        );
+        assert_eq!(client.calls, vec![Call::ListPendingApprovals]);
+        assert_eq!(app.status, "1 pending approval(s)");
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_approve_and_deny_remove_selected_locally() {
+        let allow_id = Uuid::new_v4();
+        let deny_id = Uuid::new_v4();
+        let mut app = AppState {
+            active: ActivePane::Approvals,
+            ..Default::default()
+        };
+        let now = chrono::Utc::now();
+        let mut allow = approval_item(allow_id, "postblox_message_send");
+        allow.created_at = now;
+        let mut deny = approval_item(deny_id, "postblox_draft_delete");
+        deny.created_at = now - chrono::Duration::seconds(1);
+        app.apply_approvals(vec![allow, deny]);
+        let mut client = MockMailbox::default();
+
+        execute_command(Command::Approve, &mut app, &mut client).await;
+        execute_command(Command::Deny, &mut app, &mut client).await;
+
+        assert!(app.approvals.items.is_empty());
+        assert_eq!(
+            client.calls,
+            vec![
+                Call::DecideApproval(allow_id, ApprovalState::Allowed),
+                Call::DecideApproval(deny_id, ApprovalState::Denied),
+            ]
+        );
+        assert_eq!(app.status, "Denied postblox_draft_delete");
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_approve_empty_list_is_polite_noop() {
+        let mut app = AppState {
+            active: ActivePane::Approvals,
+            ..Default::default()
+        };
+        let mut client = MockMailbox::default();
+
+        execute_command(Command::Approve, &mut app, &mut client).await;
+
+        assert_eq!(app.status, "No pending approval selected");
+        assert!(app.toasts.back().is_some_and(|toast| {
+            toast.kind == app::ToastKind::Warn && toast.text == "No pending approval selected"
+        }));
+        assert!(client.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_ctrl_p_opens_approvals_from_normal_pane() {
+        let approval_id = Uuid::new_v4();
+        let mut app = AppState {
+            active: ActivePane::Conversations,
+            ..Default::default()
+        };
+        let mut client = MockMailbox {
+            approvals: vec![approval_item(approval_id, "postblox_message_send")],
+            ..Default::default()
+        };
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.active, ActivePane::Approvals);
+        assert_eq!(app.approvals.previous_pane, ActivePane::Conversations);
+        assert_eq!(
+            app.selected_approval().map(|approval| approval.id),
+            Some(approval_id)
+        );
+        assert_eq!(client.calls, vec![Call::ListPendingApprovals]);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_tab_refreshes_approvals_when_cycle_enters_pane() {
+        let approval_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        app.begin_search("pending approval", None);
+        app.apply_search_hits(Vec::new());
+        let mut client = MockMailbox {
+            approvals: vec![approval_item(approval_id, "postblox_message_send")],
+            ..Default::default()
+        };
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.active, ActivePane::Approvals);
+        assert_eq!(app.approvals.previous_pane, ActivePane::Search);
+        assert_eq!(
+            app.selected_approval().map(|approval| approval.id),
+            Some(approval_id)
+        );
+        assert_eq!(client.calls, vec![Call::ListPendingApprovals]);
+    }
+
+    #[tokio::test]
+    async fn test_handle_key_approvals_escape_returns_previous_pane() {
+        let mut app = AppState {
+            active: ActivePane::Folders,
+            ..Default::default()
+        };
+        app.begin_approvals();
+        let mut client = MockMailbox::default();
+
+        assert!(
+            !handle_key(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut app,
+                &mut client,
+            )
+            .await
+        );
+
+        assert_eq!(app.active, ActivePane::Folders);
+        assert_eq!(app.status, "Approvals closed");
+    }
+
+    #[test]
+    fn test_on_daemon_event_merges_requested_and_removes_decided_approval() {
+        let approval_id = Uuid::new_v4();
+        let mut app = AppState::default();
+        let requested = crate::ipc::Event {
+            sub: 1,
+            topic: Topic::McpApprovalRequested.as_str().into(),
+            data: json!({
+                "approval_id": approval_id,
+                "tool": "postblox_message_send",
+                "args": {"subject": "Hello"},
+                "summary": "send hello",
+                "state": "pending",
+            }),
+        };
+
+        on_daemon_event(&mut app, &requested);
+
+        assert_eq!(app.approvals.items.len(), 1);
+        assert_eq!(app.approvals.items[0].id, approval_id);
+        assert_eq!(app.approvals.items[0].args_summary, "subject=Hello");
+
+        let decided = crate::ipc::Event {
+            sub: 1,
+            topic: Topic::McpApprovalDecided.as_str().into(),
+            data: json!({"approval_id": approval_id, "state": "allowed"}),
+        };
+        on_daemon_event(&mut app, &decided);
+
+        assert!(app.approvals.items.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_handle_key_theme_shortcut_cycles_theme() {
         let mut app = AppState::default();
         let mut client = MockMailbox::default();
@@ -3372,6 +3776,7 @@ mod tests {
         for expected in [
             ActivePane::Folders,
             ActivePane::Conversations,
+            ActivePane::Approvals,
             ActivePane::Accounts,
             ActivePane::Folders,
         ] {
@@ -3395,6 +3800,7 @@ mod tests {
         for expected in [
             ActivePane::Folders,
             ActivePane::Conversations,
+            ActivePane::Approvals,
             ActivePane::Accounts,
             ActivePane::Folders,
         ] {
@@ -3418,6 +3824,7 @@ mod tests {
         for expected in [
             ActivePane::Folders,
             ActivePane::Conversations,
+            ActivePane::Approvals,
             ActivePane::Accounts,
             ActivePane::Folders,
         ] {
@@ -3441,6 +3848,7 @@ mod tests {
         for expected in [
             ActivePane::Folders,
             ActivePane::Conversations,
+            ActivePane::Approvals,
             ActivePane::Accounts,
             ActivePane::Folders,
         ] {
@@ -3462,10 +3870,11 @@ mod tests {
         let mut client = MockMailbox::default();
 
         for expected in [
+            ActivePane::Approvals,
             ActivePane::Conversations,
             ActivePane::Folders,
             ActivePane::Accounts,
-            ActivePane::Conversations,
+            ActivePane::Approvals,
         ] {
             assert!(
                 !handle_key(
@@ -3485,10 +3894,11 @@ mod tests {
         let mut client = MockMailbox::default();
 
         for expected in [
+            ActivePane::Approvals,
             ActivePane::Conversations,
             ActivePane::Folders,
             ActivePane::Accounts,
-            ActivePane::Conversations,
+            ActivePane::Approvals,
         ] {
             assert!(
                 !handle_key(
