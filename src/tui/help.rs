@@ -56,10 +56,9 @@ pub(crate) struct HelpEntry {
     /// One-line summary describing the effect of the chord.
     pub(crate) summary: &'static str,
     /// Pane or mode the chord applies in. Drives section grouping in
-    /// the overlay and the drift tests; Slice 2 will use it to filter
-    /// rows when the help overlay is opened with a specific pane
-    /// focused. Read by drift tests only today.
-    #[allow(dead_code)]
+    /// the overlay and the per-pane filter that promotes rows
+    /// relevant to the focused pane to the top of the help overlay
+    /// (see [`super::render::render_help_overlay`]).
     pub(crate) applies_to: Applicability,
 }
 

@@ -20,7 +20,7 @@ use super::app::{
     human_size, ActivePane, AppState, ComposeField, InputMode, SyncStateUi, ToastKind, ICON_ERROR,
     ICON_IDLE, ICON_POLLING, ICON_SYNCING, MAX_COMPOSE_ATTACHMENT_BYTES, MAX_SELECTED_ERROR_CHARS,
 };
-use super::help::{HelpEntry, HELP_ROWS};
+use super::help::{Applicability, HelpEntry, HELP_ROWS};
 use super::theme::Theme;
 
 /// Footer text rendered along the bottom border of the modal help
@@ -1125,7 +1125,8 @@ pub(crate) fn render_help_overlay(
     theme: &Theme,
 ) {
     let overlay_area = help_overlay_rect(area);
-    let lines = build_help_lines();
+    let active = active_applicability_set(app);
+    let lines = build_help_lines(active, pane_label_for_help(app), theme);
     let total_lines = lines.len();
     // Inner viewport height = block height minus two border rows.
     let viewport_height = overlay_area.height.saturating_sub(2) as usize;
@@ -1187,32 +1188,207 @@ fn help_overlay_rect(area: Rect) -> Rect {
 }
 
 /// Render [`HELP_ROWS`] into the line list shown inside the overlay.
-fn build_help_lines() -> Vec<Line<'static>> {
+///
+/// Rows are partitioned into two groups:
+///   1. `Global` rows + rows whose `applies_to` is contained in
+///      `active` — rendered first, with bold section headers in
+///      `theme.command` so they read as "active here".
+///   2. Every other section — rendered below a `── Other sections ──`
+///      separator with muted styling. The user can still scroll to
+///      them; the rest group exists for self-discovery.
+///
+/// Section ordering within each group preserves the canonical order
+/// in `HELP_ROWS`. Empty section headers are never emitted.
+fn build_help_lines(
+    active: &'static [Applicability],
+    pane_label: &str,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut first = true;
+
+    // Filter label, immediately under the title.
+    let filter_label = if active.is_empty() {
+        "Showing global rows · scroll for all".to_string()
+    } else {
+        format!("Showing rows active in {pane_label} · scroll for all")
+    };
+    lines.push(Line::from(Span::styled(filter_label, theme.command)));
+    lines.push(Line::raw(""));
+
+    let is_active = |entry: &HelpEntry| -> bool {
+        entry.applies_to == Applicability::Global || active.contains(&entry.applies_to)
+    };
+
+    // Active group: sections with at least one active or Global row.
+    let mut first_active = true;
+    let mut wrote_active = false;
     for section in HELP_ROWS {
-        if !first {
+        let any_active = section.entries.iter().any(is_active);
+        if !any_active {
+            continue;
+        }
+        if !first_active {
             lines.push(Line::raw(""));
         }
-        first = false;
+        first_active = false;
+        wrote_active = true;
         lines.push(Line::from(Span::styled(
             section.title,
-            ratatui::style::Style::default().add_modifier(Modifier::BOLD),
+            theme.command.add_modifier(Modifier::BOLD),
         )));
         for entry in section.entries {
-            lines.push(help_entry_line(entry));
+            if is_active(entry) {
+                lines.push(help_entry_line(entry, theme.text));
+            }
         }
     }
+
+    // Rest group: every section that has at least one non-active row.
+    let mut first_rest = true;
+    let mut wrote_separator = false;
+    for section in HELP_ROWS {
+        let any_rest = section.entries.iter().any(|entry| !is_active(entry));
+        if !any_rest {
+            continue;
+        }
+        if !wrote_separator {
+            if wrote_active {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::from(Span::styled(
+                "── Other sections ──",
+                theme.muted,
+            )));
+            wrote_separator = true;
+        }
+        if !first_rest {
+            lines.push(Line::raw(""));
+        }
+        first_rest = false;
+        lines.push(Line::from(Span::styled(section.title, theme.muted)));
+        for entry in section.entries {
+            if !is_active(entry) {
+                lines.push(help_entry_line(entry, theme.muted));
+            }
+        }
+    }
+
     lines.push(Line::raw(""));
-    lines.push(Line::raw(
+    lines.push(Line::styled(
         "Source: src/tui/help.rs::HELP_ROWS — keep parser & overlay in sync.",
+        theme.muted,
     ));
     lines
 }
 
-/// Format a single [`HelpEntry`] as `  <keys>  —  <summary>`.
-fn help_entry_line(entry: &HelpEntry) -> Line<'static> {
-    Line::raw(format!("  {}  —  {}", entry.keys, entry.summary))
+/// Format a single [`HelpEntry`] as `  <keys>  —  <summary>` with the
+/// caller-supplied style. Splitting keys + summary into separate spans
+/// lets the rest group cascade `theme.muted` cleanly while keeping
+/// the active group's row styling identical to the legacy renderer.
+fn help_entry_line(entry: &HelpEntry, style: ratatui::style::Style) -> Line<'static> {
+    Line::from(vec![Span::styled(
+        format!("  {}  —  {}", entry.keys, entry.summary),
+        style,
+    )])
+}
+
+/// Return the [`Applicability`] variants relevant to the focused pane
+/// (and any active input mode). `Global` is implicit and always
+/// included by [`build_help_lines`]; the slice never contains it.
+///
+/// The slice is `&'static`, so this never allocates. The rest of the
+/// codebase relies on `Applicability: Copy` so callers can pass it
+/// around without cloning.
+fn active_applicability_set(app: &AppState) -> &'static [Applicability] {
+    // Input modes are additive: command bar / quick-search / composer
+    // can be open over a normal-mode pane focus. Resolve the
+    // input-mode component first, then fall through to the pane.
+    let mode_overlay: Option<Applicability> = if app.composer.is_some() {
+        Some(Applicability::Composer)
+    } else {
+        match app.mode {
+            InputMode::Command => Some(Applicability::CommandBar),
+            InputMode::QuickSearch => Some(Applicability::QuickSearch),
+            _ => None,
+        }
+    };
+
+    let pane = pane_applicability(app);
+
+    match (mode_overlay, pane) {
+        (None, None) => &[],
+        (None, Some(Applicability::Conversations)) => &[Applicability::Conversations],
+        (None, Some(Applicability::ConversationsDrafts)) => &[Applicability::ConversationsDrafts],
+        (None, Some(Applicability::Approvals)) => &[Applicability::Approvals],
+        (None, Some(Applicability::Details)) => &[Applicability::Details],
+        (None, Some(Applicability::Attachments)) => &[Applicability::Attachments],
+        (None, Some(Applicability::QuickSearch)) => &[Applicability::QuickSearch],
+        (Some(Applicability::Composer), None) => &[Applicability::Composer],
+        (Some(Applicability::Composer), Some(Applicability::Details)) => {
+            &[Applicability::Composer, Applicability::Details]
+        }
+        (Some(Applicability::Composer), Some(Applicability::Conversations)) => {
+            &[Applicability::Composer, Applicability::Conversations]
+        }
+        (Some(Applicability::Composer), Some(Applicability::ConversationsDrafts)) => {
+            &[Applicability::Composer, Applicability::ConversationsDrafts]
+        }
+        (Some(Applicability::Composer), Some(Applicability::Attachments)) => {
+            &[Applicability::Composer, Applicability::Attachments]
+        }
+        (Some(Applicability::Composer), Some(Applicability::Approvals)) => {
+            &[Applicability::Composer, Applicability::Approvals]
+        }
+        (Some(Applicability::Composer), Some(Applicability::QuickSearch)) => {
+            &[Applicability::Composer, Applicability::QuickSearch]
+        }
+        (Some(Applicability::CommandBar), None) => &[Applicability::CommandBar],
+        (Some(Applicability::CommandBar), Some(_)) => &[Applicability::CommandBar],
+        (Some(Applicability::QuickSearch), None) => &[Applicability::QuickSearch],
+        (Some(Applicability::QuickSearch), Some(_)) => &[Applicability::QuickSearch],
+        // Unreachable: pane_applicability never returns Composer /
+        // CommandBar / Global, and mode_overlay only sets the three
+        // input-mode variants above. The wildcard keeps the match
+        // exhaustive without enumerating every illegal combination.
+        _ => &[],
+    }
+}
+
+/// Pane-only mapping consumed by [`active_applicability_set`].
+/// Returns `None` for panes whose chords are entirely covered by
+/// `Global` (Accounts, Folders). Approvals and Drafts share the
+/// Conversations pane but resolve to distinct help rows.
+fn pane_applicability(app: &AppState) -> Option<Applicability> {
+    match app.active {
+        ActivePane::Accounts | ActivePane::Folders => None,
+        ActivePane::Conversations => {
+            if app.approvals_folder_selected() {
+                Some(Applicability::Approvals)
+            } else if app.drafts_pane_active() {
+                Some(Applicability::ConversationsDrafts)
+            } else {
+                Some(Applicability::Conversations)
+            }
+        }
+        ActivePane::Details => Some(Applicability::Details),
+        ActivePane::Attachments => Some(Applicability::Attachments),
+        ActivePane::Search => Some(Applicability::QuickSearch),
+    }
+}
+
+/// Label rendered into the filter line. Reuses
+/// [`pane_label_for_status`] for normal-mode panes; when the composer
+/// is open the status pane label is irrelevant, so substitute
+/// `Composer` so the filter line reads naturally.
+fn pane_label_for_help(app: &AppState) -> &'static str {
+    if app.composer.is_some() {
+        return "Composer";
+    }
+    match app.mode {
+        InputMode::Command => "Command bar",
+        InputMode::QuickSearch => "Quick search",
+        _ => pane_label_for_status(app),
+    }
 }
 
 /// Build the per-account icon prefix shown at the start of the normal-mode
@@ -2520,5 +2696,208 @@ mod tests {
         let buffer = render_to_buffer(&app);
         let text = buffer_text(&buffer);
         assert!(!text.contains(HELP_TITLE_TEXT));
+    }
+
+    fn render_to_buffer_at(app: &AppState, width: u16, height: u16) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// Build an `AppState` with the requested focused pane and an
+    /// optional regular-mail folder so the conversations
+    /// `Conversations` mapping resolves to the right applicability.
+    /// Avoids `clippy::field_reassign_with_default` triggering on the
+    /// otherwise lone `app.active = …` lines below.
+    fn app_with_active_pane(active: ActivePane, role: Option<&str>) -> AppState {
+        let mut app = AppState::default();
+        if let Some(role) = role {
+            app.apply_folders(vec![FolderItem {
+                kind: FolderKind::Mail,
+                id: FolderId::new(),
+                name: "INBOX".into(),
+                role: role.into(),
+            }]);
+        }
+        app.active = active;
+        app
+    }
+
+    #[test]
+    fn test_active_applicability_set_for_each_active_pane() {
+        let app = app_with_active_pane(ActivePane::Accounts, None);
+        assert!(active_applicability_set(&app).is_empty());
+
+        let app = app_with_active_pane(ActivePane::Folders, None);
+        assert!(active_applicability_set(&app).is_empty());
+
+        // Conversations (regular folder).
+        let app = app_with_active_pane(ActivePane::Conversations, Some("inbox"));
+        assert_eq!(
+            active_applicability_set(&app),
+            &[Applicability::Conversations]
+        );
+
+        // Conversations + drafts folder.
+        let app = app_with_active_pane(ActivePane::Conversations, Some("drafts"));
+        assert_eq!(
+            active_applicability_set(&app),
+            &[Applicability::ConversationsDrafts]
+        );
+
+        // Conversations + approvals virtual folder. select_approvals_folder()
+        // sets `active = Conversations` internally, so a manual reassignment
+        // would trigger the field-reassign lint.
+        let mut app_approvals = AppState::default();
+        app_approvals.select_approvals_folder();
+        assert_eq!(
+            active_applicability_set(&app_approvals),
+            &[Applicability::Approvals]
+        );
+
+        let app = app_with_active_pane(ActivePane::Details, None);
+        assert_eq!(active_applicability_set(&app), &[Applicability::Details]);
+
+        let app = app_with_active_pane(ActivePane::Attachments, None);
+        assert_eq!(
+            active_applicability_set(&app),
+            &[Applicability::Attachments]
+        );
+
+        let app = app_with_active_pane(ActivePane::Search, None);
+        assert_eq!(
+            active_applicability_set(&app),
+            &[Applicability::QuickSearch]
+        );
+    }
+
+    #[test]
+    fn test_active_applicability_set_with_composer_open_adds_composer() {
+        let mut app = app_with_active_pane(ActivePane::Details, None);
+        app.enter_composer(AccountId::new());
+        let set = active_applicability_set(&app);
+        assert!(
+            set.contains(&Applicability::Composer),
+            "composer not in active set: {set:?}"
+        );
+        assert!(
+            set.contains(&Applicability::Details),
+            "details not in active set: {set:?}"
+        );
+    }
+
+    #[test]
+    fn test_active_applicability_set_command_mode_adds_command_bar() {
+        let mut app = AppState::default();
+        app.enter_command_mode();
+        let set = active_applicability_set(&app);
+        assert!(
+            set.contains(&Applicability::CommandBar),
+            "command bar not in active set: {set:?}"
+        );
+    }
+
+    /// Render the help overlay directly into a buffer, bypassing the
+    /// background panes. Avoids ambiguity in `find()` calls — the
+    /// only text in the buffer is the overlay itself, so substring
+    /// search returns the overlay position, not a background pane
+    /// title like "Conversations" or "Attachments" that the normal
+    /// frame also paints. Returns a buffer tall enough to hold every
+    /// help row even with wrapping.
+    fn render_help_only_to_buffer(app: &AppState, width: u16, height: u16) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let theme = app.theme.theme();
+                render_help_overlay(frame, frame.area(), app, &theme);
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn test_render_help_overlay_promotes_active_section_for_attachments() {
+        let mut app = app_with_active_pane(ActivePane::Attachments, None);
+        app.open_help();
+        // Direct overlay render so background pane titles (which also
+        // contain words like "Conversations" or "Detail") can't move
+        // the first match. Tall viewport (~200 rows) keeps every
+        // section in-frame so both the active and rest groups
+        // contribute to the assertion below.
+        let buffer = render_help_only_to_buffer(&app, 80, 200);
+        let text = buffer_text(&buffer);
+
+        let attachments_pos = text
+            .find("Attachments")
+            .expect("Attachments section title missing");
+        let composer_pos = text
+            .find("Composer")
+            .expect("Composer section title missing");
+        assert!(
+            attachments_pos < composer_pos,
+            "Attachments must appear above Composer when Attachments pane is focused:\n{text}"
+        );
+    }
+
+    #[test]
+    fn test_render_help_overlay_shows_filtered_label() {
+        let mut app = AppState::default();
+        app.enter_composer(AccountId::new());
+        // Composer guard blocks open_help; force the overlay open
+        // directly so we exercise the renderer when the composer is
+        // up. handle_help_key paths intentionally don't reach this
+        // because F1 toggles via toggle_help inside the composer.
+        app.help_open = true;
+        let buffer = render_to_buffer_at(&app, 80, 30);
+        let text = buffer_text(&buffer);
+
+        assert!(
+            text.contains("Showing rows active in Composer"),
+            "filtered label missing for composer focus:\n{text}"
+        );
+    }
+
+    #[test]
+    fn test_render_help_overlay_muted_rest_group_still_lists_unrelated_sections() {
+        let mut app = app_with_active_pane(ActivePane::Attachments, None);
+        app.open_help();
+        let buffer = render_help_only_to_buffer(&app, 80, 200);
+        let text = buffer_text(&buffer);
+
+        let attachments_pos = text
+            .find("Attachments")
+            .expect("Attachments section title missing");
+        // "Conversations (mail folders)" is unique to the help
+        // overlay; the bare "Conversations" word also appears in
+        // background pane chrome and would skew the position check.
+        let conversations_pos = text.find("Conversations (mail folders)").expect(
+            "Conversations (mail folders) section must still render below the active group",
+        );
+        assert!(
+            conversations_pos > attachments_pos,
+            "Conversations (mail folders) must appear below Attachments:\n{text}"
+        );
+    }
+
+    #[test]
+    fn test_render_help_overlay_bounded_scroll_in_small_viewport() {
+        // 80×30 is the spec-stated render target. The overlay must
+        // never panic and the scroll offset must stay clamped to a
+        // sensible value even when the help body overflows the
+        // viewport. Exercising the full `render` path here also pins
+        // the clamp behaviour through `AppState::help_scroll`.
+        let mut app = app_with_active_pane(ActivePane::Attachments, None);
+        app.open_help();
+        // Try a scroll past the visible content — the renderer
+        // clamps internally for display.
+        app.scroll_help_down(10_000);
+        let buffer = render_to_buffer_at(&app, 80, 30);
+        let text = buffer_text(&buffer);
+        assert!(
+            text.contains(HELP_TITLE_TEXT),
+            "title must remain visible regardless of scroll:\n{text}"
+        );
     }
 }
