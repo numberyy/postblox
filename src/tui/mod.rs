@@ -2975,6 +2975,25 @@ async fn refresh_messages<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut 
         app.set_status("No folder selected");
         return;
     };
+    if app.error.is_none() {
+        if let Some(account_id) = app.selected_account_id() {
+            if let Some(snapshot) = app.folder_cache_lookup(account_id, folder_id, Instant::now()) {
+                app.restore_folder_snapshot(snapshot);
+                let message_count = app.folder_messages.len();
+                let thread_count = app.threads.len();
+                app.set_status(format!(
+                    "Loaded cached {thread_count} conversation(s), {message_count} message(s)"
+                ));
+                // Slice B is a conservative cache-hit fast path: the
+                // TUI event loop owns one mutable MailboxClient, so the
+                // RFC's true background revalidate waits for Slice C.
+                if app.selected_message_id().is_some() {
+                    refresh_detail(app, client).await;
+                }
+                return;
+            }
+        }
+    }
 
     app.set_status("Loading messages");
     match client.list_messages(folder_id).await {
@@ -3721,6 +3740,13 @@ mod tests {
         }
     }
 
+    fn list_messages_call_count(calls: &[Call], folder_id: FolderId) -> usize {
+        calls
+            .iter()
+            .filter(|call| matches!(call, Call::ListMessages(id) if *id == folder_id))
+            .count()
+    }
+
     fn app_with_threaded_messages() -> AppState {
         let thread_id = ThreadId::new();
         let mut app = AppState::default();
@@ -3761,13 +3787,14 @@ mod tests {
         execute_command(Command::StartSync, &mut app, &mut client).await;
         execute_command(Command::StopSync, &mut app, &mut client).await;
 
+        // Slice B deliberately reuses the cache on the second refresh;
+        // manual-refresh invalidation belongs to Slice C.
         assert_eq!(
             client.calls,
             vec![
                 Call::StartSync(account_id, "INBOX".into()),
                 Call::ListMessages(folder_id),
                 Call::StopSync(account_id, "INBOX".into()),
-                Call::ListMessages(folder_id),
             ]
         );
         assert_eq!(app.status, "Stopped sync for INBOX");
@@ -3840,6 +3867,10 @@ mod tests {
             thread_message_item(thread_id, "Reply", "2026-05-07 10:00", vec!["\\Seen"]),
             thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]),
         ]);
+        let expired_at = Instant::now() + app::FOLDER_CACHE_TTL + Duration::from_millis(1);
+        assert!(app
+            .folder_cache_lookup(account_id, folder_id, expired_at)
+            .is_none());
         app.active = ActivePane::Conversations;
         let mut first = message_item(MessageId::new(), vec!["\\Seen"]);
         first.date = "2026-05-07 12:00".into();
@@ -3871,6 +3902,122 @@ mod tests {
         );
         assert_eq!(app.threads.len(), 2);
         assert_eq!(app.detail.as_ref().unwrap().id, first.id);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_messages_cache_hit_restores_without_list_ipc() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let thread_id = ThreadId::new();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        let older = thread_message_item(thread_id, "Start", "2026-05-07 09:00", vec!["\\Seen"]);
+        let newer = thread_message_item(thread_id, "Reply", "2026-05-07 10:00", vec![]);
+        app.apply_folder_messages(vec![newer.clone(), older.clone()]);
+        app.folder_messages.clear();
+        app.threads.clear();
+        app.messages.clear();
+        let mut client = MockMailbox {
+            detail: Some(detail_for(&newer)),
+            ..Default::default()
+        };
+
+        refresh_messages(&mut app, &mut client).await;
+
+        assert_eq!(
+            app.folder_messages
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![newer.id, older.id]
+        );
+        assert_eq!(
+            app.messages
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![older.id, newer.id]
+        );
+        assert_eq!(app.detail.as_ref().map(|detail| detail.id), Some(newer.id));
+        assert_eq!(list_messages_call_count(&client.calls, folder_id), 0);
+        assert!(client.calls.contains(&Call::GetMessage(newer.id)));
+    }
+
+    #[tokio::test]
+    async fn test_refresh_messages_cache_miss_lists_and_stores() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        let message = message_item(MessageId::new(), vec!["\\Seen"]);
+        let mut client = MockMailbox {
+            messages: vec![message.clone()],
+            detail: Some(detail_for(&message)),
+            ..Default::default()
+        };
+
+        refresh_messages(&mut app, &mut client).await;
+
+        assert_eq!(list_messages_call_count(&client.calls, folder_id), 1);
+        assert!(app
+            .folder_cache_lookup(account_id, folder_id, Instant::now())
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_messages_expired_cache_lists_again() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        app.apply_folder_messages(vec![message_item(MessageId::new(), vec!["\\Seen"])]);
+        let expired_at = Instant::now() + app::FOLDER_CACHE_TTL + Duration::from_millis(1);
+        assert!(app
+            .folder_cache_lookup(account_id, folder_id, expired_at)
+            .is_none());
+        let fresh = message_item(MessageId::new(), vec!["\\Seen"]);
+        let mut client = MockMailbox {
+            messages: vec![fresh.clone()],
+            detail: Some(detail_for(&fresh)),
+            ..Default::default()
+        };
+
+        refresh_messages(&mut app, &mut client).await;
+
+        assert_eq!(list_messages_call_count(&client.calls, folder_id), 1);
+        assert_eq!(app.folder_messages[0].id, fresh.id);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_messages_error_pending_bypasses_cache() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        app.apply_folder_messages(vec![message_item(MessageId::new(), vec!["\\Seen"])]);
+        app.set_error("sticky");
+        let fresh = message_item(MessageId::new(), vec!["\\Seen"]);
+        let mut client = MockMailbox {
+            messages: vec![fresh.clone()],
+            detail: Some(detail_for(&fresh)),
+            ..Default::default()
+        };
+
+        refresh_messages(&mut app, &mut client).await;
+
+        assert_eq!(list_messages_call_count(&client.calls, folder_id), 1);
+        assert_eq!(app.folder_messages[0].id, fresh.id);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_messages_approvals_folder_still_refreshes_approvals() {
+        let account_id = AccountId::new();
+        let folder_id = FolderId::new();
+        let mut app = app_with_account_folder(account_id, folder_id);
+        assert!(app.select_approvals_folder());
+        let mut client = MockMailbox::default();
+
+        refresh_messages(&mut app, &mut client).await;
+
+        assert_eq!(client.calls, vec![Call::ListPendingApprovals]);
+        assert_eq!(list_messages_call_count(&client.calls, folder_id), 0);
+        assert_eq!(app.status, "No pending approvals");
     }
 
     #[tokio::test]

@@ -2043,12 +2043,9 @@ impl AppState {
         self.refresh_visible_messages();
         self.normalize_active_pane();
         self.clear_detail_state();
-        if let (Some(account_id), Some(folder_id)) = (selected_account_id, selected_folder_id) {
-            self.folder_cache_store(account_id, folder_id, Instant::now());
-        }
+        self.store_selected_folder_cache(selected_account_id, selected_folder_id);
     }
 
-    #[allow(dead_code)]
     pub(crate) fn folder_cache_lookup(
         &mut self,
         account_id: AccountId,
@@ -2074,6 +2071,16 @@ impl AppState {
         };
         self.folder_cache
             .store(account_id, folder_id, snapshot, now);
+    }
+
+    fn store_selected_folder_cache(
+        &mut self,
+        account_id: Option<AccountId>,
+        folder_id: Option<FolderId>,
+    ) {
+        if let (Some(account_id), Some(folder_id)) = (account_id, folder_id) {
+            self.folder_cache_store(account_id, folder_id, Instant::now());
+        }
     }
 
     #[allow(dead_code)]
@@ -3372,6 +3379,7 @@ impl AppState {
             self.clear_detail_state();
         }
         self.normalize_active_pane();
+        self.store_selected_folder_cache(self.selected_account_id(), self.selected_folder_id());
         true
     }
 
@@ -3384,9 +3392,9 @@ impl AppState {
         self.selected_message = snapshot.selected_message;
         clamp_index(&mut self.selected_message, self.messages.len());
         self.normalize_active_pane();
+        self.store_selected_folder_cache(self.selected_account_id(), self.selected_folder_id());
     }
 
-    #[allow(dead_code)]
     pub(crate) fn restore_folder_snapshot(&mut self, snapshot: FolderSnapshot) {
         let selected_thread_key = snapshot.selected_thread_key;
         let selected_message_id = snapshot.selected_message_id;
@@ -3423,12 +3431,14 @@ impl AppState {
 
     pub(crate) fn apply_message_flags(&mut self, message_id: MessageId, flags: Vec<String>) {
         let selected_thread = self.selected_thread().map(|thread| thread.key);
+        let mut folder_changed = false;
         if let Some(message) = self
             .folder_messages
             .iter_mut()
             .find(|message| message.id == message_id)
         {
             message.flags = flags.clone();
+            folder_changed = true;
         }
         if let Some(message) = self
             .messages
@@ -3445,6 +3455,9 @@ impl AppState {
         if !self.folder_messages.is_empty() {
             self.rebuild_threads(selected_thread);
             self.refresh_visible_messages();
+        }
+        if folder_changed {
+            self.store_selected_folder_cache(self.selected_account_id(), self.selected_folder_id());
         }
     }
 
@@ -4038,12 +4051,14 @@ impl AppState {
 
     fn update_message_flags_from_detail(&mut self, detail: &MessageDetail) {
         let selected_thread = self.selected_thread().map(|thread| thread.key);
+        let mut folder_changed = false;
         if let Some(message) = self
             .folder_messages
             .iter_mut()
             .find(|message| message.id == detail.id)
         {
             message.flags = detail.flags.clone();
+            folder_changed = true;
         }
         if let Some(message) = self
             .messages
@@ -4055,6 +4070,9 @@ impl AppState {
         if !self.folder_messages.is_empty() {
             self.rebuild_threads(selected_thread);
             self.refresh_visible_messages();
+        }
+        if folder_changed {
+            self.store_selected_folder_cache(self.selected_account_id(), self.selected_folder_id());
         }
     }
 
