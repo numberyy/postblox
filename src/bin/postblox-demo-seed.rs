@@ -52,13 +52,16 @@ use postblox::db;
 use postblox::ipc::client::Client;
 use postblox::models::{AccountId, AddressList, FolderId, FolderRole, MessageFlags, ThreadId};
 
+/// One demo INBOX thread: a realistic `(subject, opening body)` pair.
+type DemoTopic = (&'static str, &'static str);
+
 /// One demo account with the folder layout we populate per seed run.
 struct DemoAccount {
     email: &'static str,
     display_name: &'static str,
-    /// Per-account thread "topics" — each topic seeds 3 INBOX messages
-    /// chained as a thread, so `topics.len() * 3 = INBOX message count`.
-    topics: &'static [&'static str],
+    /// Per-account INBOX threads — each seeds a chain of messages, so
+    /// `topics.len() * INBOX_MESSAGES_PER_THREAD = INBOX message count`.
+    topics: &'static [DemoTopic],
 }
 
 const DEMO_ACCOUNTS: &[DemoAccount] = &[
@@ -66,35 +69,94 @@ const DEMO_ACCOUNTS: &[DemoAccount] = &[
         email: "alice@demo.local",
         display_name: "Alice Example",
         topics: &[
-            "Sprint planning notes",
-            "Quarterly review draft",
-            "Lunch on Friday",
-            "Conference travel",
-            "Library book overdue",
+            (
+                "Sprint planning notes",
+                "Notes from this morning's planning session — we committed to 14 points and pushed the search work to next sprint.",
+            ),
+            (
+                "Quarterly review draft",
+                "Attaching the first cut of the Q3 review. Could you sanity-check the revenue numbers before Friday's readout?",
+            ),
+            (
+                "Lunch on Friday",
+                "A few of us are grabbing lunch at the noodle place at 12:30 — want to come along?",
+            ),
+            (
+                "Conference travel",
+                "Your flight to the Berlin conference is booked. Confirmation number and hotel details are below.",
+            ),
+            (
+                "Library book overdue",
+                "Reminder: 'The Pragmatic Programmer' is 3 days overdue. Please return or renew it online.",
+            ),
         ],
     },
     DemoAccount {
         email: "team@demo.local",
         display_name: "Team Mailbox",
         topics: &[
-            "Incident postmortem",
-            "Hiring loop schedule",
-            "Onboarding checklist",
-            "Roadmap review",
-            "Vendor renewal",
+            (
+                "Incident postmortem",
+                "Writeup for yesterday's outage is ready for review. Root cause was a migration that locked the accounts table.",
+            ),
+            (
+                "Hiring loop schedule",
+                "Final schedule for Thursday's onsite — five interviewers, debrief at 4pm in the small room.",
+            ),
+            (
+                "Onboarding checklist",
+                "New hire starts Monday. Laptop, accounts, and buddy assignment are all set — anything else to add?",
+            ),
+            (
+                "Roadmap review",
+                "Pushing the roadmap review out a week so we can fold in the latest customer feedback from the survey.",
+            ),
+            (
+                "Vendor renewal",
+                "The monitoring contract renews end of month — finance needs sign-off by the 25th to avoid a lapse.",
+            ),
         ],
     },
     DemoAccount {
         email: "support@demo.local",
         display_name: "Support Inbox",
         topics: &[
-            "Ticket #1024 follow-up",
-            "Refund request",
-            "Feature request: dark mode",
-            "Login issues",
-            "Mobile crash report",
+            (
+                "Ticket #1024 follow-up",
+                "Customer replied — the workaround fixed it. Closing the ticket tomorrow unless you object.",
+            ),
+            (
+                "Refund request",
+                "User is requesting a refund for the annual plan bought last week. It's within the 14-day window.",
+            ),
+            (
+                "Feature request: dark mode",
+                "Several users have asked for a dark theme. Logging this for the product backlog with the upvotes.",
+            ),
+            (
+                "Login issues",
+                "Multiple reports of SSO failures this morning. Looks resolved now — keeping an eye on the error rate.",
+            ),
+            (
+                "Mobile crash report",
+                "Crash on iOS 17 when opening attachments. Stack trace is attached with repro steps inside.",
+            ),
         ],
     },
+];
+
+/// Realistic sender identities for INBOX messages. The `@demo.example`
+/// domain is load-bearing — `tests/demo_seed.rs` asserts INBOX `from`
+/// addresses carry it.
+const SENDERS: &[(&str, &str)] = &[
+    ("Sarah Chen", "sarah.chen@demo.example"),
+    ("Marcus Reid", "marcus.reid@demo.example"),
+    ("Priya Nair", "priya.nair@demo.example"),
+    ("Tom Becker", "tom.becker@demo.example"),
+    ("Dana Whitfield", "dana.w@demo.example"),
+    ("Jordan Kim", "jordan.kim@demo.example"),
+    ("Aisha Rahman", "aisha.rahman@demo.example"),
+    ("Leo Fischer", "leo.fischer@demo.example"),
 ];
 
 /// Number of messages chained inside each INBOX thread. With 5 topics
@@ -105,6 +167,31 @@ const INBOX_MESSAGES_PER_THREAD: usize = 6;
 const SENT_MESSAGES_PER_ACCOUNT: usize = 3;
 /// Number of independent Archive rows seeded per account.
 const ARCHIVE_MESSAGES_PER_ACCOUNT: usize = 2;
+
+/// Realistic `(subject, body)` samples for the Sent folder.
+const SENT_SAMPLES: &[DemoTopic] = &[
+    (
+        "Re: Sprint planning notes",
+        "Sounds good — I'll have the estimates ready by end of day.",
+    ),
+    (
+        "Re: Vendor renewal",
+        "Approved on my end. Forwarding to finance for the final sign-off.",
+    ),
+    ("Re: Lunch on Friday", "Count me in. See you at 12:30."),
+];
+
+/// Realistic `(subject, body)` samples for the Archive folder.
+const ARCHIVE_SAMPLES: &[DemoTopic] = &[
+    (
+        "Welcome to the team",
+        "Glad to have you on board! Here's everything you need for your first week.",
+    ),
+    (
+        "Receipt — annual plan",
+        "Thanks for your purchase. Your invoice is attached for your records.",
+    ),
+];
 
 const DEMO_FOLDERS: &[(&str, FolderRole)] = &[
     ("INBOX", FolderRole::Inbox),
@@ -225,7 +312,7 @@ async fn main() -> anyhow::Result<()> {
 struct AccountRecord {
     id: AccountId,
     email: &'static str,
-    topics: &'static [&'static str],
+    topics: &'static [DemoTopic],
 }
 
 async fn seed_accounts(client: &mut Client) -> anyhow::Result<Vec<AccountRecord>> {
@@ -345,12 +432,13 @@ async fn seed_messages(
         let archive = require_folder(folders, acc.id, FolderRole::Archive)?;
 
         // INBOX: per topic, seed a thread of `INBOX_MESSAGES_PER_THREAD` messages.
-        for (topic_idx, topic) in acc.topics.iter().enumerate() {
+        for (topic_idx, &(subject, body)) in acc.topics.iter().enumerate() {
             totals += seed_thread(
                 pool,
                 acc,
                 inbox.id,
-                topic,
+                subject,
+                body,
                 topic_idx,
                 INBOX_MESSAGES_PER_THREAD,
                 "inbox",
@@ -360,12 +448,17 @@ async fn seed_messages(
             .await?;
         }
         // Sent: short standalone messages, each its own thread.
-        for sent_idx in 0..SENT_MESSAGES_PER_ACCOUNT {
+        for (sent_idx, &(subject, body)) in SENT_SAMPLES
+            .iter()
+            .take(SENT_MESSAGES_PER_ACCOUNT)
+            .enumerate()
+        {
             totals += seed_thread(
                 pool,
                 acc,
                 sent.id,
-                &format!("Sent reply #{sent_idx}"),
+                subject,
+                body,
                 sent_idx,
                 1,
                 "sent",
@@ -375,12 +468,17 @@ async fn seed_messages(
             .await?;
         }
         // Archive: short standalone messages, each its own thread.
-        for archive_idx in 0..ARCHIVE_MESSAGES_PER_ACCOUNT {
+        for (archive_idx, &(subject, body)) in ARCHIVE_SAMPLES
+            .iter()
+            .take(ARCHIVE_MESSAGES_PER_ACCOUNT)
+            .enumerate()
+        {
             totals += seed_thread(
                 pool,
                 acc,
                 archive.id,
-                &format!("Old archived note #{archive_idx}"),
+                subject,
+                body,
                 archive_idx,
                 1,
                 "archive",
@@ -402,6 +500,7 @@ async fn seed_thread(
     acc: &AccountRecord,
     folder_id: FolderId,
     subject: &str,
+    body: &str,
     topic_idx: usize,
     count: usize,
     folder_tag: &str,
@@ -429,6 +528,7 @@ async fn seed_thread(
             folder_id,
             thread.id,
             subject,
+            body,
             topic_idx,
             msg_idx,
             folder_tag,
@@ -452,6 +552,7 @@ async fn seed_one_message(
     folder_id: FolderId,
     thread_id: ThreadId,
     subject: &str,
+    body: &str,
     topic_idx: usize,
     msg_idx: usize,
     folder_tag: &str,
@@ -478,14 +579,15 @@ async fn seed_one_message(
         )
     })?;
 
+    // Pick a stable, realistic sender per (account, topic). Sent items
+    // come from the account itself; everything else from a named contact.
+    let (sender_name, sender_email) = SENDERS[(account_idx * 7 + topic_idx) % SENDERS.len()];
     let from_addr = match folder_tag {
-        "sent" | "archive" => acc.email.to_string(),
-        _ => format!("contact-{account_idx}-{topic_idx}@demo.example"),
+        "sent" => acc.email.to_string(),
+        _ => format!("{sender_name} <{sender_email}>"),
     };
     let to_addrs: AddressList = match folder_tag {
-        "sent" => AddressList::from(vec![format!(
-            "contact-{account_idx}-{topic_idx}@demo.example"
-        )]),
+        "sent" => AddressList::from(vec![format!("{sender_name} <{sender_email}>")]),
         _ => AddressList::from(vec![acc.email.to_string()]),
     };
     let display_subject = if msg_idx == 0 {
@@ -493,17 +595,26 @@ async fn seed_one_message(
     } else {
         format!("Re: {subject}")
     };
-    let snippet = parsed
-        .text_body
-        .as_deref()
-        .map(|body| body.chars().take(140).collect::<String>())
-        .unwrap_or_else(|| format!("Demo message body for {subject}"));
-    let text_body = parsed.text_body.clone().unwrap_or_else(|| {
-        format!(
-            "Demo body — {fixture_name} fixture for {} thread {topic_idx}.",
-            acc.email
-        )
-    });
+    // Realistic body: the opening line for the first message, a varied
+    // short reply (quoting the opener) for the rest of the thread.
+    const REPLIES: &[&str] = &[
+        "Thanks for the update — this looks good to me.",
+        "Following up on this. Any movement here?",
+        "Got it, I'll take a look this afternoon.",
+        "Agreed. Let's sync on the details tomorrow.",
+        "Done on my end — over to you.",
+    ];
+    let text_body = if msg_idx == 0 {
+        body.to_string()
+    } else {
+        let reply = REPLIES[(topic_idx + msg_idx) % REPLIES.len()];
+        format!("{reply}\n\n> {body}")
+    };
+    let snippet = text_body
+        .replace('\n', " ")
+        .chars()
+        .take(140)
+        .collect::<String>();
     // Stagger timestamps so list views show realistic ordering.
     let internal_date = base_time
         - Duration::minutes((account_idx as i64) * 17 + (topic_idx as i64) * 5)
@@ -545,7 +656,9 @@ async fn seed_one_message(
     // can persist them after the message row exists — mirrors the
     // pattern in `src/sync/reconciler.rs`.
     let parsed_attachments = std::mem::take(&mut parsed.attachments);
-    let html_body = parsed.html_body;
+    // Show our realistic plain-text body in the detail pane rather than the
+    // fixture's HTML; attachments (taken above) are still seeded.
+    let html_body: Option<String> = None;
 
     let new_msg = db::messages::NewMessage {
         account_id: acc.id,
