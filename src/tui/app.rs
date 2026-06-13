@@ -46,6 +46,11 @@ pub(crate) const MAX_COMPOSE_PATH_CHARS: usize = 4096;
 /// Maximum number of simultaneously visible toasts. Pushing past this
 /// drops the oldest toast.
 pub(crate) const MAX_TOASTS: usize = 3;
+/// Upper bound on the live pending-approval list. Broadcast approval
+/// events merge into this list (see `merge_approval_request`); without
+/// a cap a flood of requests would grow it unboundedly. Trimmed
+/// newest-first, so the oldest pending rows fall off first.
+pub(crate) const MAX_LIVE_APPROVALS: usize = 100;
 pub(crate) const FOLDER_CACHE_CAPACITY: usize = 6;
 pub(crate) const FOLDER_CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -67,11 +72,14 @@ pub(crate) const COALESCE_SYNC_ERROR: Duration = Duration::from_secs(10);
 /// responsive.
 pub(crate) const COALESCE_PANE_REFUSAL: Duration = Duration::from_secs(3);
 
-/// Status pane icons.
-pub(crate) const ICON_IDLE: &str = "●";
-pub(crate) const ICON_POLLING: &str = "~";
-pub(crate) const ICON_SYNCING: &str = "…";
-pub(crate) const ICON_ERROR: &str = "!";
+/// Status pane icons. A cohesive circle-fill progression (empty ->
+/// half -> three-quarter) plus a heavy cross for errors. `ICON_IDLE`
+/// is the empty circle, not the filled `●` used as the conversation
+/// unread marker in `render`, so the two don't alias.
+pub(crate) const ICON_IDLE: &str = "◯";
+pub(crate) const ICON_POLLING: &str = "◐";
+pub(crate) const ICON_SYNCING: &str = "◓";
+pub(crate) const ICON_ERROR: &str = "✖";
 
 /// Maximum chars of `last_error` to render after the selected
 /// account's status icon.
@@ -1062,52 +1070,35 @@ pub struct ComposerPrefill {
 }
 
 /// Reasons a path the user typed into the compose attach prompt was
-/// rejected. Surfaces concise toast text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// rejected. The `Display` text is surfaced directly as toast text.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AttachError {
     /// Path does not exist on disk.
+    #[error("file not found: {}", .0.display())]
     NotFound(PathBuf),
     /// Path exists but is not a regular file.
+    #[error("not a regular file: {}", .0.display())]
     NotAFile(PathBuf),
     /// File exceeds the per-attachment size cap.
+    #[error("attachment too large: {} > {}", human_size(*size), human_size(MAX_COMPOSE_ATTACHMENT_BYTES))]
     TooLarge {
         /// Size of the rejected attachment in bytes.
         size: u64,
     },
     /// Total attachment size for the draft exceeds the daemon-wide cap.
+    #[error("aggregate over limit: {} > {}", human_size(*total), human_size(MAX_COMPOSE_ATTACHMENT_BYTES))]
     AggregateTooLarge {
         /// Combined size of all attachments in bytes.
         total: u64,
     },
     /// Reading the file failed for some other reason.
+    #[error("cannot read {}: {message}", path.display())]
     Io {
         /// Path that triggered the failure.
         path: PathBuf,
         /// Lowercase IO error message.
         message: String,
     },
-}
-
-impl AttachError {
-    pub(crate) fn toast_text(&self) -> String {
-        match self {
-            Self::NotFound(path) => format!("File not found: {}", path.display()),
-            Self::NotAFile(path) => format!("Not a regular file: {}", path.display()),
-            Self::TooLarge { size } => format!(
-                "Attachment too large: {} > {}",
-                human_size(*size),
-                human_size(MAX_COMPOSE_ATTACHMENT_BYTES)
-            ),
-            Self::AggregateTooLarge { total } => format!(
-                "Aggregate over limit: {} > {}",
-                human_size(*total),
-                human_size(MAX_COMPOSE_ATTACHMENT_BYTES)
-            ),
-            Self::Io { path, message } => {
-                format!("Cannot read {}: {}", path.display(), message)
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1406,17 +1397,6 @@ impl ComposerState {
             attachments: self.attachments.clone(),
             in_reply_to: self.in_reply_to.clone(),
             references_header: self.references_header.clone(),
-        }
-    }
-
-    /// Cursor offset within the currently focused composer field, clamped to its length.
-    pub fn focused_cursor(&self) -> usize {
-        match self.focused {
-            ComposeField::To => self.to_cursor.min(char_count(&self.to)),
-            ComposeField::Cc => self.cc_cursor.min(char_count(&self.cc)),
-            ComposeField::Bcc => self.bcc_cursor.min(char_count(&self.bcc)),
-            ComposeField::Subject => self.subject_cursor.min(char_count(&self.subject)),
-            ComposeField::Body => self.body_cursor.min(self.body_line_cache.char_len()),
         }
     }
 
@@ -2009,6 +1989,7 @@ impl AppState {
             .map(|account| account.id)
             .collect::<HashSet<_>>();
         self.folder_cache.retain_accounts(&account_ids);
+        self.account_states.retain(|id, _| account_ids.contains(id));
         self.accounts = accounts;
         clamp_index(&mut self.selected_account, self.accounts.len());
         self.folders = virtual_folders();
@@ -2026,6 +2007,10 @@ impl AppState {
 
     /// Replace the folders list for the active account and reset dependent state.
     pub fn apply_folders(&mut self, folders: Vec<FolderItem>) {
+        // "First real load" ignores the always-present virtual Approvals
+        // folder, which would otherwise make the list look non-empty after
+        // an initial empty apply and suppress the inbox default.
+        let first_load = !self.folders.iter().any(|f| !f.is_approvals_virtual());
         let keep_approvals_selected = self.approvals_folder_selected()
             && matches!(
                 self.active,
@@ -2034,6 +2019,14 @@ impl AppState {
         self.folders = folders_with_approvals(folders);
         if keep_approvals_selected {
             self.selected_folder = self.approvals_folder_index().unwrap_or(0);
+        } else if first_load {
+            // Open on the Inbox like a real mail client rather than the
+            // alphabetically-first folder.
+            self.selected_folder = self
+                .folders
+                .iter()
+                .position(|f| f.role.as_str() == "inbox")
+                .unwrap_or(0);
         } else {
             clamp_index(&mut self.selected_folder, self.folders.len());
         }
@@ -2138,18 +2131,11 @@ impl AppState {
         self.drafts.get(self.selected_draft).map(|d| d.id)
     }
 
-    /// Currently selected draft row, if any.
-    pub fn selected_draft(&self) -> Option<&DraftItem> {
-        self.drafts.get(self.selected_draft)
-    }
-
-    /// Move the drafts cursor by `delta` rows. Returns true on a real
-    /// position change so callers can trigger refresh logic.
-    pub fn move_draft_selection(&mut self, delta: isize) -> bool {
-        move_index(&mut self.selected_draft, self.drafts.len(), delta)
-    }
-
     pub(crate) fn begin_draft_delete(&mut self, draft_id: DraftId) {
+        // Both pending-delete fields share the one `ConfirmDelete` mode;
+        // clear the message slot so a stale message delete can't fire on
+        // this confirm.
+        self.pending_delete_message = None;
         self.pending_delete_draft = Some(draft_id);
         self.mode = InputMode::ConfirmDelete;
     }
@@ -2354,7 +2340,7 @@ impl AppState {
         }
         let line = self
             .preview_scroll
-            .min(self.preview_line_count().saturating_sub(1).max(0));
+            .min(self.preview_line_count().saturating_sub(1));
         self.preview_selection = Some((line, line));
         true
     }
@@ -3195,6 +3181,7 @@ impl AppState {
             self.approvals.items.push(approval);
         }
         self.approvals.items = sorted_approvals(std::mem::take(&mut self.approvals.items));
+        self.approvals.items.truncate(MAX_LIVE_APPROVALS);
         clamp_index(&mut self.approvals.selected, self.approvals.items.len());
     }
 
@@ -3428,6 +3415,10 @@ impl AppState {
     }
 
     pub(crate) fn begin_delete_confirmation(&mut self, message_id: MessageId) {
+        // Both pending-delete fields share the one `ConfirmDelete` mode;
+        // clear the draft slot so a stale draft delete can't fire on
+        // this confirm.
+        self.pending_delete_draft = None;
         self.pending_delete_message = Some(message_id);
         self.mode = InputMode::ConfirmDelete;
         self.set_status("Delete? y/n");
@@ -3888,12 +3879,6 @@ impl AppState {
             composer.attachments.len(),
             delta,
         )
-    }
-
-    /// Currently highlighted composer attachment, if any.
-    pub fn selected_compose_attachment(&self) -> Option<&ComposerAttachment> {
-        let composer = self.composer.as_ref()?;
-        composer.attachments.get(composer.selected_attachment)
     }
 
     pub(crate) fn cycle_theme(&mut self) -> ThemeName {
@@ -4672,7 +4657,7 @@ fn move_index(index: &mut usize, len: usize, delta: isize) -> bool {
 
     let old = (*index).min(len - 1);
     let next = if delta < 0 {
-        old.saturating_sub((-delta) as usize)
+        old.saturating_sub(delta.unsigned_abs())
     } else {
         old.saturating_add(delta as usize).min(len - 1)
     };
@@ -4786,8 +4771,6 @@ mod tests {
 
     fn draft_attachment_payload(content_base64: &str) -> crate::tui::ipc::DraftAttachmentPayload {
         crate::tui::ipc::DraftAttachmentPayload {
-            id: Uuid::new_v4(),
-            draft_id: DraftId::new(),
             filename: "notes.txt".into(),
             content_type: "text/plain".into(),
             size_bytes: 0,
@@ -5879,13 +5862,13 @@ mod tests {
     }
 
     #[test]
-    fn test_theme_cycle_wraps_to_light() {
+    fn test_theme_cycle_wraps_to_dark() {
         let mut app = AppState::default();
 
-        assert_eq!(app.theme, ThemeName::Light);
-        assert_eq!(app.cycle_theme(), ThemeName::Dark);
-        assert_eq!(app.cycle_theme(), ThemeName::HighContrast);
+        assert_eq!(app.theme, ThemeName::Dark);
         assert_eq!(app.cycle_theme(), ThemeName::Light);
+        assert_eq!(app.cycle_theme(), ThemeName::HighContrast);
+        assert_eq!(app.cycle_theme(), ThemeName::Dark);
     }
 
     #[test]
@@ -7348,7 +7331,7 @@ mod tests {
 
         let err = app.confirm_compose_attach().await.unwrap_err();
         assert!(matches!(err, AttachError::NotFound(_)));
-        assert!(err.toast_text().starts_with("File not found:"));
+        assert!(err.to_string().starts_with("file not found:"));
     }
 
     #[tokio::test]
@@ -7381,7 +7364,7 @@ mod tests {
 
         let err = app.confirm_compose_attach().await.unwrap_err();
         assert!(matches!(err, AttachError::TooLarge { .. }));
-        assert!(err.toast_text().contains("Attachment too large"));
+        assert!(err.to_string().contains("attachment too large"));
         // Composer attachments untouched after rejection.
         assert!(app.composer.as_ref().unwrap().attachments.is_empty());
     }
@@ -7410,8 +7393,80 @@ mod tests {
 
         let err = app.confirm_compose_attach().await.unwrap_err();
         assert!(matches!(err, AttachError::AggregateTooLarge { .. }));
-        assert!(err.toast_text().contains("Aggregate over limit"));
+        assert!(err.to_string().contains("aggregate over limit"));
         assert_eq!(app.composer.as_ref().unwrap().attachments.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_confirm_compose_attach_aggregate_exactly_at_cap_is_accepted() {
+        let mut app = AppState::default();
+        app.enter_composer(AccountId::new());
+        // Pre-seed so that one more byte exactly hits the cap.
+        let composer = app.composer.as_mut().unwrap();
+        composer.attachments.push(ComposerAttachment {
+            path: PathBuf::from("/tmp/seed.bin"),
+            filename: "seed.bin".into(),
+            size_bytes: MAX_COMPOSE_ATTACHMENT_BYTES - 1,
+            content_type: "application/octet-stream".into(),
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("one.bin");
+        std::fs::write(&path, vec![0u8; 1]).unwrap();
+        app.begin_compose_attach();
+        for ch in path.display().to_string().chars() {
+            app.push_compose_attach_char(ch);
+        }
+
+        // total == MAX is accepted (the check rejects only strictly above).
+        app.confirm_compose_attach().await.unwrap();
+        let composer = app.composer.as_ref().unwrap();
+        assert_eq!(composer.attachments.len(), 2);
+        assert_eq!(
+            composer.aggregate_attachment_size(),
+            MAX_COMPOSE_ATTACHMENT_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn test_confirm_compose_attach_aggregate_one_over_cap_is_rejected() {
+        let mut app = AppState::default();
+        app.enter_composer(AccountId::new());
+        let composer = app.composer.as_mut().unwrap();
+        composer.attachments.push(ComposerAttachment {
+            path: PathBuf::from("/tmp/seed.bin"),
+            filename: "seed.bin".into(),
+            size_bytes: MAX_COMPOSE_ATTACHMENT_BYTES - 1,
+            content_type: "application/octet-stream".into(),
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("two.bin");
+        std::fs::write(&path, vec![0u8; 2]).unwrap();
+        app.begin_compose_attach();
+        for ch in path.display().to_string().chars() {
+            app.push_compose_attach_char(ch);
+        }
+
+        // total == MAX + 1 is rejected and the list is left untouched.
+        let err = app.confirm_compose_attach().await.unwrap_err();
+        assert!(matches!(err, AttachError::AggregateTooLarge { .. }));
+        assert_eq!(app.composer.as_ref().unwrap().attachments.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_probe_attachment_directory_yields_not_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = probe_attachment(dir.path()).await.unwrap_err();
+        assert!(matches!(err, AttachError::NotAFile(_)));
+    }
+
+    #[tokio::test]
+    async fn test_probe_attachment_missing_path_yields_not_found() {
+        let err = probe_attachment(Path::new("/no/such/path/here.bin"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AttachError::NotFound(_)));
     }
 
     #[test]
@@ -7524,9 +7579,9 @@ mod tests {
         let err = AttachError::TooLarge {
             size: 26 * 1024 * 1024,
         };
-        let text = err.toast_text();
+        let text = err.to_string();
         assert!(text.contains("MiB"));
-        assert!(text.contains("Attachment too large"));
+        assert!(text.contains("attachment too large"));
     }
 
     #[test]

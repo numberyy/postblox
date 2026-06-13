@@ -15,12 +15,14 @@ use thiserror::Error;
 /// Named TUI colour palette.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ThemeName {
-    /// Default light palette with a white background.
+    /// Default dark palette — a cohesive curated RGB theme that reads
+    /// well over the dark terminals most users run.
     #[default]
-    Light,
-    /// Dark palette with a black background.
     Dark,
-    /// High-contrast palette tuned for accessibility.
+    /// Light palette tuned for light terminals.
+    Light,
+    /// High-contrast palette tuned for accessibility (honours the
+    /// terminal's own 16-colour palette).
     HighContrast,
 }
 
@@ -35,60 +37,96 @@ impl ThemeName {
 
     pub(crate) fn next(self) -> Self {
         match self {
-            Self::Light => Self::Dark,
-            Self::Dark => Self::HighContrast,
-            Self::HighContrast => Self::Light,
+            Self::Dark => Self::Light,
+            Self::Light => Self::HighContrast,
+            Self::HighContrast => Self::Dark,
         }
     }
 
     pub(crate) fn theme(self) -> Theme {
         match self {
-            Self::Light => Theme {
-                text: Style::default().fg(Color::Black).bg(Color::White),
-                muted: Style::default().fg(Color::DarkGray).bg(Color::White),
-                pane: Style::default().fg(Color::Blue).bg(Color::White),
-                active_pane: Style::default()
-                    .fg(Color::Blue)
-                    .bg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-                selection: Style::default().fg(Color::White).bg(Color::Blue),
-                status: Style::default().fg(Color::White).bg(Color::Blue),
-                error: Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
-                command: Style::default().fg(Color::White).bg(Color::Magenta),
-                unread: Style::default()
-                    .fg(Color::Blue)
-                    .bg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-                flagged: Style::default()
-                    .fg(Color::Yellow)
-                    .bg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            },
-            Self::Dark => Theme {
-                text: Style::default().fg(Color::White).bg(Color::Black),
-                muted: Style::default().fg(Color::DarkGray).bg(Color::Black),
-                pane: Style::default().fg(Color::Gray).bg(Color::Black),
-                active_pane: Style::default()
-                    .fg(Color::LightCyan)
-                    .bg(Color::Black)
-                    .add_modifier(Modifier::BOLD),
-                selection: Style::default().fg(Color::Black).bg(Color::LightBlue),
-                status: Style::default().fg(Color::White).bg(Color::Blue),
-                error: Style::default().fg(Color::White).bg(Color::Red),
-                command: Style::default().fg(Color::Black).bg(Color::LightCyan),
-                unread: Style::default()
-                    .fg(Color::LightGreen)
-                    .bg(Color::Black)
-                    .add_modifier(Modifier::BOLD),
-                flagged: Style::default().fg(Color::LightYellow).bg(Color::Black),
-            },
+            // Curated RGB dark palette. Every slot paints an explicit fg AND
+            // bg so panes share one consistent surface and nothing falls
+            // through to a terminal-dependent default.
+            Self::Dark => {
+                let bg = Color::Rgb(0x1e, 0x1e, 0x2e); // base
+                let fg = Color::Rgb(0xcd, 0xd6, 0xf4); // text
+                let accent = Color::Rgb(0x89, 0xb4, 0xfa); // blue
+                Theme {
+                    text: Style::default().fg(fg).bg(bg),
+                    muted: Style::default().fg(Color::Rgb(0x93, 0x99, 0xb2)).bg(bg),
+                    pane: Style::default().fg(Color::Rgb(0x6c, 0x70, 0x86)).bg(bg),
+                    active_pane: Style::default()
+                        .fg(accent)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                    selection: Style::default()
+                        .fg(fg)
+                        .bg(Color::Rgb(0x45, 0x47, 0x5a))
+                        .add_modifier(Modifier::BOLD),
+                    status: Style::default().fg(fg).bg(Color::Rgb(0x31, 0x32, 0x44)),
+                    error: Style::default()
+                        .fg(bg)
+                        .bg(Color::Rgb(0xf3, 0x8b, 0xa8))
+                        .add_modifier(Modifier::BOLD),
+                    command: Style::default().fg(Color::Rgb(0x11, 0x11, 0x1b)).bg(accent),
+                    unread: Style::default()
+                        .fg(Color::Rgb(0xa6, 0xe3, 0xa1))
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                    flagged: Style::default()
+                        .fg(Color::Rgb(0xf9, 0xe2, 0xaf))
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                }
+            }
+            // Curated RGB light palette for light terminals.
+            Self::Light => {
+                let bg = Color::Rgb(0xef, 0xf1, 0xf5); // base
+                let fg = Color::Rgb(0x4c, 0x4f, 0x69); // text
+                let accent = Color::Rgb(0x1e, 0x66, 0xf5); // blue
+                Theme {
+                    text: Style::default().fg(fg).bg(bg),
+                    muted: Style::default().fg(Color::Rgb(0x6c, 0x6f, 0x85)).bg(bg),
+                    pane: Style::default().fg(Color::Rgb(0x8c, 0x8f, 0xa1)).bg(bg),
+                    active_pane: Style::default()
+                        .fg(accent)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                    selection: Style::default()
+                        .fg(fg)
+                        .bg(Color::Rgb(0xcc, 0xd0, 0xda))
+                        .add_modifier(Modifier::BOLD),
+                    status: Style::default().fg(fg).bg(Color::Rgb(0xcc, 0xd0, 0xda)),
+                    error: Style::default()
+                        .fg(bg)
+                        .bg(Color::Rgb(0xd2, 0x0f, 0x39))
+                        .add_modifier(Modifier::BOLD),
+                    command: Style::default().fg(bg).bg(accent),
+                    unread: Style::default()
+                        .fg(Color::Rgb(0x40, 0xa0, 0x2b))
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                    flagged: Style::default()
+                        .fg(Color::Rgb(0xdf, 0x8e, 0x1d))
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                }
+            }
+            // High-contrast accessibility theme: stays on the terminal's own
+            // 16-colour palette (so it honours user overrides) but keeps a
+            // visual hierarchy via modifiers rather than flattening every
+            // slot to identical white-on-black.
             Self::HighContrast => Theme {
                 text: Style::default().fg(Color::White).bg(Color::Black),
-                muted: Style::default().fg(Color::White).bg(Color::Black),
-                pane: Style::default().fg(Color::White).bg(Color::Black),
+                muted: Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Black)
+                    .add_modifier(Modifier::DIM),
+                pane: Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Black)
+                    .add_modifier(Modifier::DIM),
                 active_pane: Style::default()
                     .fg(Color::Black)
                     .bg(Color::White)
@@ -104,9 +142,9 @@ impl ThemeName {
                     .add_modifier(Modifier::BOLD),
                 command: Style::default().fg(Color::Black).bg(Color::Cyan),
                 unread: Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::White)
-                    .add_modifier(Modifier::BOLD),
+                    .fg(Color::White)
+                    .bg(Color::Black)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
                 flagged: Style::default()
                     .fg(Color::Black)
                     .bg(Color::Yellow)
@@ -193,14 +231,46 @@ mod tests {
 
     #[test]
     fn test_theme_cycle_order_wraps() {
-        assert_eq!(ThemeName::Light.next(), ThemeName::Dark);
-        assert_eq!(ThemeName::Dark.next(), ThemeName::HighContrast);
-        assert_eq!(ThemeName::HighContrast.next(), ThemeName::Light);
+        assert_eq!(ThemeName::Dark.next(), ThemeName::Light);
+        assert_eq!(ThemeName::Light.next(), ThemeName::HighContrast);
+        assert_eq!(ThemeName::HighContrast.next(), ThemeName::Dark);
     }
 
     #[test]
-    fn test_default_theme_name_is_light() {
-        assert_eq!(ThemeName::default(), ThemeName::Light);
+    fn test_default_theme_name_is_dark() {
+        assert_eq!(ThemeName::default(), ThemeName::Dark);
+    }
+
+    /// Legibility invariants: every slot must set a foreground AND a
+    /// background that differ (rules out white-on-white / same-on-same),
+    /// and the active pane must be distinguishable from an inactive pane
+    /// by foreground colour — not by a modifier alone (the Light-theme
+    /// regression where only BOLD differed).
+    #[test]
+    fn test_every_theme_has_legible_contrast() {
+        for name in [ThemeName::Dark, ThemeName::Light, ThemeName::HighContrast] {
+            let theme = name.theme();
+            for (slot, style) in [
+                ("text", theme.text),
+                ("muted", theme.muted),
+                ("pane", theme.pane),
+                ("active_pane", theme.active_pane),
+                ("selection", theme.selection),
+                ("status", theme.status),
+                ("error", theme.error),
+                ("command", theme.command),
+                ("unread", theme.unread),
+                ("flagged", theme.flagged),
+            ] {
+                assert!(style.fg.is_some(), "{name}: {slot} has no fg");
+                assert!(style.bg.is_some(), "{name}: {slot} has no bg");
+                assert_ne!(style.fg, style.bg, "{name}: {slot} fg == bg");
+            }
+            assert_ne!(
+                theme.active_pane.fg, theme.pane.fg,
+                "{name}: active_pane must differ from pane by colour, not just a modifier"
+            );
+        }
     }
 
     /// Every named palette must populate every Theme field with a

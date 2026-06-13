@@ -15,6 +15,7 @@ use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::{
     human_size, ActivePane, AppState, ComposeField, InputMode, SyncStateUi, ToastKind, ICON_ERROR,
@@ -225,38 +226,116 @@ fn render_toasts(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Them
     }
 }
 
+/// Display width of `text` in terminal columns (CJK/emoji count as 2,
+/// combining marks as 0) — the same measure ratatui uses internally, so
+/// our layout math agrees with what it paints.
+fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+/// Truncate `text` to at most `max_width` terminal columns, appending an
+/// ellipsis (which itself costs one column) when anything was dropped.
+/// Counts display columns, not `char`s, so wide glyphs never overrun the
+/// rect or get clipped mid-cell.
 fn truncate_for_width(text: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    let mut chars = text.chars().count();
-    if chars <= max_width {
+    if display_width(text) <= max_width {
         return text.to_string();
     }
-    let keep = max_width.saturating_sub(1);
-    let mut out: String = text.chars().take(keep).collect();
+    let budget = max_width.saturating_sub(1); // reserve a column for '…'
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
     out.push('…');
-    chars = out.chars().count();
-    debug_assert!(chars <= max_width);
     out
 }
 
+/// Truncate a sequence of styled `(text, style)` segments to `max_width`
+/// display columns, preserving per-segment styling and ellipsising the
+/// segment that overflows. Returns the kept spans and the total width
+/// consumed.
+fn truncate_spans(
+    segments: Vec<(String, ratatui::style::Style)>,
+    max_width: usize,
+) -> (Vec<Span<'static>>, usize) {
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    for (text, style) in segments {
+        if used >= max_width {
+            break;
+        }
+        let w = display_width(&text);
+        if used + w <= max_width {
+            spans.push(Span::styled(text, style));
+            used += w;
+        } else {
+            let room = max_width - used;
+            let clipped = truncate_for_width(&text, room);
+            used += display_width(&clipped);
+            spans.push(Span::styled(clipped, style));
+            break;
+        }
+    }
+    (spans, used)
+}
+
+/// Build a list row whose `date` column is flush-right within
+/// `content_width` columns: the styled `left` segments are truncated to
+/// fit, padded, and the muted date is appended at the right edge.
+fn row_with_right_date(
+    left: Vec<(String, ratatui::style::Style)>,
+    date: String,
+    content_width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let date_w = display_width(&date);
+    let avail = content_width.saturating_sub(date_w + 1);
+    let (mut spans, used) = truncate_spans(left, avail);
+    let pad = avail.saturating_sub(used) + 1;
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(Span::styled(date, theme.muted));
+    Line::from(spans)
+}
+
+/// Inner content width of a bordered list pane, reserving two columns for
+/// the `› ` selection symbol so selected and unselected rows stay aligned.
+fn list_content_width(area: Rect) -> usize {
+    (area.width as usize).saturating_sub(2 + 2)
+}
+
 fn render_accounts(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    let content_width = list_content_width(area);
     let items: Vec<ListItem<'_>> = if app.accounts.is_empty() {
         vec![ListItem::new("No accounts yet")]
     } else {
         app.accounts
             .iter()
             .map(|account| {
-                let label_span = if account.label == account.email {
-                    Span::raw(account.email.as_str())
+                let label = if account.label == account.email {
+                    account.email.clone()
                 } else {
-                    Span::raw(format!("{} <{}>", account.label, account.email))
+                    format!("{} <{}>", account.label, account.email)
                 };
-                ListItem::new(Line::from(vec![
-                    label_span,
-                    Span::styled(format!(" [{}]", account.status), theme.muted),
-                ]))
+                // Truncate to the pane width so a long "Name <email> [status]"
+                // ends with an ellipsis instead of clipping mid-token at the
+                // border.
+                let (spans, _) = truncate_spans(
+                    vec![
+                        (label, theme.text),
+                        (format!(" [{}]", account.status), theme.muted),
+                    ],
+                    content_width,
+                );
+                ListItem::new(Line::from(spans))
             })
             .collect()
     };
@@ -274,6 +353,7 @@ fn render_accounts(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Th
 }
 
 fn render_folders(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    let content_width = list_content_width(area);
     let items: Vec<ListItem<'_>> = if app.folders.is_empty() {
         let text = if app.accounts.is_empty() {
             "Select an account"
@@ -285,17 +365,16 @@ fn render_folders(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &The
         app.folders
             .iter()
             .map(|folder| {
-                if folder.is_approvals_virtual() {
-                    ListItem::new(Line::from(vec![
-                        Span::raw(folder.name.as_str()),
-                        Span::styled(format!(" ({})", app.approvals_pending_count()), theme.muted),
-                    ]))
+                let suffix = if folder.is_approvals_virtual() {
+                    format!(" ({})", app.approvals_pending_count())
                 } else {
-                    ListItem::new(Line::from(vec![
-                        Span::raw(folder.name.as_str()),
-                        Span::styled(format!(" [{}]", folder.role), theme.muted),
-                    ]))
-                }
+                    format!(" [{}]", folder.role)
+                };
+                let (spans, _) = truncate_spans(
+                    vec![(folder.name.clone(), theme.text), (suffix, theme.muted)],
+                    content_width,
+                );
+                ListItem::new(Line::from(spans))
             })
             .collect()
     };
@@ -333,6 +412,7 @@ fn render_conversations(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme
         return;
     }
 
+    let content_width = list_content_width(area);
     let items: Vec<ListItem<'_>> = if app.threads.is_empty() {
         let text = if app.folders.is_empty() {
             "Select a folder"
@@ -349,22 +429,36 @@ fn render_conversations(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme
                 } else {
                     theme.text
                 };
-                let mut line = vec![
-                    Span::styled(if thread.unread { "● " } else { "  " }, theme.unread),
-                    Span::styled(if thread.flagged { "★ " } else { "  " }, theme.flagged),
-                    Span::styled(
-                        thread.subject.as_str(),
+                let count = if thread.message_count > 1 {
+                    format!(" ({})", thread.message_count)
+                } else {
+                    String::new()
+                };
+                // Fixed columns: unread bar | flag | subject | count |
+                // sender, with the date flush-right so the rightmost
+                // column lines up across every row.
+                let left = vec![
+                    (
+                        if thread.unread { "▎ " } else { "  " }.to_string(),
+                        theme.unread,
+                    ),
+                    (
+                        if thread.flagged { "★ " } else { "  " }.to_string(),
+                        theme.flagged,
+                    ),
+                    (
+                        thread.subject.clone(),
                         subject_style.add_modifier(Modifier::BOLD),
                     ),
+                    (count, theme.text),
+                    (format!(" — {}", thread.latest_from), theme.muted),
                 ];
-                if thread.message_count > 1 {
-                    line.push(Span::raw(format!(" ({})", thread.message_count)));
-                }
-                line.extend([
-                    Span::raw(format!(" — {}", thread.latest_from)),
-                    Span::styled(format!(" {}", thread.latest_date), theme.muted),
-                ]);
-                ListItem::new(Line::from(line))
+                ListItem::new(row_with_right_date(
+                    left,
+                    thread.latest_date.clone(),
+                    content_width,
+                    theme,
+                ))
             })
             .collect()
     };
@@ -387,21 +481,27 @@ fn render_conversations(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme
 /// rows show the recipient + the first body line so users can spot
 /// the draft they want to resume.
 fn render_drafts(frame: &mut Frame<'_>, area: Rect, app: &AppState, theme: &Theme) {
+    let content_width = list_content_width(area);
     let items: Vec<ListItem<'_>> = if app.drafts.is_empty() {
         vec![ListItem::new("No drafts")]
     } else {
         app.drafts
             .iter()
             .map(|draft| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        draft.subject.as_str(),
+                let left = vec![
+                    (
+                        draft.subject.clone(),
                         theme.text.add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(format!(" → {}", draft.to)),
-                    Span::raw(format!(" — {}", draft.snippet)),
-                    Span::styled(format!(" {}", draft.date), theme.muted),
-                ]))
+                    (format!(" → {}", draft.to), theme.muted),
+                    (format!(" — {}", draft.snippet), theme.muted),
+                ];
+                ListItem::new(row_with_right_date(
+                    left,
+                    draft.date.clone(),
+                    content_width,
+                    theme,
+                ))
             })
             .collect()
     };
@@ -697,8 +797,9 @@ fn render_attachment_list(frame: &mut Frame<'_>, area: Rect, app: &AppState, the
                 Span::raw(attachment.filename.as_str()),
                 Span::styled(
                     format!(
-                        " [{} • {} bytes]",
-                        attachment.content_type, attachment.size_bytes
+                        " [{} • {}]",
+                        attachment.content_type,
+                        human_size(attachment.size_bytes.max(0) as u64)
                     ),
                     theme.muted,
                 ),
@@ -889,9 +990,10 @@ fn render_compose_attachments(
         let block = pane_block_owned(format!(" {summary} "), false, theme);
         let paragraph = Paragraph::new(prompt).block(block).style(theme.command);
         frame.render_widget(paragraph, area);
-        // Position the cursor at the end of the typed path. "Attach: "
-        // is 8 chars; account for the bordered inset.
-        let cursor_col = "Attach: ".len() + composer.attach_input.chars().count();
+        // Position the cursor at the end of the typed path, measured in
+        // display columns ("Attach: " is 8 columns) so a wide-glyph path
+        // doesn't misplace the cursor.
+        let cursor_col = 8 + display_width(&composer.attach_input);
         set_cursor_in_area(frame, area, cursor_col, 0);
         return;
     }
@@ -945,7 +1047,12 @@ fn render_composer_field(
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
     if active {
-        set_cursor_in_area(frame, area, cursor.min(text.chars().count()), 0);
+        // The cursor column is a terminal cell offset, so measure the
+        // display width of the text up to the cursor — not the char count —
+        // or a wide glyph (CJK/emoji) lands the cursor in the wrong cell.
+        let cursor = cursor.min(text.chars().count());
+        let col = display_width(&text.chars().take(cursor).collect::<String>());
+        set_cursor_in_area(frame, area, col, 0);
     }
 }
 
@@ -1432,6 +1539,22 @@ fn sync_state_prefix(app: &AppState) -> String {
     out
 }
 
+/// Take the longest prefix of `text` that fits in `max_width` display
+/// columns (no ellipsis), so wide glyphs never overrun the row.
+fn take_width(text: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > max_width {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out
+}
+
 fn compose_status_text(icons: &str, body: &str, width: usize) -> String {
     if icons.is_empty() {
         return body.to_string();
@@ -1439,25 +1562,17 @@ fn compose_status_text(icons: &str, body: &str, width: usize) -> String {
     if width == 0 {
         return icons.to_string();
     }
-    let mut prefix = String::with_capacity(icons.len() + 2);
-    prefix.push(' ');
-    prefix.push_str(icons);
-    prefix.push(' ');
-    let prefix_chars = prefix.chars().count();
-    let body_chars = body.chars().count();
-    if prefix_chars + body_chars <= width {
-        let mut out = prefix;
-        out.push_str(body);
-        return out;
+    let prefix = format!(" {icons} ");
+    let prefix_w = display_width(&prefix);
+    if prefix_w + display_width(body) <= width {
+        return format!("{prefix}{body}");
     }
-    if prefix_chars >= width {
+    if prefix_w >= width {
         // Icons take priority; truncate icons to the available width.
-        return prefix.chars().take(width).collect();
+        return take_width(&prefix, width);
     }
-    let remaining = width - prefix_chars;
-    let mut out = prefix;
-    out.extend(body.chars().take(remaining));
-    out
+    let remaining = width - prefix_w;
+    format!("{prefix}{}", take_width(body, remaining))
 }
 
 fn pane_block(title: &'static str, active: bool, theme: &Theme) -> Block<'static> {
@@ -1643,7 +1758,7 @@ mod tests {
         assert!(text.contains("INBOX"));
         assert!(text.contains("Conversations"));
         assert!(text.contains("(2)"));
-        assert!(text.contains("●"));
+        assert!(text.contains("▎")); // unread marker
         assert!(text.contains("★"));
         assert!(text.contains("Launch plan"));
         assert!(text.contains("Full launch details"));
@@ -2565,9 +2680,9 @@ mod tests {
 
         let text = buffer_text(&render_to_buffer(&app));
 
-        assert!(text.contains("● Personal"));
-        assert!(text.contains("~ Work"));
-        assert!(text.contains("! Side"));
+        assert!(text.contains("◯ Personal"));
+        assert!(text.contains("◐ Work"));
+        assert!(text.contains("✖ Side"));
         assert!(text.contains(" · "));
     }
 
@@ -2592,7 +2707,7 @@ mod tests {
         // The default selected_account is 0, so the only account is selected.
         let text = buffer_text(&render_to_buffer(&app));
 
-        assert!(text.contains("! Work: server says no"));
+        assert!(text.contains("✖ Work: server says no"));
     }
 
     #[test]

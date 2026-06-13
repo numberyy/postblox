@@ -36,7 +36,6 @@ use theme::ThemeName;
 /// to ride out a redraw or a brief async stall without dropping
 /// keystrokes; small enough that we can't grow unboundedly.
 const KEY_EVENT_CHANNEL_CAPACITY: usize = 64;
-const _: () = assert!(KEY_EVENT_CHANNEL_CAPACITY == 64);
 /// Tick cadence used to expire toasts.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 /// Bound for the blocking event poll inside the reader thread.
@@ -411,23 +410,9 @@ impl Mailbox for MailboxClient {
     }
 }
 
-/// Run the TUI against the daemon listening on `socket_path` using
-/// the type-default theme.
-///
-/// # Errors
-///
-/// Returns:
-/// - [`TuiError::Connect`] if the initial connect to the daemon socket
-///   fails.
-/// - [`TuiError::Terminal`] if entering the alternate screen, drawing,
-///   or restoring the terminal fails.
-pub async fn run(socket_path: PathBuf) -> Result<(), TuiError> {
-    run_with_theme(socket_path, None).await
-}
-
-/// Same as [`run`], but lets the caller pre-select the initial theme
-/// (e.g. from `postblox.toml [tui] theme = "..."`). `None` keeps the
-/// type-default.
+/// Run the TUI against the daemon listening on `socket_path`. The
+/// caller may pre-select the initial theme (e.g. from `postblox.toml
+/// [tui] theme = "..."`); `None` keeps the type-default.
 ///
 /// # Errors
 ///
@@ -1265,13 +1250,7 @@ async fn run_forward<C: Mailbox + ?Sized>(app: &mut AppState, client: &mut C) {
                         Err(_) => failed_attachments.push(bytes.filename),
                     }
                 }
-                failed_attachments.extend(batch.failed.into_iter().map(|failure| {
-                    if failure.filename.is_empty() {
-                        failure.attachment_id.to_string()
-                    } else {
-                        failure.filename
-                    }
-                }));
+                failed_attachments.extend(batch.failed.into_iter().map(forward_failure_label));
             }
             Err(_) => {
                 failed_attachments.extend(attachment_ids.iter().map(|attachment_id| {
@@ -1332,6 +1311,30 @@ fn estimated_forward_attachment_wire_bytes(size_bytes: i64) -> usize {
         .saturating_add(512)
 }
 
+/// Render a per-attachment forward failure for the user-facing toast,
+/// surfacing the daemon's `message` (and `code` when present) so the
+/// reason is visible instead of a bare filename.
+fn forward_failure_label(failure: ipc::ForwardAttachmentFailure) -> String {
+    let name = if failure.filename.is_empty() {
+        failure.attachment_id.to_string()
+    } else {
+        failure.filename
+    };
+    let mut reason = failure.message.trim().to_string();
+    if !failure.code.is_empty() {
+        if reason.is_empty() {
+            reason = failure.code;
+        } else {
+            reason = format!("{reason} ({})", failure.code);
+        }
+    }
+    if reason.is_empty() {
+        name
+    } else {
+        format!("{name}: {reason}")
+    }
+}
+
 fn forward_attachment_label(
     metas: &[ipc::ForwardAttachmentMeta],
     attachment_id: AttachmentId,
@@ -1354,7 +1357,13 @@ async fn materialise_forward_attachment(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     let dir = std::env::temp_dir().join("postblox-forward");
     tokio::fs::create_dir_all(&dir).await?;
-    let unique = format!("{}-{}", Uuid::new_v4().simple(), bytes.filename);
+    // `bytes.filename` is attacker-controlled (MIME header); reduce it to
+    // a sanitized leaf so it can't escape the temp dir (`../../...`).
+    let unique = format!(
+        "{}-{}",
+        Uuid::new_v4().simple(),
+        safe_export_filename(&bytes.filename)
+    );
     let path = dir.join(unique);
     tokio::fs::write(&path, &decoded).await?;
     Ok(app::ComposerAttachment {
@@ -1383,7 +1392,13 @@ async fn materialise_draft_attachment(
     })?;
     let dir = std::env::temp_dir().join("postblox-drafts");
     tokio::fs::create_dir_all(&dir).await?;
-    let unique = format!("{}-{}", Uuid::new_v4().simple(), bytes.filename);
+    // `bytes.filename` is attacker-controlled (MIME header); reduce it to
+    // a sanitized leaf so it can't escape the temp dir (`../../...`).
+    let unique = format!(
+        "{}-{}",
+        Uuid::new_v4().simple(),
+        safe_export_filename(&bytes.filename)
+    );
     let path = dir.join(unique);
     tokio::fs::write(&path, decoded).await?;
     Ok(app::ComposerAttachment {
@@ -1739,6 +1754,16 @@ async fn handle_composer_key<C: Mailbox + ?Sized>(
             }
             false
         }
+        // Ctrl-N / Ctrl-P move the attachment cursor so Ctrl-K removes
+        // the chosen row instead of always targeting row 0.
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.move_compose_attachment_selection(1);
+            false
+        }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.move_compose_attachment_selection(-1);
+            false
+        }
         KeyCode::Esc => {
             if app.clear_composer_body_selection() {
                 app.set_status("Body selection cleared");
@@ -1882,7 +1907,7 @@ async fn handle_compose_attach_key(key: KeyEvent, app: &mut AppState) {
                 app.set_status(format!("Attached {name}"));
             }
             Err(err) => {
-                let text = err.toast_text();
+                let text = err.to_string();
                 app.push_toast(app::ToastKind::Error, text.clone(), Instant::now());
                 app.set_error(text);
                 app.cancel_compose_attach();
@@ -1891,10 +1916,8 @@ async fn handle_compose_attach_key(key: KeyEvent, app: &mut AppState) {
         KeyCode::Backspace => {
             app.backspace_compose_attach();
         }
-        KeyCode::Char(ch) => {
-            if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                app.push_compose_attach_char(ch);
-            }
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.push_compose_attach_char(ch);
         }
         _ => {}
     }
@@ -3199,11 +3222,32 @@ fn record_error(app: &mut AppState, error: ipc::MailboxError) {
 }
 
 fn setup_terminal() -> Result<CrosstermTerminal, TuiError> {
+    // The crate compiles with `panic = "abort"`, so a Drop guard would
+    // never run. A panic hook restores the terminal (raw mode +
+    // alternate screen) before the process aborts, otherwise the user's
+    // shell is left wedged after a panic inside `terminal.draw`.
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode(); // best-effort: panic teardown, nothing useful to do on failure
+        let _ = execute!(io::stdout(), LeaveAlternateScreen); // best-effort: panic teardown
+        prev(info);
+    }));
+
     enable_raw_mode()?;
+    // From here on, any early return must drop raw mode first.
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    if let Err(error) = execute!(stdout, EnterAlternateScreen) {
+        let _ = disable_raw_mode(); // best-effort: undo raw mode before surfacing the enter failure
+        return Err(error.into());
+    }
     let backend = CrosstermBackend::new(stdout);
-    Ok(Terminal::new(backend)?)
+    match Terminal::new(backend) {
+        Ok(terminal) => Ok(terminal),
+        Err(error) => {
+            let _ = disable_raw_mode(); // best-effort: undo raw mode before surfacing the construction failure
+            Err(error.into())
+        }
+    }
 }
 
 fn restore_terminal(terminal: &mut CrosstermTerminal) -> Result<(), TuiError> {
@@ -3449,9 +3493,7 @@ mod tests {
                 destination_path.into(),
             ));
             Ok(ipc::AttachmentExportResult {
-                attachment_id,
                 destination_path: destination_path.display().to_string(),
-                bytes_copied: 12,
             })
         }
 
@@ -3588,10 +3630,8 @@ mod tests {
             }
             Ok(self.forward_attachment_bytes.clone().unwrap_or_else(|| {
                 ipc::ForwardAttachmentBytes {
-                    attachment_id,
                     filename: "att.bin".into(),
                     content_type: "application/octet-stream".into(),
-                    size_bytes: 0,
                     content_base64: String::new(),
                 }
             }))
@@ -3613,11 +3653,9 @@ mod tests {
                 ipc::ForwardAttachmentBatch {
                     attachments: attachment_ids
                         .iter()
-                        .map(|attachment_id| ipc::ForwardAttachmentBytes {
-                            attachment_id: *attachment_id,
+                        .map(|_attachment_id| ipc::ForwardAttachmentBytes {
                             filename: "att.bin".into(),
                             content_type: "application/octet-stream".into(),
-                            size_bytes: 0,
                             content_base64: String::new(),
                         })
                         .collect(),
@@ -4572,8 +4610,9 @@ mod tests {
         .await;
 
         assert!(!quit);
-        assert_eq!(app.theme, ThemeName::Dark);
-        assert_eq!(app.status, "Theme: dark");
+        // Default is Dark; the first cycle step lands on Light.
+        assert_eq!(app.theme, ThemeName::Light);
+        assert_eq!(app.status, "Theme: light");
     }
 
     #[tokio::test]
@@ -6610,17 +6649,13 @@ mod tests {
         let mut prepared = forward_prepared_fixture(message.id, account_id);
         prepared.forwarded_attachments = vec![
             ipc::ForwardAttachmentMeta {
-                message_id: message.id,
                 attachment_id: first_id,
                 filename: "first.txt".into(),
-                content_type: "text/plain".into(),
                 size_bytes: 5,
             },
             ipc::ForwardAttachmentMeta {
-                message_id: message.id,
                 attachment_id: second_id,
                 filename: "second.txt".into(),
-                content_type: "text/plain".into(),
                 size_bytes: 6,
             },
         ];
@@ -6629,17 +6664,13 @@ mod tests {
             forward_attachment_batch: Some(ipc::ForwardAttachmentBatch {
                 attachments: vec![
                     ipc::ForwardAttachmentBytes {
-                        attachment_id: first_id,
                         filename: "first.txt".into(),
                         content_type: "text/plain".into(),
-                        size_bytes: 5,
                         content_base64: base64::engine::general_purpose::STANDARD.encode(b"first"),
                     },
                     ipc::ForwardAttachmentBytes {
-                        attachment_id: second_id,
                         filename: "second.txt".into(),
                         content_type: "text/plain".into(),
-                        size_bytes: 6,
                         content_base64: base64::engine::general_purpose::STANDARD.encode(b"second"),
                     },
                 ],
@@ -6685,17 +6716,13 @@ mod tests {
         let mut prepared = forward_prepared_fixture(message.id, account_id);
         prepared.forwarded_attachments = vec![
             ipc::ForwardAttachmentMeta {
-                message_id: message.id,
                 attachment_id: ok_id,
                 filename: "ok.txt".into(),
-                content_type: "text/plain".into(),
                 size_bytes: 2,
             },
             ipc::ForwardAttachmentMeta {
-                message_id: message.id,
                 attachment_id: missing_id,
                 filename: "missing.bin".into(),
-                content_type: "application/octet-stream".into(),
                 size_bytes: 0,
             },
         ];
@@ -6703,10 +6730,8 @@ mod tests {
             forward_prepared: Some(prepared),
             forward_attachment_batch: Some(ipc::ForwardAttachmentBatch {
                 attachments: vec![ipc::ForwardAttachmentBytes {
-                    attachment_id: ok_id,
                     filename: "ok.txt".into(),
                     content_type: "text/plain".into(),
-                    size_bytes: 2,
                     content_base64: base64::engine::general_purpose::STANDARD.encode(b"ok"),
                 }],
                 failed: vec![ipc::ForwardAttachmentFailure {
@@ -6729,22 +6754,20 @@ mod tests {
         let composer = app.composer.as_ref().unwrap();
         assert_eq!(composer.attachments().len(), 1);
         assert_eq!(composer.attachments()[0].filename, "ok.txt");
-        assert!(app
-            .toasts
-            .iter()
-            .any(|toast| toast.text.contains("missing.bin")));
+        assert!(app.toasts.iter().any(|toast| {
+            toast.text.contains("missing.bin")
+                && toast.text.contains("attachment unavailable offline")
+                && toast.text.contains("unavailable_offline")
+        }));
         assert_eq!(app.status, "Forward");
     }
 
     #[test]
     fn test_forward_attachment_batches_split_by_count_and_wire_budget() {
-        let message_id = MessageId::new();
         let small = (0..=FORWARD_ATTACHMENT_BATCH_MAX_IDS)
             .map(|index| ipc::ForwardAttachmentMeta {
-                message_id,
                 attachment_id: AttachmentId::new(),
                 filename: format!("small-{index}.txt"),
-                content_type: "text/plain".into(),
                 size_bytes: 1,
             })
             .collect::<Vec<_>>();
@@ -6756,10 +6779,8 @@ mod tests {
         let large_size = (FORWARD_ATTACHMENT_BATCH_WIRE_BUDGET / 2) as i64;
         let large = (0..2)
             .map(|index| ipc::ForwardAttachmentMeta {
-                message_id,
                 attachment_id: AttachmentId::new(),
                 filename: format!("large-{index}.bin"),
-                content_type: "application/octet-stream".into(),
                 size_bytes: large_size,
             })
             .collect::<Vec<_>>();
@@ -7837,5 +7858,39 @@ mod tests {
             "usage error must not get a suggestion in {error:?}"
         );
         assert_eq!(error, "usage: move <folder>");
+    }
+
+    #[test]
+    fn test_safe_export_filename_empty_falls_back_to_default() {
+        assert_eq!(safe_export_filename(""), "attachment.bin");
+    }
+
+    #[test]
+    fn test_safe_export_filename_strips_traversal_to_leaf() {
+        assert_eq!(safe_export_filename("../../etc/passwd"), "passwd");
+    }
+
+    #[test]
+    fn test_safe_export_filename_all_dots_falls_back_to_default() {
+        assert_eq!(safe_export_filename("..."), "attachment.bin");
+    }
+
+    #[test]
+    fn test_safe_export_filename_absolute_path_keeps_leaf_only() {
+        assert_eq!(safe_export_filename("/etc/secret/passwd"), "passwd");
+    }
+
+    #[test]
+    fn test_safe_export_filename_preserves_unicode_leaf() {
+        assert_eq!(
+            safe_export_filename("résumé_läufer.pdf"),
+            "résumé_läufer.pdf"
+        );
+    }
+
+    #[test]
+    fn test_safe_export_filename_strips_leading_dot_from_dotfile() {
+        // Leading dots are trimmed, so a dotfile loses its leading dot.
+        assert_eq!(safe_export_filename(".bashrc"), "bashrc");
     }
 }

@@ -29,9 +29,7 @@ use super::app::{
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub(crate) struct AttachmentExportResult {
-    pub(crate) attachment_id: AttachmentId,
     pub(crate) destination_path: String,
-    pub(crate) bytes_copied: u64,
 }
 
 /// Decoded `message.prepare_reply` response.
@@ -59,10 +57,8 @@ pub(crate) struct ForwardPrepared {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub(crate) struct ForwardAttachmentMeta {
-    pub(crate) message_id: MessageId,
     pub(crate) attachment_id: AttachmentId,
     pub(crate) filename: String,
-    pub(crate) content_type: String,
     pub(crate) size_bytes: i64,
 }
 
@@ -71,10 +67,8 @@ pub(crate) struct ForwardAttachmentMeta {
 /// [`ForwardAttachmentBytes::decoded_bytes`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub(crate) struct ForwardAttachmentBytes {
-    pub(crate) attachment_id: AttachmentId,
     pub(crate) filename: String,
     pub(crate) content_type: String,
-    pub(crate) size_bytes: i64,
     pub(crate) content_base64: String,
 }
 
@@ -126,8 +120,6 @@ pub(crate) struct DraftGetResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub(crate) struct DraftAttachmentPayload {
-    pub(crate) id: Uuid,
-    pub(crate) draft_id: DraftId,
     pub(crate) filename: String,
     pub(crate) content_type: String,
     pub(crate) size_bytes: i64,
