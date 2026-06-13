@@ -5,24 +5,22 @@ ceremony. A few hard rules.
 
 ## Branch model
 
-- **`main`** — the only branch on the public repo. Only advances when a
-  release is tagged.
-- Active development happens in a private mirror; the maintainer lands
-  PRs there and ships them to `main` as part of a release.
-- Open external PRs against `main`. Use topic branches:
-  `feat/<name>`, `fix/<name>`, `docs/<name>`, `chore/<name>`.
+- **`main`** — stable; PRs land here.
+- **`dev`** — active development.
+- Open PRs against `main`. Use topic branches: `feat/<name>`,
+  `fix/<name>`, `docs/<name>`, `chore/<name>`.
 
 ## Before opening a PR
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 cargo deny check        # optional locally; CI enforces
 ```
 
-CI runs the same checks across Linux + macOS plus an MSRV build. PRs
-must be green before review.
+Or just `just check`. CI runs the same across Linux + macOS plus an MSRV
+build. PRs must be green before review.
 
 ## Commit style
 
@@ -37,27 +35,55 @@ docs: clarify MCP gate evaluation order
 chore: bump sqlx to 0.8.6
 ```
 
-Squash-merge. History stays linear.
-
 ## Code style
 
-The project's hard rules live in [`CLAUDE.md`](CLAUDE.md). The short
-version:
+These are hard rules, not suggestions — a violation is a PR comment.
 
-1. **Every PR must be usable by itself.** No trait setup for "the next PR."
-2. **No abstractions before the third use.** Concrete first.
-3. **Delete code that isn't tested.** Untested = liability.
-4. **Bound everything.** No unbounded channels, queues, or pools.
-5. **Comments explain WHY, not WHAT.** If you need a comment for the
-   what, simplify the code instead.
+1. **Every PR must be usable by itself.** No trait setup for "the next
+   PR," no placeholder files, no empty modules with `todo!()`.
+2. **No abstractions before the third use.** Write concrete first; extract
+   a trait only when three real implementations create duplication.
+   (Grouping arguments into a record/options struct is data, not an
+   abstraction — that's fine.)
+3. **Delete code that isn't tested.** Untested, unreachable code is a
+   liability. No test and no live path → remove it.
+4. **Bound everything.** No unbounded channels, queues, or pools. Every
+   buffer has a cap.
+5. **Comments explain WHY, not WHAT.** If you need a comment to say what
+   the code does, simplify the code instead.
+6. **`thiserror` per module — no giant `AppError`.** `anyhow` is confined
+   to `src/bin/*` and `src/main.rs`. Error messages are lowercase with no
+   trailing punctuation.
+7. **Never `let _ = <Result>`** without a `// best-effort …` comment
+   explaining why the error is dropped.
+8. **No mutable global state** — no `lazy_static!`, no mutable statics.
+   Immutable `OnceLock` handle caches (e.g. a shared HTTP client) are fine.
+9. **Async is for real I/O only** (HTTP, DB, sockets, subprocesses).
+   Parsing, formatting, theme resolution, and small state transitions stay
+   sync.
+
+### Layering
+
+- `crates/postblox-mail/` MUST NOT import any framework crate — no tokio,
+  sqlx, reqwest, ratatui, lettre, or anyhow. It owns the parser, builder,
+  reply extraction, and threading as framework-free code.
+- No module opens its own DB connection — the pool comes from the daemon.
+
+### Naming
+
+- `PascalCase` types/traits, `snake_case` fns/modules,
+  `SCREAMING_SNAKE_CASE` consts. Acronyms as words: `Uuid`, `Mcp`, `Http`.
+- 4-space indent, `max_width = 100`, edition 2021. Run `cargo fmt` on save.
 
 ## Tests
 
 - New module → tests for that module. No exceptions.
-- `mail/` MUST NOT import a framework crate.
-- Integration tests against an in-memory pool: `db::test_pool()`.
+- Integration tests run against an in-memory pool: `db::test_pool()`.
 - Edge cases (empty/zero, one, many, boundary, malformed, unicode,
   concurrent) are mandatory, not optional.
+- Test naming: `test_<thing>_<scenario>_<expected_result>`.
+- Mock at trait boundaries, not at depth. Tag external/slow tests with
+  `#[ignore]` plus a one-line reason.
 
 ## Licensing your contribution
 
@@ -71,10 +97,7 @@ additional terms or conditions.
 - **Bug reports**: open a GitHub issue with the bug template.
 - **Security issues**: see [`SECURITY.md`](SECURITY.md). Don't open a
   public issue.
-- **Feature requests**: open a discussion or issue with the feature
-  template; small, surgical, justified.
+- **Feature requests**: open an issue with the feature template; small,
+  surgical, justified.
 
-## Code of Conduct
-
-By participating you agree to abide by the
-[Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
+Be respectful and assume good faith. That's the whole code of conduct.

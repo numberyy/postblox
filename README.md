@@ -1,6 +1,6 @@
 # postblox
 
-[![CI](https://github.com/numbery/postblox/actions/workflows/ci.yml/badge.svg)](https://github.com/numbery/postblox/actions/workflows/ci.yml)
+[![CI](https://github.com/numberyy/postblox/actions/workflows/ci.yml/badge.svg)](https://github.com/numberyy/postblox/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE-APACHE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.80-orange.svg)](rust-toolchain.toml)
@@ -12,8 +12,9 @@ keeps a local SQLite mirror in real time over IMAP IDLE, and exposes an
 MCP bridge so AI agents can read events freely and call tools through
 per-tool / per-pattern approval gates.
 
-> **Status:** pre-1.0. Active development happens in a private mirror;
-> `main` advances on tagged releases.
+> **Status:** pre-1.0 and under active development. Expect rough edges
+> and breaking changes. `main` is stable; day-to-day work happens on
+> `dev`.
 
 ## Why
 
@@ -47,10 +48,19 @@ A single daemon owns the DB pool and the IMAP IDLE connections. Clients
 (the TUI, the MCP shim) speak length-prefixed JSON frames over a Unix
 socket — `~/.local/share/postblox/postbloxd.sock` by default.
 
+## Screenshots
+
+The TUI ships three themes; `dark` is the default.
+
+![postblox TUI — dark theme](assets/postblox-dark.png)
+
+![postblox TUI — light theme](assets/postblox-light.png)
+
+
 ## Install
 
 ```sh
-git clone https://github.com/numbery/postblox
+git clone https://github.com/numberyy/postblox
 cd postblox
 cargo install --path . --locked
 ```
@@ -79,11 +89,16 @@ workspace clippy with `-D warnings`, and the workspace test suite.
 ```sh
 # Start the daemon (foreground; ctrl-c to stop).
 postbloxd
+
+# In another shell, launch the TUI.
+postblox
 ```
 
-Then, in another shell, connect a client. (The TUI lands in R3c; until
-then, you can drive the daemon from any process that speaks the IPC
-protocol — see `tests/ipc_integration.rs` for the wire format.)
+The TUI drives account setup, sync, search, reading, and composing. The
+MCP bridge (`postblox-mcp`) speaks JSON-RPC over stdio for AI agents —
+point your MCP client at it to read events and call gated tools. Both
+clients talk to the same daemon over the Unix socket; see
+`tests/ipc_integration.rs` for the raw wire format.
 
 ## Configuration
 
@@ -102,20 +117,18 @@ Tracked in [`CHANGELOG.md`](CHANGELOG.md). At a glance:
 - SQLite schema + FTS5 search ✅
 - `postbloxd` daemon over a Unix socket ✅
 - Local write-through ops + event bus ✅
-- IMAP IDLE workers + SMTP submission
-- TUI client over the socket
-- MCP bridge with per-tool, per-pattern approval gates
-- OS keyring + Gmail OAuth2
+- IMAP IDLE workers + SMTP submission ✅
+- TUI client over the socket ✅
+- MCP bridge with per-tool, per-pattern approval gates ✅
+- OS keyring + Gmail OAuth2 ✅
 - Optional Bitwarden secret-store backend
 - Optional LLM-gateway-driven hybrid search
 
 ## Contributing
 
-PRs are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and
-[`CLAUDE.md`](CLAUDE.md) (the project's code rules) before opening one.
-
-Open PRs against `main`. A maintainer will land them via a private
-integration branch and tag a release.
+PRs are welcome. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) (the project's
+code rules) before opening one. Open PRs against `main`; CI must be green
+before review.
 
 ## License
 
