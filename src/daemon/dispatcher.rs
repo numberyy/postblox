@@ -1846,9 +1846,10 @@ async fn op_message_send(
             "drafts::delete after send failed"
         );
     } else {
-        // Tell subscribers the draft is gone so the drafts pane drops the
-        // row live, the same way other write-through ops publish on the
-        // mail topic. The sent message itself arrives via IMAP sync.
+        // Publish a mail-update so subscribers refresh and the sent draft
+        // drops out of the drafts pane; the sent message itself arrives via
+        // IMAP sync of the Sent folder. (The drafts pane reacts by
+        // invalidating its folder cache, not by reading these fields.)
         hub.publish(
             Topic::MailUpdated,
             json!({

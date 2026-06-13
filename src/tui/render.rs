@@ -297,6 +297,9 @@ fn row_with_right_date(
     content_width: usize,
     theme: &Theme,
 ) -> Line<'static> {
+    // Clamp the date to the pane width so a pathologically narrow pane can't
+    // leave zero room for the left columns.
+    let date = take_width(&date, content_width);
     let date_w = display_width(&date);
     let avail = content_width.saturating_sub(date_w + 1);
     let (mut spans, used) = truncate_spans(left, avail);

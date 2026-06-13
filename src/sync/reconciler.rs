@@ -154,7 +154,15 @@ pub async fn reconcile_folder(
     }
 
     let mut inserted: u64 = 0;
-    let mut last_seen_uid = folder.last_seen_uid;
+    // On a UIDVALIDITY change we wiped the folder and refetch from UID 1, so
+    // the server reassigned UIDs from scratch — the old high-water mark must
+    // NOT carry forward into the running max, or it would permanently skip
+    // the reassigned low-UID messages. Reset the baseline in that case.
+    let mut last_seen_uid = if needs_full_resync {
+        None
+    } else {
+        folder.last_seen_uid
+    };
     // Drain the folder in bounded windows: each `sync_folder` returns at
     // most FETCH_WINDOW message bodies, so peak memory stays bounded even
     // on a first sync of a large mailbox. `has_more` advances us to the
