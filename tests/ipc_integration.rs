@@ -1028,7 +1028,7 @@ async fn mcp_approval_ops_publish_requested_and_decided_events() {
             json!({
                 "id": approval_id,
                 "state": "allowed",
-                "decided_by": "test-user",
+                "decided_by": "mcp:test",
             }),
         )
         .await
@@ -1050,7 +1050,7 @@ async fn mcp_approval_ops_publish_requested_and_decided_events() {
             .unwrap()
             .unwrap();
     assert_eq!(approval.state, ApprovalState::Allowed);
-    assert_eq!(approval.decided_by.as_deref(), Some("test-user"));
+    assert_eq!(approval.decided_by.as_deref(), Some("mcp:test"));
 }
 
 #[tokio::test]
@@ -1592,11 +1592,14 @@ impl ScriptedSync {
                         .filter(|m| m.uid >= from_uid)
                         .cloned()
                         .collect();
+                    let window_hi = messages.iter().map(|m| m.uid).max().unwrap_or(0);
                     Ok(FolderSync {
                         uid_validity: Some(*uid_validity.lock().unwrap()),
                         uid_next: Some(*uid_next.lock().unwrap()),
                         exists: messages.len() as u32,
                         messages,
+                        window_hi,
+                        has_more: false,
                     })
                 });
         }
@@ -1636,6 +1639,8 @@ impl Default for RecordingSync {
                     uid_next: Some(1),
                     exists: 0,
                     messages: vec![],
+                    window_hi: 0,
+                    has_more: false,
                 })
             });
         Self {

@@ -21,18 +21,6 @@ pub enum SyncState {
     Error,
 }
 
-impl SyncState {
-    /// Return the lowercase wire string for this state.
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Polling => "polling",
-            Self::Syncing => "syncing",
-            Self::Error => "error",
-        }
-    }
-}
-
 /// Payload published on `Topic::SyncState`. `last_error` is `Some` when
 /// `state == SyncState::Error`; otherwise `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

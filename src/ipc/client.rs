@@ -96,6 +96,7 @@ impl Client {
                         };
                         match waker {
                             Some(tx) => {
+                                // best-effort: the caller's request future may have been dropped before the response arrived.
                                 let _ = tx.send(r);
                             }
                             None => {

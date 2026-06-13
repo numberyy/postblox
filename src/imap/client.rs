@@ -20,6 +20,31 @@ use crate::oauth::google::xoauth2_sasl_string;
 
 use super::error::ImapError;
 
+/// Deadline for each connect/auth/select network phase. The long-lived
+/// IDLE wait has its own (much larger) timeout; this only bounds the
+/// setup handshakes so a server that accepts the TCP connection but never
+/// responds cannot wedge a worker — or block daemon shutdown — forever.
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum number of UIDs pulled (with bodies) in a single
+/// [`fetch_uid_range`] batch. Bounds peak memory on a first sync of a
+/// large mailbox; the reconciler drains the remainder over further
+/// batches. See CLAUDE.md "Bound Everything".
+const FETCH_WINDOW: u32 = 500;
+
+/// Run `fut` under [`NETWORK_TIMEOUT`], mapping an elapsed deadline to
+/// [`ImapError::Timeout`] tagged with `phase`.
+async fn timed<T, E, F>(phase: &'static str, fut: F) -> Result<T, ImapError>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: Into<ImapError>,
+{
+    match tokio::time::timeout(NETWORK_TIMEOUT, fut).await {
+        Ok(result) => result.map_err(Into::into),
+        Err(_) => Err(ImapError::Timeout(phase.into())),
+    }
+}
+
 /// A connected, authenticated IMAP session. Generic over the transport
 /// stream so tests can swap in a plain TCP socket.
 pub type Session<S> = async_imap::Session<S>;
@@ -102,31 +127,9 @@ impl Connector for PlainConnector {
     }
 }
 
-/// Open an IMAP connection, read the greeting, log in, return the
-/// authenticated session.
-///
-/// # Errors
-///
-/// Returns:
-/// - [`ImapError::Io`] if the TCP connect or stream read fails.
-/// - [`ImapError::Tls`] if the TLS handshake fails.
-/// - [`ImapError::InvalidName`] if `host` is not a valid TLS server name.
-/// - [`ImapError::Auth`] if the server rejects the password.
-/// - [`ImapError::Protocol`] if the greeting is missing or any other
-///   IMAP-level failure occurs.
-pub async fn connect<C: Connector>(
-    connector: &C,
-    host: &str,
-    port: u16,
-    username: &str,
-    password: &str,
-) -> Result<Session<C::Stream>, ImapError> {
-    let credential = MailCredential::password(password);
-    connect_with_credential(connector, host, port, username, &credential).await
-}
-
 /// Open an IMAP connection and authenticate with the given
-/// [`MailCredential`] (password or `XOAUTH2`).
+/// [`MailCredential`] (password or `XOAUTH2`). The connect, greeting,
+/// and login phases each run under a bounded network timeout.
 ///
 /// # Errors
 ///
@@ -135,6 +138,7 @@ pub async fn connect<C: Connector>(
 /// - [`ImapError::Tls`] if the TLS handshake fails.
 /// - [`ImapError::InvalidName`] if `host` is not a valid TLS server name.
 /// - [`ImapError::Auth`] if `LOGIN` or `AUTHENTICATE XOAUTH2` is rejected.
+/// - [`ImapError::Timeout`] if any handshake phase exceeds the deadline.
 /// - [`ImapError::Protocol`] if the greeting is missing or any other
 ///   IMAP-level failure occurs.
 pub async fn connect_with_credential<C: Connector>(
@@ -144,28 +148,31 @@ pub async fn connect_with_credential<C: Connector>(
     username: &str,
     credential: &MailCredential,
 ) -> Result<Session<C::Stream>, ImapError> {
-    let stream = connector.connect(host, port).await?;
+    let stream = timed("connect", connector.connect(host, port)).await?;
     let mut client = async_imap::Client::new(stream);
-    let greeting = client
-        .read_response()
-        .await
-        .map_err(ImapError::from)?
+    let greeting = timed("greeting", client.read_response())
+        .await?
         .ok_or_else(|| ImapError::Protocol("server closed connection before greeting".into()))?;
     drop(greeting);
     match credential.kind() {
-        CredentialKind::Password => client
-            .login(username, credential.secret())
-            .await
-            .map_err(|(e, _)| ImapError::from(e)),
+        CredentialKind::Password => {
+            match tokio::time::timeout(NETWORK_TIMEOUT, client.login(username, credential.secret()))
+                .await
+            {
+                Ok(result) => result.map_err(|(e, _)| ImapError::from(e)),
+                Err(_) => Err(ImapError::Timeout("login".into())),
+            }
+        }
         CredentialKind::OAuth2Bearer => {
             let auth = Xoauth2 {
                 username,
                 access_token: credential.secret(),
             };
-            client
-                .authenticate("XOAUTH2", auth)
-                .await
-                .map_err(|(e, _)| ImapError::from(e))
+            match tokio::time::timeout(NETWORK_TIMEOUT, client.authenticate("XOAUTH2", auth)).await
+            {
+                Ok(result) => result.map_err(|(e, _)| ImapError::from(e)),
+                Err(_) => Err(ImapError::Timeout("authenticate".into())),
+            }
         }
     }
 }
@@ -239,6 +246,13 @@ pub struct FolderSync {
     pub exists: u32,
     /// Messages returned by the `UID FETCH` of the requested range.
     pub messages: Vec<FetchedMessage>,
+    /// Highest UID this batch's window covered. The reconciler advances
+    /// `last_seen_uid` to at least this value so sparse/empty windows
+    /// still make progress.
+    pub window_hi: u32,
+    /// Whether UIDs remain above `window_hi`; when set, the reconciler
+    /// fetches the next batch from `window_hi + 1`.
+    pub has_more: bool,
 }
 
 /// A single message returned by a UID-FETCH. `raw` holds RFC822 bytes;
@@ -320,30 +334,59 @@ pub async fn fetch_uid_range<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send + 'static,
 {
-    let mailbox = session.select(folder).await.map_err(ImapError::from)?;
+    let mailbox = timed("select", session.select(folder)).await?;
     let uid_validity = mailbox.uid_validity;
     let uid_next = mailbox.uid_next;
     let exists = mailbox.exists;
 
-    // Empty mailbox: nothing to pull.
-    if exists == 0 {
+    let from = from_uid.max(1);
+    // Highest assignable existing UID is `uid_next - 1` when the server
+    // reports UIDNEXT. Used to bound the window and detect "caught up".
+    let server_hi = uid_next.map(|n| n.saturating_sub(1));
+
+    // Empty mailbox, or we're already past the high-water mark: nothing
+    // to pull. `window_hi = from_uid` keeps the reconciler's bookkeeping
+    // monotonic without inventing UIDs.
+    if exists == 0 || server_hi.is_some_and(|hi| from > hi) {
         return Ok(FolderSync {
             uid_validity,
             uid_next,
             exists,
             messages: vec![],
+            // We've covered everything through the server's high UID (or,
+            // if UIDNEXT is unknown, nothing new) — never advance past a
+            // UID that could still be assigned to a future message.
+            window_hi: server_hi.unwrap_or(from.saturating_sub(1)),
+            has_more: false,
         });
     }
 
-    // `<from>:*` selects everything from `from_uid` upward, regardless of
-    // whether the server's actual high UID is `uid_next - 1` or lower.
-    let range = format!("{}:*", from_uid.max(1));
-    let stream = session
-        .uid_fetch(&range, "(UID FLAGS INTERNALDATE RFC822)")
-        .await
-        .map_err(ImapError::from)?;
-    let fetches: Vec<async_imap::types::Fetch> =
-        stream.filter_map(|r| async move { r.ok() }).collect().await;
+    // Bound the batch to FETCH_WINDOW UIDs so a first sync of a large
+    // mailbox never materialises every body at once. When the window
+    // falls short of the server's high UID, signal `has_more` so the
+    // reconciler resumes from `window_hi + 1`.
+    let window_top = from.saturating_add(FETCH_WINDOW - 1);
+    let (range, window_hi, has_more) = match server_hi {
+        Some(hi) if window_top < hi => (format!("{from}:{window_top}"), window_top, true),
+        Some(hi) => (format!("{from}:{hi}"), hi, false),
+        // No UIDNEXT advertised: fall back to the unbounded range but
+        // still cap the upper UID so the batch can't be unbounded.
+        None => (format!("{from}:{window_top}"), window_top, false),
+    };
+    let stream = timed(
+        "uid_fetch",
+        session.uid_fetch(&range, "(UID FLAGS INTERNALDATE RFC822)"),
+    )
+    .await?;
+    let fetches: Vec<async_imap::types::Fetch> = match tokio::time::timeout(
+        NETWORK_TIMEOUT,
+        stream.filter_map(|r| async move { r.ok() }).collect(),
+    )
+    .await
+    {
+        Ok(fetches) => fetches,
+        Err(_) => return Err(ImapError::Timeout("uid_fetch body".into())),
+    };
 
     let messages: Vec<FetchedMessage> = fetches
         .into_iter()
@@ -369,6 +412,8 @@ where
         uid_next,
         exists,
         messages,
+        window_hi,
+        has_more,
     })
 }
 
@@ -400,7 +445,7 @@ pub async fn wait_for_idle_change<C: Connector>(
         cancel,
     } = request;
     let mut session = connect_with_credential(connector, host, port, username, credential).await?;
-    let capabilities = session.capabilities().await.map_err(ImapError::from)?;
+    let capabilities = timed("capabilities", session.capabilities()).await?;
     let supports_idle = capabilities
         .iter()
         .any(|cap| matches!(cap, Capability::Atom(name) if name.eq_ignore_ascii_case("IDLE")));
@@ -412,9 +457,9 @@ pub async fn wait_for_idle_change<C: Connector>(
         ));
     }
 
-    session.select(folder).await.map_err(ImapError::from)?;
+    timed("idle select", session.select(folder)).await?;
     let mut idle = session.idle();
-    idle.init().await.map_err(ImapError::from)?;
+    timed("idle init", idle.init()).await?;
 
     let response = {
         let (wait, interrupt) = idle.wait_with_timeout(timeout);

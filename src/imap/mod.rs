@@ -13,8 +13,8 @@ pub mod client;
 pub mod error;
 
 pub use client::{
-    connect, connect_with_credential, fetch_uid_range, list_folders, wait_for_idle_change,
-    Connector, FetchedMessage, FolderInfo, FolderSync, IdleOutcome, IdleRequest, PlainConnector,
+    connect_with_credential, fetch_uid_range, list_folders, wait_for_idle_change, Connector,
+    FetchedMessage, FolderInfo, FolderSync, IdleOutcome, IdleRequest, PlainConnector,
     RustlsConnector,
 };
 pub use error::ImapError;
@@ -22,6 +22,17 @@ pub use error::ImapError;
 use std::sync::Arc;
 
 use crate::auth::MailCredential;
+
+/// Convert a stored `i64` port into a `u16`, rejecting out-of-range
+/// values instead of silently truncating (e.g. `70000 as u16 == 4464`).
+///
+/// # Errors
+///
+/// Returns [`ImapError::InvalidPort`] if `raw` is negative or exceeds
+/// `u16::MAX`.
+pub fn port_u16(raw: i64) -> Result<u16, ImapError> {
+    u16::try_from(raw).map_err(|_| ImapError::InvalidPort(raw))
+}
 
 /// Erased entry point for [auth + folder list]: hides the underlying
 /// stream type so it can sit behind a `dyn` trait object.

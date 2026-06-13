@@ -12,7 +12,6 @@
 //! * `unsubscribe { sub_id }` op → server aborts that forwarder task.
 //! * Connection close → writer drops, forwarders unwind.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -75,6 +74,13 @@ const _: () = assert!(MAX_SUBS_PER_CONN == 32);
 /// Per-connection writer mailbox capacity. Bigger than typical TUI burst.
 pub(crate) const WRITER_MAILBOX: usize = 128;
 const _: () = assert!(WRITER_MAILBOX == 128);
+
+/// Per-connection cap on concurrently-dispatching request handlers. A
+/// client pipelining requests faster than dispatch drains would otherwise
+/// accumulate unbounded detached tasks; the reader awaits a free slot
+/// before reading the next frame.
+const MAX_INFLIGHT_REQUESTS: usize = 128;
+const _: () = assert!(MAX_INFLIGHT_REQUESTS == 128);
 
 /// Handle to a running server. Drop or call `shutdown` to stop the
 /// accept loop and close the socket file.
@@ -238,7 +244,7 @@ enum OutFrame {
 #[derive(Serialize)]
 struct EventOut {
     sub: u64,
-    topic: Cow<'static, str>,
+    topic: &'static str,
     data: Arc<Value>,
 }
 
@@ -286,8 +292,39 @@ async fn handle_connection<D: Dispatcher>(
     // a chatty client doesn't allocate per request. The cancel token
     // lets `ServerHandle::shutdown` cooperatively close idle readers
     // instead of orphaning them with `JoinHandle::abort`.
+    //
+    // Per-request handlers are tracked in a bounded `JoinSet` so a client
+    // pipelining faster than dispatch drains cannot accumulate unbounded
+    // detached tasks. When at capacity we await a free slot (a handler
+    // completing) before reading the next frame. The connection `cancel`
+    // token is raced inside each handler so a hung dispatch can't pin a
+    // slot — and the drain path below aborts whatever is still in flight.
+    let mut handlers: JoinSet<()> = JoinSet::new();
     let mut read_buf: Vec<u8> = Vec::with_capacity(1024);
     let reader_result: Result<(), WireError> = loop {
+        // Back-pressure: block reading new frames while saturated. Reap
+        // finished handlers until a slot frees up (or cancel fires).
+        while handlers.len() >= MAX_INFLIGHT_REQUESTS {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                _ = handlers.join_next() => {}
+            }
+            if cancel.is_cancelled() {
+                break;
+            }
+        }
+        if cancel.is_cancelled() {
+            break Ok(());
+        }
+
+        // NOTE: do not race `handlers.join_next()` against the frame read
+        // here. `read_frame_with_buf` uses `read_exact` and is NOT
+        // cancellation-safe across a partial frame, so dropping the read
+        // future mid-frame would corrupt the stream. The JoinSet is
+        // bounded by MAX_INFLIGHT_REQUESTS, so completed-but-unjoined
+        // handlers can't accumulate without bound; they are reaped by the
+        // saturation loop above and by `shutdown()` in the drain path.
         let req: Request = tokio::select! {
             biased;
             _ = cancel.cancelled() => break Ok(()),
@@ -303,25 +340,40 @@ async fn handle_connection<D: Dispatcher>(
         let out_tx = out_tx.clone();
         let subs = subs.clone();
         let next_sub_id = next_sub_id.clone();
+        let task_cancel = cancel.clone();
 
-        tokio::spawn(async move {
-            let response = match req.op.as_str() {
-                "subscribe" => handle_subscribe(&req, &hub, &subs, &next_sub_id, &out_tx).await,
-                "unsubscribe" => handle_unsubscribe(&req, &subs).await,
-                "ping" => Response::ok(req.id, json!({"pong": true})),
-                other => match other.parse::<Op>() {
-                    Ok(op) => match dispatcher.dispatch(op, req.args.clone()).await {
-                        Ok(data) => Response::ok(req.id, data),
-                        Err(err) => Response::err(req.id, err),
+        handlers.spawn(async move {
+            let dispatch = async {
+                let response = match req.op.as_str() {
+                    "subscribe" => handle_subscribe(&req, &hub, &subs, &next_sub_id, &out_tx).await,
+                    "unsubscribe" => handle_unsubscribe(&req, &subs).await,
+                    "ping" => Response::ok(req.id, json!({"pong": true})),
+                    other => match other.parse::<Op>() {
+                        Ok(op) => match dispatcher.dispatch(op, req.args.clone()).await {
+                            Ok(data) => Response::ok(req.id, data),
+                            Err(err) => Response::err(req.id, err),
+                        },
+                        Err(_) => Response::err(req.id, RpcError::unknown_op(other)),
                     },
-                    Err(_) => Response::err(req.id, RpcError::unknown_op(other)),
-                },
+                };
+                send_response(&out_tx, response).await;
             };
-            send_response(&out_tx, response).await;
+            // Race dispatch against connection cancellation so a hung
+            // backend can't keep the handler (and its slot) alive past
+            // shutdown.
+            tokio::select! {
+                biased;
+                _ = task_cancel.cancelled() => {}
+                _ = dispatch => {}
+            }
         });
     };
 
-    // Drain: stop accepting new requests, abort all forwarders, drop writer.
+    // Drain: stop accepting new requests, abort in-flight handlers and all
+    // forwarders, drop writer. Aborting the handlers (rather than awaiting
+    // them) guarantees `writer_task.await` below can't block on a hung
+    // dispatch holding the writer mailbox open.
+    handlers.shutdown().await;
     {
         let mut map = subs.lock().await;
         for (_, handle) in map.drain() {
@@ -329,6 +381,8 @@ async fn handle_connection<D: Dispatcher>(
         }
     }
     drop(out_tx);
+    // best-effort: a JoinError here means the writer task was aborted or
+    // panicked during drain — nothing actionable while tearing down.
     let _ = writer_task.await;
     reader_result
 }
@@ -354,8 +408,20 @@ async fn handle_subscribe(
         }
     };
 
+    // Subscribe to the hub before taking the subs lock so the only work
+    // done under the guard is the spawn + insert.
+    let mut rx = hub.subscribe(topic).await;
+    let sub_id = next_sub_id.fetch_add(1, Ordering::Relaxed);
+    let out_tx_fwd = out_tx.clone();
+    let topic_name = topic.as_str();
+
+    // Enforce the cap atomically: check-and-insert under a single lock
+    // guard. `tokio::spawn` is synchronous (it returns before the
+    // forwarder first awaits), so holding the guard across it is cheap and
+    // closes the TOCTOU window where two pipelined subscribes could both
+    // pass the length check and exceed MAX_SUBS_PER_CONN.
     {
-        let map = subs.lock().await;
+        let mut map = subs.lock().await;
         if map.len() >= MAX_SUBS_PER_CONN {
             return Response::err(
                 req.id,
@@ -365,35 +431,25 @@ async fn handle_subscribe(
                 ),
             );
         }
-    }
-
-    let sub_id = next_sub_id.fetch_add(1, Ordering::Relaxed);
-    let mut rx = hub.subscribe(topic).await;
-    let out_tx_fwd = out_tx.clone();
-    let topic_name = topic.as_str();
-
-    let handle = tokio::spawn(async move {
-        loop {
-            let payload: Arc<Value> = match rx.recv().await {
-                Ok(p) => p,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    Arc::new(json!({"lagged": n}))
+        let handle = tokio::spawn(async move {
+            loop {
+                let payload: Arc<Value> = match rx.recv().await {
+                    Ok(p) => p,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        Arc::new(json!({"lagged": n}))
+                    }
+                };
+                let event = EventOut {
+                    sub: sub_id,
+                    topic: topic_name,
+                    data: payload,
+                };
+                if out_tx_fwd.send(OutFrame::Event(event)).await.is_err() {
+                    break;
                 }
-            };
-            let event = EventOut {
-                sub: sub_id,
-                topic: Cow::Borrowed(topic_name),
-                data: payload,
-            };
-            if out_tx_fwd.send(OutFrame::Event(event)).await.is_err() {
-                break;
             }
-        }
-    });
-
-    {
-        let mut map = subs.lock().await;
+        });
         map.insert(sub_id, handle);
     }
     Response::ok(req.id, json!({"sub_id": sub_id, "topic": topic_str}))
@@ -673,5 +729,115 @@ mod tests {
         // listener is gone.
         let connect = Client::connect(&path).await;
         assert!(connect.is_err(), "no listener after shutdown");
+    }
+
+    /// Connection cap: opening MAX_CONNECTIONS+1 clients leaves the last
+    /// one unusable — the accept loop closes it immediately rather than
+    /// silently queueing it. We hold the first MAX_CONNECTIONS open, then
+    /// assert the extra connection can't complete a round-trip.
+    #[tokio::test]
+    async fn test_max_connections_rejects_beyond_cap() {
+        let ctx = start_server().await;
+
+        // Hold MAX_CONNECTIONS live clients so the counter is saturated.
+        let mut held = Vec::with_capacity(MAX_CONNECTIONS);
+        for _ in 0..MAX_CONNECTIONS {
+            let mut client = Client::connect(&ctx.path).await.unwrap();
+            // Round-trip ensures the server-side per-connection task is up
+            // and counted before we open the one that should be rejected.
+            let resp = client.request("ping", json!({})).await.unwrap();
+            assert!(resp.ok);
+            held.push(client);
+        }
+
+        // The (MAX_CONNECTIONS + 1)-th connection is accepted at the OS
+        // level but the accept loop drops the stream immediately. A
+        // request on it must not get a response (server closed the socket).
+        let mut extra = Client::connect(&ctx.path).await.unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            extra.request("ping", json!({})),
+        )
+        .await;
+        // The extra connection must not be served: either the request errors
+        // (connection closed) or we time out waiting for a response that
+        // never comes.
+        if let Ok(Ok(_)) = result {
+            panic!("connection beyond cap must not be served");
+        }
+
+        drop(held);
+    }
+
+    /// Subscription cap is enforced per connection: the (MAX_SUBS_PER_CONN
+    /// + 1)-th subscribe on one connection returns the `too_many_subs`
+    /// error code.
+    #[tokio::test]
+    async fn test_subscribe_beyond_cap_returns_too_many_subs() {
+        let ctx = start_server().await;
+        let mut client = Client::connect(&ctx.path).await.unwrap();
+
+        // Fill the cap. There are fewer than MAX_SUBS_PER_CONN distinct
+        // topics, so reuse MailNew — the cap counts subscriptions, not
+        // distinct topics.
+        for _ in 0..MAX_SUBS_PER_CONN {
+            let resp = client
+                .request("subscribe", json!({"topic": "mail.new"}))
+                .await
+                .unwrap();
+            assert!(resp.ok, "subscribe within cap must succeed");
+        }
+
+        let resp = client
+            .request("subscribe", json!({"topic": "mail.new"}))
+            .await
+            .unwrap();
+        assert!(!resp.ok, "subscribe beyond cap must fail");
+        assert_eq!(resp.error.unwrap().code, "too_many_subs");
+    }
+
+    /// A slow subscriber that never drains its event queue eventually
+    /// receives a `{"lagged": n}` event once the hub's per-topic broadcast
+    /// capacity overflows. We use a tiny hub capacity to force the lag
+    /// quickly.
+    #[tokio::test]
+    async fn test_slow_subscriber_receives_lagged_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lag.sock");
+        // Tiny per-topic capacity so a modest flood overflows the channel.
+        let hub = Arc::new(Hub::with_capacity(2));
+        let dispatcher = Arc::new(EchoDispatcher {
+            calls: AtomicU32::new(0),
+        });
+        let _server = listen(&path, dispatcher.clone(), hub.clone())
+            .await
+            .unwrap();
+
+        let mut client = Client::connect(&path).await.unwrap();
+        let sub = client.subscribe(Topic::MailNew).await.unwrap();
+
+        // Let the forwarder register before flooding.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Flood well past the broadcast capacity. The forwarder may relay
+        // some early events into the writer mailbox, but the broadcast
+        // receiver will fall behind and surface Lagged(n).
+        for i in 0..200 {
+            hub.publish(Topic::MailNew, json!({ "i": i })).await;
+        }
+
+        // Drain events until we observe a lag marker (or time out).
+        let lagged = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let event = client.next_event().await.unwrap();
+                assert_eq!(event.sub, sub);
+                if event.data.get("lagged").is_some() {
+                    return event.data["lagged"].as_u64().unwrap();
+                }
+            }
+        })
+        .await
+        .expect("slow subscriber must eventually receive a lagged event");
+        assert!(lagged >= 1, "lag count should be positive, got {lagged}");
     }
 }

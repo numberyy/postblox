@@ -28,15 +28,26 @@ pub enum ImapError {
     /// `host` is not a valid TLS server name.
     #[error("invalid server name: {0}")]
     InvalidName(String),
+
+    /// A stored port value did not fit in a `u16`.
+    #[error("invalid port: {0}")]
+    InvalidPort(i64),
+
+    /// A network phase (connect, TLS, login, or select) exceeded its
+    /// deadline. Distinct from [`ImapError::Io`] so a wedged server is
+    /// retried as a transient fault rather than terminating the worker.
+    #[error("timed out: {0}")]
+    Timeout(String),
 }
 
 impl From<async_imap::error::Error> for ImapError {
     fn from(e: async_imap::error::Error) -> Self {
-        // Surface the well-known auth-vs-other split so callers can
-        // distinguish bad creds from network/server issues.
+        // Surface the auth-vs-other split so callers can distinguish bad
+        // creds (permanent: stop the worker) from network/server issues
+        // (transient: retry). "authenticat" matches both "authentication"
+        // and "AuthenticationFailed" without the redundant second check.
         let msg = e.to_string();
-        let lower = msg.to_lowercase();
-        if lower.contains("authentication") || lower.contains("authenticationfailed") {
+        if msg.to_lowercase().contains("authenticat") {
             ImapError::Auth(msg)
         } else {
             ImapError::Protocol(msg)

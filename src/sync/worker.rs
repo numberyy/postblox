@@ -16,18 +16,39 @@ use super::{reconcile_folder, SyncError};
 
 /// Thin helper that publishes per-account `Topic::SyncState`
 /// transitions for one worker. Does no coalescing — subscribers handle
-/// rate-limiting if they care.
+/// rate-limiting if they care. Error transitions are also persisted to
+/// `accounts.sync_status` / `sync_error` so the state survives a restart.
 struct StateReporter {
+    pool: SqlitePool,
     hub: Arc<Hub>,
     account_id: AccountId,
 }
 
 impl StateReporter {
-    fn new(hub: Arc<Hub>, account_id: AccountId) -> Self {
-        Self { hub, account_id }
+    fn new(pool: SqlitePool, hub: Arc<Hub>, account_id: AccountId) -> Self {
+        Self {
+            pool,
+            hub,
+            account_id,
+        }
     }
 
     async fn transition(&mut self, state: SyncState, last_error: Option<String>) {
+        if state == SyncState::Error {
+            // best-effort: a failed status write shouldn't mask the original
+            // sync error that triggered this transition.
+            if let Err(e) = crate::db::accounts::update_sync(
+                &self.pool,
+                self.account_id,
+                crate::models::SyncStatus::Error,
+                last_error.as_deref(),
+                None,
+            )
+            .await
+            {
+                tracing::warn!(account_id = %self.account_id, error = %e, "persist sync error status failed");
+            }
+        }
         publish_sync_state(
             &self.hub,
             SyncStateEvent::new(self.account_id, state, last_error),
@@ -150,7 +171,7 @@ pub(crate) async fn run_polling_worker(worker: PollingWorker) {
         config,
     } = worker;
     let mut backoff = config.initial_backoff;
-    let mut reporter = StateReporter::new(hub.clone(), account_id);
+    let mut reporter = StateReporter::new(pool.clone(), hub.clone(), account_id);
     reporter.transition(SyncState::Polling, None).await;
 
     loop {
@@ -264,7 +285,7 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
     };
 
     let mut backoff = config.initial_backoff;
-    let mut reporter = StateReporter::new(hub.clone(), account_id);
+    let mut reporter = StateReporter::new(pool.clone(), hub.clone(), account_id);
     reporter.transition(SyncState::Idle, None).await;
     loop {
         if cancel.is_cancelled() {
@@ -365,11 +386,26 @@ pub(crate) async fn run_sync_worker(worker: SyncWorker) {
             }
         };
 
+        let port = match crate::imap::port_u16(account.imap_port) {
+            Ok(port) => port,
+            Err(err) => {
+                tracing::warn!(
+                    %account_id,
+                    folder_name = %folder_name,
+                    error = %err,
+                    "idle sync worker stopped: invalid imap port"
+                );
+                reporter
+                    .transition(SyncState::Error, Some(err.to_string()))
+                    .await;
+                return;
+            }
+        };
         reporter.transition(SyncState::Idle, None).await;
         let wait = idle
             .idle_once(IdleRequest {
                 host: &account.imap_host,
-                port: account.imap_port as u16,
+                port,
                 username: &account.email,
                 credential: &cycle_credential,
                 folder: &folder_name,
@@ -578,6 +614,8 @@ mod tests {
                     uid_next: Some(1),
                     exists: 0,
                     messages: vec![],
+                    window_hi: 0,
+                    has_more: false,
                 }),
                 Outcome::Protocol => Err(ImapError::Protocol("temporary failure".into())),
                 Outcome::Auth => Err(ImapError::Auth("bad password".into())),

@@ -218,16 +218,41 @@ impl McpBridge {
                 Ok(mut rx) => {
                     let out_tx = out_tx.clone();
                     handles.push(tokio::spawn(async move {
-                        while let Some(event) = rx.recv().await {
-                            let message = protocol::notification(
-                                NOTIFICATION_METHOD,
-                                json!({
-                                    "topic": event.topic,
-                                    "data": event.data,
-                                }),
-                            );
-                            if out_tx.send(message).await.is_err() {
-                                break;
+                        loop {
+                            match rx.recv().await {
+                                Some(event) => {
+                                    let message = protocol::notification(
+                                        NOTIFICATION_METHOD,
+                                        json!({
+                                            "topic": event.topic,
+                                            "data": forward_event_data(&event),
+                                        }),
+                                    );
+                                    if out_tx.send(message).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                // `None` means the subscription forwarder
+                                // dropped mid-stream (IPC transport error),
+                                // not a clean shutdown. Surface the loss to
+                                // the agent so it knows it stopped receiving
+                                // events for this topic instead of silently
+                                // going quiet.
+                                None => {
+                                    // best-effort: the output channel may already
+                                    // be closed during shutdown, in which case the
+                                    // agent is gone and the error frame is moot.
+                                    let _ = out_tx
+                                        .send(protocol::notification(
+                                            NOTIFICATION_ERROR_METHOD,
+                                            json!({
+                                                "topic": topic.as_str(),
+                                                "error": "subscription dropped",
+                                            }),
+                                        ))
+                                        .await;
+                                    break;
+                                }
                             }
                         }
                     }));
@@ -407,9 +432,15 @@ impl McpBridge {
                         }
                         None => {
                             // Subscription dropped; fall back to one DB read so
-                            // we don't busy-loop. Pending here means the daemon
-                            // is gone — surface the current state.
-                            return Ok(self.get_approval(id).await?.state);
+                            // we don't busy-loop. If it's still Pending the
+                            // daemon is gone and no decision can ever arrive —
+                            // expire the row so it doesn't sit `pending` forever
+                            // while the agent gets a timeout error back.
+                            let state = self.get_approval(id).await?.state;
+                            if state == ApprovalState::Pending {
+                                return self.expire_approval(id).await;
+                            }
+                            return Ok(state);
                         }
                     }
                 }
@@ -656,6 +687,34 @@ fn notification_topics() -> [Topic; 5] {
         Topic::McpApprovalRequested,
         Topic::McpApprovalDecided,
     ]
+}
+
+/// Redact event payloads before forwarding them to the MCP client.
+///
+/// The `mcp.approval_requested` event published by the daemon carries the
+/// full approval `args`, which for draft tools include the message
+/// `text_body`/`html_body`. Forwarding it verbatim would broadcast one
+/// agent's pending draft body to every connected MCP session — and it
+/// contradicts the redaction already applied in `approval_summary`. So for
+/// that topic we forward only non-sensitive fields (`approval_id`, `tool`,
+/// `state`, and the redacted `summary`) and strip the raw `args`/body. The
+/// TUI subscribes to the hub directly and is unaffected. Every other topic
+/// forwards unchanged.
+fn forward_event_data(event: &Event) -> Value {
+    if event.topic != Topic::McpApprovalRequested.as_str() {
+        return event.data.clone();
+    }
+    let payload = match event.data.as_object() {
+        Some(payload) => payload,
+        None => return json!({}),
+    };
+    let mut redacted = serde_json::Map::new();
+    for key in ["approval_id", "tool", "state", "summary"] {
+        if let Some(value) = payload.get(key) {
+            redacted.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(redacted)
 }
 
 /// Returns the decided state if `event` is an `mcp.approval_decided` payload
@@ -1243,6 +1302,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_approval_requested_notification_redacts_draft_body() {
+        let mock = MockDaemon::new();
+        let bridge = bridge(mock.clone());
+        let (tx, mut rx) = mpsc::channel(OUTPUT_MAILBOX);
+        let handles = bridge.start_notifications(tx).await;
+
+        // Mirror the daemon's `op_mcp_approval_create` event shape: the raw
+        // `args` carry the draft body that must never reach other sessions.
+        mock.emit(
+            Topic::McpApprovalRequested,
+            json!({
+                "approval_id": "00000000-0000-0000-0000-000000000001",
+                "tool": "postblox_draft_create",
+                "summary": "MCP tool postblox_draft_create requested",
+                "state": "pending",
+                "args": {
+                    "account_id": "a",
+                    "subject": "hello",
+                    "text_body": "private body text",
+                    "html_body": "<p>private body html</p>",
+                },
+            }),
+        )
+        .await;
+
+        let message = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message["method"], NOTIFICATION_METHOD);
+        assert_eq!(message["params"]["topic"], "mcp.approval_requested");
+
+        let data = &message["params"]["data"];
+        assert_eq!(data["approval_id"], "00000000-0000-0000-0000-000000000001");
+        assert_eq!(data["tool"], "postblox_draft_create");
+        assert_eq!(data["state"], "pending");
+        // Raw args (and the bodies within) must be stripped.
+        assert!(data.get("args").is_none(), "args leaked: {data:?}");
+        let serialized = serde_json::to_string(&message).unwrap();
+        assert!(
+            !serialized.contains("private body text"),
+            "draft text body leaked: {serialized}"
+        );
+        assert!(
+            !serialized.contains("private body html"),
+            "draft html body leaked: {serialized}"
+        );
+
+        for handle in handles {
+            handle.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn test_initialized_notification_gets_no_response() {
         let bridge = bridge(MockDaemon::new());
         let response = bridge
@@ -1278,6 +1391,105 @@ mod tests {
         assert_eq!(response["id"], Value::Null);
         assert_eq!(response["error"]["code"], -32600);
         assert_eq!(response["error"]["message"], "input line exceeds 16 bytes");
+    }
+
+    #[tokio::test]
+    async fn test_stdio_recovers_after_oversized_line_processes_next_request() {
+        // An oversized line followed by a valid request on the next line must
+        // produce one -32600 error frame AND a correct response to the valid
+        // request — the oversized line must not poison the stream.
+        let mock = MockDaemon::new();
+        let bridge = bridge(mock);
+        let (mut input_tx, input_rx) = tokio::io::duplex(64);
+        let (output_tx, mut output_rx) = tokio::io::duplex(4096);
+
+        // Limit large enough for the valid request below but smaller than the
+        // garbage first line, so only the first line trips the oversized path.
+        let server = tokio::spawn(serve_stdio_io_with_limit(bridge, input_rx, output_tx, 200));
+        input_tx.write_all(&vec![b'x'; 300]).await.unwrap();
+        input_tx.write_all(b"\n").await.unwrap();
+        input_tx
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"postblox_account_list","arguments":{}}}"#,
+            )
+            .await
+            .unwrap();
+        input_tx.write_all(b"\n").await.unwrap();
+        drop(input_tx);
+
+        let mut output = Vec::new();
+        output_rx.read_to_end(&mut output).await.unwrap();
+        server.await.unwrap().unwrap();
+
+        let text = std::str::from_utf8(&output).unwrap();
+        let frames: Vec<Value> = text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(frames.len(), 2, "expected error + response, got {frames:?}");
+
+        assert_eq!(frames[0]["id"], Value::Null);
+        assert_eq!(frames[0]["error"]["code"], -32600);
+
+        assert_eq!(frames[1]["id"], 42);
+        assert_eq!(
+            frames[1]["result"]["structuredContent"],
+            json!({"ok": true})
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stdio_oversized_without_trailing_newline_discards_until_newline() {
+        // Exercise the `discard_until_newline` path: the oversized bytes are
+        // delivered in chunks with no newline in the first fill_buf, so the
+        // reader must consume the overflow chunk-by-chunk and resync on the
+        // newline that arrives later, then process the following valid request.
+        let mock = MockDaemon::new();
+        let bridge = bridge(mock);
+        // Small duplex buffer so each write surfaces as a separate fill_buf
+        // chunk, forcing the no-newline-in-buffer branch.
+        let (mut input_tx, input_rx) = tokio::io::duplex(8);
+        let (output_tx, mut output_rx) = tokio::io::duplex(4096);
+
+        // Limit above the valid `ping` request (40 bytes) but below the 48
+        // bytes of overflow written before any newline arrives.
+        let server = tokio::spawn(serve_stdio_io_with_limit(bridge, input_rx, output_tx, 44));
+
+        let writer = tokio::spawn(async move {
+            // Oversized payload split across several chunks, no newline yet.
+            for _ in 0..6 {
+                input_tx.write_all(b"abcdefgh").await.unwrap();
+            }
+            // Newline finally terminates the oversized line.
+            input_tx.write_all(b"\n").await.unwrap();
+            // A valid request on the next line proves the reader resynced.
+            input_tx
+                .write_all(br#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#)
+                .await
+                .unwrap();
+            input_tx.write_all(b"\n").await.unwrap();
+            drop(input_tx);
+        });
+
+        let mut output = Vec::new();
+        output_rx.read_to_end(&mut output).await.unwrap();
+        writer.await.unwrap();
+        server.await.unwrap().unwrap();
+
+        let text = std::str::from_utf8(&output).unwrap();
+        let frames: Vec<Value> = text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(frames.len(), 2, "expected error + response, got {frames:?}");
+
+        assert_eq!(frames[0]["id"], Value::Null);
+        assert_eq!(frames[0]["error"]["code"], -32600);
+
+        assert_eq!(frames[1]["id"], 7);
+        assert_eq!(frames[1]["result"], json!({}));
     }
 
     #[test]

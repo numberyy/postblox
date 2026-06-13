@@ -66,8 +66,9 @@ pub struct ReconcileReport {
 ///   thread/message insert, UID-state update).
 /// - [`SyncError::Attachment`] if persisting a fetched attachment fails;
 ///   the half-inserted message is best-effort rolled back.
-/// - [`SyncError::Parse`] is reserved for upstream parser errors and is
-///   not raised here — unparseable messages are skipped with a warning.
+///
+/// Unparseable messages are skipped with a warning rather than failing
+/// the whole sync.
 pub async fn reconcile_folder(
     pool: &SqlitePool,
     hub: &Arc<Hub>,
@@ -86,11 +87,18 @@ pub async fn reconcile_folder(
         .await?
         .ok_or_else(|| SyncError::UnknownFolder(folder_name.to_string()))?;
 
-    let from_uid = folder.last_seen_uid.unwrap_or(0).max(0) as u32 + 1;
-    let server = imap
+    let port = crate::imap::port_u16(account.imap_port)?;
+    // IMAP UIDs are u32; clamp the stored i64 before the +1 so a corrupt
+    // oversized value can't wrap to a low UID and silently re-fetch.
+    let mut from_uid = (folder
+        .last_seen_uid
+        .unwrap_or(0)
+        .clamp(0, i64::from(u32::MAX)) as u32)
+        .saturating_add(1);
+    let mut server = imap
         .sync_folder(
             &account.imap_host,
-            account.imap_port as u16,
+            port,
             &account.email,
             credential,
             folder_name,
@@ -102,29 +110,24 @@ pub async fn reconcile_folder(
     // folder and refetch from UID 1.
     let mut wiped: u64 = 0;
     let needs_full_resync = match (folder.uid_validity, server.uid_validity) {
-        (Some(local), Some(server_v)) => local != server_v as i64,
+        (Some(local), Some(server_v)) => local != i64::from(server_v),
         _ => false,
     };
-    let server = if needs_full_resync {
+    if needs_full_resync {
         wiped = db::messages::delete_all_in_folder(pool, folder.id).await?;
+        from_uid = 1;
         // Fetch from scratch.
-        imap.sync_folder(
-            &account.imap_host,
-            account.imap_port as u16,
-            &account.email,
-            credential,
-            folder_name,
-            1,
-        )
-        .await?
-    } else {
-        server
-    };
-
-    // Skip messages we already have. The server may include the
-    // boundary UID `last_seen_uid` even with `<from>:*` semantics.
-    let server_uids: Vec<i64> = server.messages.iter().map(|m| m.uid as i64).collect();
-    let already = db::messages::existing_uids(pool, folder.id, &server_uids).await?;
+        server = imap
+            .sync_folder(
+                &account.imap_host,
+                port,
+                &account.email,
+                credential,
+                folder_name,
+                from_uid,
+            )
+            .await?;
+    }
 
     // Pull recent threads once so the thread-matcher has somewhere to
     // look for In-Reply-To / References / subject hits.
@@ -151,97 +154,136 @@ pub async fn reconcile_folder(
     }
 
     let mut inserted: u64 = 0;
-    for fetched in &server.messages {
-        let uid = fetched.uid as i64;
-        if already.contains(&uid) {
-            continue;
-        }
-        // Some servers may legitimately not include a body for some UIDs
-        // (e.g. expunged race). Skip rather than fail the whole sync.
-        if fetched.raw.is_empty() {
-            continue;
-        }
-        let mut parsed: ParsedEmail =
-            match parse_with_options(&fetched.raw, ParseOptions::without_raw_headers()) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(uid, error = %e, "skip unparseable message");
-                    continue;
+    let mut last_seen_uid = folder.last_seen_uid;
+    // Drain the folder in bounded windows: each `sync_folder` returns at
+    // most FETCH_WINDOW message bodies, so peak memory stays bounded even
+    // on a first sync of a large mailbox. `has_more` advances us to the
+    // next window without waiting for the next poll/IDLE cycle.
+    loop {
+        // Skip messages we already have. The server may include the
+        // boundary UID even within a window.
+        let server_uids: Vec<i64> = server.messages.iter().map(|m| m.uid as i64).collect();
+        let already = db::messages::existing_uids(pool, folder.id, &server_uids).await?;
+        for fetched in &server.messages {
+            let uid = fetched.uid as i64;
+            if already.contains(&uid) {
+                continue;
+            }
+            // Some servers may legitimately not include a body for some UIDs
+            // (e.g. expunged race). Skip rather than fail the whole sync.
+            if fetched.raw.is_empty() {
+                continue;
+            }
+            let mut parsed: ParsedEmail =
+                match parse_with_options(&fetched.raw, ParseOptions::without_raw_headers()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(uid, error = %e, "skip unparseable message");
+                        continue;
+                    }
+                };
+
+            let thread_id = match assign_thread(&parsed, &thread_refs) {
+                ThreadMatch::Existing(id) => ThreadId::from(id),
+                ThreadMatch::New => {
+                    let t = db::threads::create(
+                        pool,
+                        account_id,
+                        parsed.message_id.as_deref(),
+                        parsed.subject.as_deref(),
+                    )
+                    .await?;
+                    // Add to the in-memory list so subsequent messages in
+                    // this same batch can match against it.
+                    thread_refs.push(ThreadRef {
+                        thread_id: t.id.into_inner(),
+                        message_ids: parsed
+                            .message_id
+                            .as_ref()
+                            .map(|m| vec![m.clone()])
+                            .unwrap_or_default(),
+                        subject: parsed.subject.clone().unwrap_or_default(),
+                        last_message_at: fetched.internal_date.unwrap_or_else(Utc::now),
+                    });
+                    t.id
                 }
             };
 
-        let thread_id = match assign_thread(&parsed, &thread_refs) {
-            ThreadMatch::Existing(id) => ThreadId::from(id),
-            ThreadMatch::New => {
-                let t = db::threads::create(
-                    pool,
-                    account_id,
-                    parsed.message_id.as_deref(),
-                    parsed.subject.as_deref(),
-                )
-                .await?;
-                // Add to the in-memory list so subsequent messages in
-                // this same batch can match against it.
-                thread_refs.push(ThreadRef {
-                    thread_id: t.id.into_inner(),
-                    message_ids: parsed
-                        .message_id
-                        .as_ref()
-                        .map(|m| vec![m.clone()])
-                        .unwrap_or_default(),
-                    subject: parsed.subject.clone().unwrap_or_default(),
-                    last_message_at: fetched.internal_date.unwrap_or_else(Utc::now),
-                });
-                t.id
+            // Take attachments out before moving `parsed` into `build_message_row` so
+            // we can persist them afterwards without re-borrowing a moved value.
+            let attachments = std::mem::take(&mut parsed.attachments);
+            let new = build_message_row(account_id, folder.id, thread_id, fetched, parsed);
+            let row: Message = db::messages::create(pool, &new).await?;
+            if let Err(error) =
+                crate::attachments::persist_parsed_for_message(pool, row.id, &attachments).await
+            {
+                // best-effort rollback of the half-inserted message; original error takes priority.
+                let _ = db::messages::delete(pool, row.id).await;
+                return Err(error.into());
             }
-        };
+            db::threads::touch_last_message_at(
+                pool,
+                thread_id,
+                fetched.internal_date.unwrap_or_else(Utc::now),
+            )
+            .await?;
+            db::threads::refresh_aggregates(pool, thread_id).await?;
+            inserted += 1;
 
-        // Take attachments out before moving `parsed` into `build_message_row` so
-        // we can persist them afterwards without re-borrowing a moved value.
-        let attachments = std::mem::take(&mut parsed.attachments);
-        let new = build_message_row(account_id, folder.id, thread_id, fetched, parsed);
-        let row: Message = db::messages::create(pool, &new).await?;
-        if let Err(error) =
-            crate::attachments::persist_parsed_for_message(pool, row.id, &attachments).await
-        {
-            // best-effort rollback of the half-inserted message; original error takes priority.
-            let _ = db::messages::delete(pool, row.id).await;
-            return Err(error.into());
+            hub.publish(
+                Topic::MailNew,
+                json!({
+                    "account_id": account_id,
+                    "folder_id": folder.id,
+                    "thread_id": thread_id,
+                    "message_id": row.id,
+                    "uid": uid,
+                }),
+            )
+            .await;
         }
-        db::threads::touch_last_message_at(
-            pool,
-            thread_id,
-            fetched.internal_date.unwrap_or_else(Utc::now),
-        )
-        .await?;
-        db::threads::refresh_aggregates(pool, thread_id).await?;
-        inserted += 1;
 
-        hub.publish(
-            Topic::MailNew,
-            json!({
-                "account_id": account_id,
-                "folder_id": folder.id,
-                "thread_id": thread_id,
-                "message_id": row.id,
-                "uid": uid,
-            }),
-        )
-        .await;
+        // Advance bookkeeping for this window, then fetch the next batch
+        // if the server reported UIDs above it.
+        let batch_max = server.messages.iter().map(|m| m.uid as i64).max();
+        last_seen_uid = [last_seen_uid, batch_max, Some(i64::from(server.window_hi))]
+            .into_iter()
+            .flatten()
+            .max();
+        if !server.has_more {
+            break;
+        }
+        from_uid = server.window_hi.saturating_add(1);
+        server = imap
+            .sync_folder(
+                &account.imap_host,
+                port,
+                &account.email,
+                credential,
+                folder_name,
+                from_uid,
+            )
+            .await?;
     }
 
-    let last_seen_uid = server
-        .messages
-        .iter()
-        .map(|m| m.uid as i64)
-        .max()
-        .or(folder.last_seen_uid);
     db::folders::update_uid_state(
         pool,
         folder.id,
         server.uid_validity.map(|v| v as i64),
         server.uid_next.map(|v| v as i64),
         last_seen_uid,
+    )
+    .await?;
+
+    // Record a successful sync so the status survives a restart and the
+    // accounts pane can show "last synced": clears any prior error and
+    // stamps `last_synced_at`.
+    db::accounts::update_sync(
+        pool,
+        account_id,
+        crate::models::SyncStatus::Idle,
+        None,
+        Some(Utc::now()),
     )
     .await?;
 

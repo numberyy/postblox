@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sqlx::SqlitePool;
 use tokio::sync::Mutex;
@@ -38,11 +39,6 @@ struct WorkerHandle {
 }
 
 impl WorkerManager {
-    /// Build a manager with the default [`WorkerConfig`].
-    pub fn new(pool: SqlitePool, hub: Arc<Hub>, imap: Arc<dyn ImapSync>) -> Self {
-        Self::with_config(pool, hub, imap, WorkerConfig::default())
-    }
-
     /// Build a manager with a custom [`WorkerConfig`].
     pub fn with_config(
         pool: SqlitePool,
@@ -213,9 +209,22 @@ impl WorkerManager {
     }
 }
 
+/// Upper bound on how long [`WorkerManager::stop`] waits for a worker to
+/// observe cancellation before abandoning the join. Set just above the
+/// IMAP `NETWORK_TIMEOUT` (30s) so a worker parked in a network phase has
+/// time to time out and notice the cancel token, yet daemon shutdown is
+/// never held hostage by a wedged connection.
+const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(35);
+
 async fn await_worker(join: JoinHandle<()>) {
-    if let Err(e) = join.await {
-        tracing::warn!(error = %e, "sync worker join failed");
+    let abort = join.abort_handle();
+    match tokio::time::timeout(WORKER_JOIN_TIMEOUT, join).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "sync worker join failed"),
+        Err(_) => {
+            tracing::warn!("sync worker did not stop within timeout; aborting");
+            abort.abort();
+        }
     }
 }
 
@@ -276,6 +285,8 @@ mod tests {
                 uid_next: Some(1),
                 exists: 0,
                 messages: vec![],
+                window_hi: 0,
+                has_more: false,
             })
         }
     }

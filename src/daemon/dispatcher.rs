@@ -455,6 +455,7 @@ impl Dispatcher for DaemonDispatcher {
             Op::MessageSend => {
                 op_message_send(
                     &self.pool,
+                    &self.hub,
                     self.secrets.as_ref(),
                     self.oauth.as_ref(),
                     self.smtp.as_ref(),
@@ -796,10 +797,14 @@ async fn op_mcp_approval_decide(
             "'state' must be allowed, denied, or expired",
         ));
     }
-    let decided_by = args
-        .get("decided_by")
-        .and_then(Value::as_str)
-        .unwrap_or(actor.as_str());
+    // `decided_by` is persisted and re-broadcast, so hold it to the same
+    // actor allowlist as every other identity field rather than accepting
+    // arbitrary free-form text.
+    let decided_by = match args.get("decided_by").and_then(Value::as_str) {
+        Some(value) if actor_is_allowed(value) => value,
+        Some(_) => return Err(RpcError::bad_args("invalid 'decided_by'")),
+        None => actor.as_str(),
+    };
     let decided = db::mcp::decide(pool, id, state, decided_by)
         .await
         .map_err(|e| RpcError::internal_ctx("mcp::decide", e))?;
@@ -1473,6 +1478,11 @@ async fn op_message_prepare_forward(pool: &SqlitePool, args: Value) -> Result<Va
 }
 
 async fn op_attachment_export(pool: &SqlitePool, args: Value) -> Result<Value, RpcError> {
+    // TRUST NOTE: `destination_path` is taken verbatim from the caller and
+    // is intentionally unconfined. This op is reachable only from the local
+    // TUI/IPC, never the MCP tool surface, so the writer is the local user.
+    // If it is ever exposed to MCP, confine the path under a configured
+    // export root and reject absolute / `..` components first.
     let actor = actor_from_args(&args);
     let id = parse_id::<AttachmentId>(&args, "id")?;
     let destination_path = parse_str(&args, "destination_path")?;
@@ -1657,10 +1667,12 @@ async fn refetch_forward_attachments(
     };
     let target_uid = u32::try_from(message.uid)
         .map_err(|_| RpcError::new("unavailable_offline", "attachment unavailable offline"))?;
+    let imap_port = crate::imap::port_u16(account.imap_port)
+        .map_err(|_| RpcError::new("unavailable_offline", "attachment unavailable offline"))?;
     let server = match imap_sync
         .sync_folder(
             &account.imap_host,
-            account.imap_port as u16,
+            imap_port,
             &account.email,
             &credential,
             &folder.name,
@@ -1756,6 +1768,7 @@ fn map_attachment_export_error(err: std::io::Error) -> RpcError {
 
 async fn op_message_send(
     pool: &SqlitePool,
+    hub: &Arc<Hub>,
     secrets: &dyn SecretStore,
     oauth: &dyn GoogleOAuth,
     smtp: &dyn SmtpSubmitter,
@@ -1832,6 +1845,19 @@ async fn op_message_send(
             draft_id = %draft_id,
             "drafts::delete after send failed"
         );
+    } else {
+        // Tell subscribers the draft is gone so the drafts pane drops the
+        // row live, the same way other write-through ops publish on the
+        // mail topic. The sent message itself arrives via IMAP sync.
+        hub.publish(
+            Topic::MailUpdated,
+            json!({
+                "account_id": account_id,
+                "draft_id": draft_id.to_string(),
+                "removed": true,
+            }),
+        )
+        .await;
     }
 
     audit_actor(
@@ -1911,9 +1937,12 @@ fn map_smtp_error(err: SmtpError) -> RpcError {
     match err {
         SmtpError::Auth(message) => RpcError::new("auth_failed", message),
         SmtpError::InvalidRequest(message) => RpcError::bad_args(message),
-        SmtpError::InvalidConfig(message)
-        | SmtpError::Transient(message)
-        | SmtpError::Internal(message) => RpcError::internal(message),
+        // Surface transient failures under a distinct, retryable code so
+        // clients can tell a network blip from a permanent misconfiguration.
+        SmtpError::Transient(message) => RpcError::new("smtp_transient", message),
+        SmtpError::InvalidConfig(message) | SmtpError::Internal(message) => {
+            RpcError::internal(message)
+        }
     }
 }
 
@@ -1946,7 +1975,8 @@ async fn op_account_test_login(
     let folders = imap
         .test_login(
             &account.imap_host,
-            account.imap_port as u16,
+            crate::imap::port_u16(account.imap_port)
+                .map_err(|_| RpcError::bad_args("bad imap_port"))?,
             &account.email,
             &credential,
         )
@@ -2370,32 +2400,68 @@ async fn credential_for_account(
                     RpcError::new("missing_secret", "no stored OAuth token for account")
                 })?;
             if stored.token.needs_refresh(chrono::Utc::now()) {
-                let refreshed = oauth
-                    .refresh_token(&stored.config(), &stored.token)
-                    .await
-                    .map_err(map_oauth_error)?;
-                stored.token = refreshed;
-                google::store_stored_oauth(secrets, account.id, &stored)
-                    .await
-                    .map_err(map_oauth_error)?;
+                match oauth.refresh_token(&stored.config(), &stored.token).await {
+                    Ok(refreshed) => {
+                        stored.token = refreshed;
+                        google::store_stored_oauth(secrets, account.id, &stored)
+                            .await
+                            .map_err(map_oauth_error)?;
+                    }
+                    // A hard rejection (revoked / invalid refresh token) needs
+                    // re-auth and must fail. A transient failure (network, 5xx)
+                    // can fall back to the cached access token as long as it
+                    // hasn't actually expired yet — only the 60s skew tripped.
+                    Err(err)
+                        if !is_oauth_reauth(&err)
+                            && stored.token.expires_at > chrono::Utc::now() =>
+                    {
+                        tracing::warn!(
+                            account_id = %account.id,
+                            error = %err,
+                            "oauth refresh failed transiently; using unexpired cached token"
+                        );
+                    }
+                    Err(err) => return Err(map_oauth_error(err)),
+                }
             }
-            Ok(MailCredential::oauth2_bearer(stored.token.access_token))
+            Ok(MailCredential::oauth2_bearer(
+                stored.token.access_token.clone(),
+            ))
         }
     }
+}
+
+/// Whether an OAuth error means the stored credential is no longer
+/// usable and the account must be re-authenticated (vs a transient,
+/// retryable failure).
+fn is_oauth_reauth(err: &GoogleOAuthError) -> bool {
+    matches!(
+        err,
+        GoogleOAuthError::HttpStatus(400 | 401 | 403) | GoogleOAuthError::MissingRefreshToken
+    )
 }
 
 fn map_oauth_error(err: GoogleOAuthError) -> RpcError {
     match err {
         GoogleOAuthError::InvalidInput(message) => RpcError::bad_args(message),
         GoogleOAuthError::MissingRefreshToken => RpcError::new(
-            "oauth_failed",
-            "OAuth response did not include refresh token",
+            "oauth_reauth_required",
+            "OAuth response did not include a refresh token; re-authentication required",
+        ),
+        GoogleOAuthError::HttpStatus(status @ (400 | 401 | 403)) => RpcError::new(
+            "oauth_reauth_required",
+            format!("OAuth refresh rejected (status {status}); re-authentication required"),
         ),
         GoogleOAuthError::HttpStatus(status) => RpcError::new(
             "oauth_failed",
             format!("OAuth token endpoint returned status {status}"),
         ),
-        GoogleOAuthError::Http(err) => RpcError::internal_ctx("oauth http", err),
+        // Don't echo the raw reqwest error (it can include endpoint URLs /
+        // server diagnostics) back over IPC; log it and return a generic code.
+        GoogleOAuthError::Http(err) => {
+            tracing::warn!(error = %err, "oauth http transport error");
+            RpcError::new("oauth_failed", "OAuth token endpoint request failed")
+        }
         GoogleOAuthError::Secret(err) => RpcError::internal_ctx("oauth secrets", err),
         GoogleOAuthError::Decode(err) => RpcError::internal_ctx("oauth decode", err),
     }
@@ -2845,9 +2911,9 @@ mod tests {
     }
 
     #[test]
-    fn test_map_smtp_error_transient_maps_to_internal() {
+    fn test_map_smtp_error_transient_maps_to_retryable_code() {
         let err = map_smtp_error(SmtpError::Transient("retry later".into()));
-        assert_eq!(err.code, "internal");
+        assert_eq!(err.code, "smtp_transient");
     }
 
     #[test]

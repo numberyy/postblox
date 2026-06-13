@@ -168,12 +168,32 @@ pub async fn preview_attachment(
     let mut file = tokio::fs::File::open(&attachment.storage_path).await?;
     let mut buf = vec![0; PREVIEW_LIMIT_BYTES + 1];
     let read = file.read(&mut buf).await?;
-    let truncated = read > PREVIEW_LIMIT_BYTES
-        || usize::try_from(attachment.size_bytes).unwrap_or(usize::MAX) > PREVIEW_LIMIT_BYTES;
+    // The buffer is PREVIEW_LIMIT_BYTES + 1, so reading past the cap is the
+    // authoritative "there's more" signal — don't trust the DB size_bytes,
+    // which can disagree with the on-disk length.
+    let truncated = read > PREVIEW_LIMIT_BYTES;
     buf.truncate(read.min(PREVIEW_LIMIT_BYTES));
 
-    match String::from_utf8(buf) {
-        Ok(text) => Ok(AttachmentPreview {
+    // When we cut at a fixed byte offset a multibyte codepoint can straddle
+    // the boundary; that must not make a valid UTF-8 file look non-UTF-8.
+    // Keep the longest valid prefix when truncated; only a genuine encoding
+    // error on an untruncated read is reported as "not valid UTF-8".
+    let inline = match std::str::from_utf8(&buf) {
+        Ok(text) => Some(text.to_string()),
+        Err(e) if truncated && e.valid_up_to() > 0 => {
+            // `..valid_up_to()` is valid UTF-8 by definition, so this never
+            // panics and decodes multibyte codepoints correctly.
+            Some(
+                std::str::from_utf8(&buf[..e.valid_up_to()])
+                    .unwrap()
+                    .to_string(),
+            )
+        }
+        Err(_) => None,
+    };
+
+    match inline {
+        Some(text) => Ok(AttachmentPreview {
             attachment,
             preview_bytes: text.len(),
             inline_text: Some(text),
@@ -184,7 +204,7 @@ pub async fn preview_attachment(
             },
             truncated,
         }),
-        Err(_) => Ok(AttachmentPreview {
+        None => Ok(AttachmentPreview {
             message: format!(
                 "No inline preview: {} attachment is not valid UTF-8",
                 attachment.content_type
@@ -212,21 +232,10 @@ pub async fn export_attachment(
     attachment: &Attachment,
     destination_path: &Path,
 ) -> Result<AttachmentExport, std::io::Error> {
-    if destination_path.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("destination exists: {}", destination_path.display()),
-        ));
-    }
-    if let Some(parent) = destination_path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("destination parent does not exist: {}", parent.display()),
-            ));
-        }
-    }
-
+    // No exists()/parent.exists() pre-checks: `create_new(true)` returns
+    // `AlreadyExists` atomically and `open` returns `NotFound` for a
+    // missing parent, so the pre-checks only added a TOCTOU window and two
+    // redundant syscalls. The caller maps these ErrorKinds to messages.
     let mut source = tokio::fs::File::open(&attachment.storage_path).await?;
     let mut destination = tokio::fs::OpenOptions::new()
         .write(true)
@@ -450,6 +459,41 @@ mod tests {
 
         assert_eq!(preview.inline_text.unwrap().len(), PREVIEW_LIMIT_BYTES);
         assert!(preview.truncated);
+    }
+
+    #[tokio::test]
+    async fn test_preview_text_truncation_split_multibyte_char_stays_valid_utf8() {
+        // A valid UTF-8 file whose multibyte char straddles the byte cap
+        // must still preview as truncated text, NOT be reported non-UTF-8.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unicode.txt");
+        // "é" is 2 bytes; fill exactly to the cap so the next char's first
+        // byte lands at the boundary and its continuation byte is cut.
+        let mut content = "a".repeat(PREVIEW_LIMIT_BYTES - 1);
+        content.push('é');
+        content.push('é');
+        tokio::fs::write(&path, content.as_bytes()).await.unwrap();
+        let attachment = Attachment {
+            id: AttachmentId::new(),
+            message_id: MessageId::new(),
+            filename: "unicode.txt".into(),
+            content_type: "text/plain".into(),
+            content_id: None,
+            size_bytes: content.len() as i64,
+            disposition: AttachmentDisposition::Attachment,
+            storage_path: path.display().to_string(),
+            created_at: Utc::now(),
+        };
+
+        let preview = preview_attachment(attachment).await.unwrap();
+
+        let text = preview
+            .inline_text
+            .expect("valid UTF-8 prefix should preview");
+        assert!(preview.truncated);
+        // The trailing split codepoint is dropped; the valid prefix remains.
+        assert!(text.starts_with(&"a".repeat(PREVIEW_LIMIT_BYTES - 1)));
+        assert!(std::str::from_utf8(text.as_bytes()).is_ok());
     }
 
     #[tokio::test]

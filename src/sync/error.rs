@@ -17,10 +17,6 @@ pub enum SyncError {
     #[error("attachment: {0}")]
     Attachment(#[from] crate::attachments::AttachmentError),
 
-    /// MIME parsing failed for an ingested message.
-    #[error("parse: {0}")]
-    Parse(#[from] crate::mail::error::MailError),
-
     /// No account row matched the request.
     #[error("unknown account")]
     UnknownAccount,

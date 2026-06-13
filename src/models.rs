@@ -329,12 +329,6 @@ macro_rules! json_string_array {
             pub fn to_vec(&self) -> Vec<String> {
                 self.0.clone()
             }
-
-            /// Consume the wrapper and return the inner `Vec`.
-            #[inline]
-            pub fn into_vec(self) -> Vec<String> {
-                self.0
-            }
         }
 
         impl From<Vec<String>> for $name {
