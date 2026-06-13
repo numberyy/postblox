@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Local-first email TUI and MCP bridge for AI agents."
-authors = ["Nikhil <numbery@users.noreply.github.com>"]
+authors = ["Nikhil <numberyy@users.noreply.github.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/numbery/postblox"
-homepage = "https://github.com/numbery/postblox"
+repository = "https://github.com/numberyy/postblox"
+homepage = "https://github.com/numberyy/postblox"
 documentation = "https://docs.rs/postblox"
 readme = "README.md"
 keywords = ["email", "imap", "tui", "mcp", "sqlite"]
@@ -31,8 +31,8 @@ members = ["crates/postblox-mail"]
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/numbery/postblox"
-homepage = "https://github.com/numbery/postblox"
+repository = "https://github.com/numberyy/postblox"
+homepage = "https://github.com/numberyy/postblox"
 documentation = "https://docs.rs/postblox"
 
 [workspace.dependencies]
@@ -95,6 +95,7 @@ rand = "0.8"
 tokio-util = "0.7"
 ratatui = "0.29"
 crossterm = "0.28"
+unicode-width = "0.2"
 keyring = { version = "3.6", features = ["apple-native", "linux-native-sync-persistent", "crypto-rust"] }
 mime_guess = { version = "2", default-features = false }
 arboard = { version = "3", default-features = false }

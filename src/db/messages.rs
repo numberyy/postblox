@@ -202,13 +202,6 @@ const LIST_BY_THREAD_QUERY: &str = concat!(
     " FROM messages WHERE thread_id = ? ORDER BY internal_date"
 );
 
-const GET_BY_MESSAGE_ID_HEADER_QUERY: &str = concat!(
-    "SELECT ",
-    message_cols!(),
-    " FROM messages \
-     WHERE account_id = ? AND message_id_header = ? LIMIT 1"
-);
-
 const EXISTING_UIDS_PREFIX: &str = "SELECT uid FROM messages WHERE folder_id = ? AND uid IN (";
 const EXISTING_UIDS_SUFFIX: &str = ")";
 const SET_FLAGS_QUERY: &str = "UPDATE messages SET flags = ? WHERE id = ? AND flags <> ?";
@@ -349,25 +342,6 @@ pub async fn message_ids_by_threads(
         .await?)
 }
 
-/// Look up a message by its RFC822 Message-ID header within an account. Used
-/// by the threading matcher to walk In-Reply-To / References chains.
-///
-/// # Errors
-///
-/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
-/// header / unknown account is reported as `Ok(None)`, not an error.
-pub async fn get_by_message_id_header(
-    pool: &SqlitePool,
-    account_id: AccountId,
-    message_id_header: &str,
-) -> Result<Option<Message>, DbError> {
-    Ok(sqlx::query_as(GET_BY_MESSAGE_ID_HEADER_QUERY)
-        .bind(account_id)
-        .bind(message_id_header)
-        .fetch_optional(pool)
-        .await?)
-}
-
 /// Return the subset of `uids` that already exist in `folder_id`. Used by
 /// IMAP sync to skip messages we've already fetched.
 ///
@@ -404,26 +378,6 @@ pub async fn existing_uids(
     }
     let rows = query.fetch_all(pool).await?;
     Ok(rows.into_iter().map(|r| r.0).collect())
-}
-
-/// Reassign a message to a different thread (or clear with `None`).
-///
-/// # Errors
-///
-/// Returns [`DbError::Sqlx`] if the update fails (FK violation when
-/// `thread_id` is unknown, or any other SQLite error). A missing `id`
-/// is a silent no-op.
-pub async fn set_thread(
-    pool: &SqlitePool,
-    id: MessageId,
-    thread_id: Option<ThreadId>,
-) -> Result<(), DbError> {
-    sqlx::query("UPDATE messages SET thread_id = ? WHERE id = ?")
-        .bind(thread_id)
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
 }
 
 /// Replace the flag list for a message. Reports whether a row was
@@ -495,26 +449,6 @@ pub async fn set_folder(
 pub async fn delete(pool: &SqlitePool, id: MessageId) -> Result<bool, DbError> {
     let r = sqlx::query("DELETE FROM messages WHERE id = ?")
         .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(r.rows_affected() > 0)
-}
-
-/// Delete a message identified by `(folder_id, uid)`. Returns `true` if
-/// a row was removed.
-///
-/// # Errors
-///
-/// Returns [`DbError::Sqlx`] if the delete fails. A missing row is
-/// reported as `Ok(false)`, not an error.
-pub async fn delete_by_folder_uid(
-    pool: &SqlitePool,
-    folder_id: FolderId,
-    uid: i64,
-) -> Result<bool, DbError> {
-    let r = sqlx::query("DELETE FROM messages WHERE folder_id = ? AND uid = ?")
-        .bind(folder_id)
-        .bind(uid)
         .execute(pool)
         .await?;
     Ok(r.rows_affected() > 0)
@@ -766,21 +700,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_by_message_id_header() {
-        let c = ctx().await;
-        create(&c.pool, &sample(&c, 9)).await.unwrap();
-        let got = get_by_message_id_header(&c.pool, c.account_id, "<9@x>")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(got.uid, 9);
-        assert!(get_by_message_id_header(&c.pool, c.account_id, "<missing>")
-            .await
-            .unwrap()
-            .is_none());
-    }
-
-    #[tokio::test]
     async fn test_existing_uids_partitions() {
         let c = ctx().await;
         create(&c.pool, &sample(&c, 1)).await.unwrap();
@@ -803,15 +722,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_thread_and_flags() {
+    async fn test_set_flags_updates_stored_flags() {
         let c = ctx().await;
         let m = create(&c.pool, &sample(&c, 1)).await.unwrap();
-        let other = crate::db::threads::create(&c.pool, c.account_id, None, None)
-            .await
-            .unwrap();
-        set_thread(&c.pool, m.id, Some(other.id)).await.unwrap();
-        let got = get(&c.pool, m.id).await.unwrap().unwrap();
-        assert_eq!(got.thread_id, Some(other.id));
 
         let outcome = set_flags(
             &c.pool,
@@ -876,23 +789,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_by_folder_uid() {
-        let c = ctx().await;
-        create(&c.pool, &sample(&c, 1)).await.unwrap();
-        assert!(delete_by_folder_uid(&c.pool, c.folder_id, 1).await.unwrap());
-        assert!(!delete_by_folder_uid(&c.pool, c.folder_id, 1).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_set_thread_to_null_clears() {
-        let c = ctx().await;
-        let m = create(&c.pool, &sample(&c, 1)).await.unwrap();
-        set_thread(&c.pool, m.id, None).await.unwrap();
-        let got = get(&c.pool, m.id).await.unwrap().unwrap();
-        assert!(got.thread_id.is_none());
-    }
-
-    #[tokio::test]
     async fn test_const_select_queries_run_against_empty_pool() {
         // Smoke-test every hoisted const query against an empty schema.
         // Catches column-list typos at runtime: SQLite errors out on an
@@ -915,10 +811,6 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
-        assert!(get_by_message_id_header(&c.pool, c.account_id, "<missing>")
-            .await
-            .unwrap()
-            .is_none());
     }
 
     #[test]

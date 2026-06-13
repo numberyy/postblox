@@ -83,11 +83,6 @@ impl KeyringSecretStore {
         }
     }
 
-    /// Service name this store registers entries under.
-    pub fn service(&self) -> &str {
-        &self.service
-    }
-
     /// Per-account key used as the keyring entry's `account` attribute.
     pub fn account_key(account_id: AccountId) -> String {
         account_id.to_string()

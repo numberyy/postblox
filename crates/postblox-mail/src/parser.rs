@@ -618,4 +618,46 @@ Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n\
         assert_eq!(email.message_id, default_email.message_id);
         assert_eq!(email.subject, default_email.subject);
     }
+
+    #[test]
+    fn test_parse_deeply_nested_multipart_terminates_without_panic() {
+        // Pathologically nested multipart/mixed: the parser must terminate
+        // without panicking or unbounded recursion. Ok or Err both fine.
+        let depth = 60;
+        let mut raw = String::from("From: a@b.com\r\nSubject: nested\r\nMIME-Version: 1.0\r\n");
+        for n in 0..depth {
+            raw.push_str(&format!(
+                "Content-Type: multipart/mixed; boundary=\"b{n}\"\r\n\r\n--b{n}\r\n"
+            ));
+        }
+        raw.push_str("Content-Type: text/plain\r\n\r\nhi\r\n");
+        for n in (0..depth).rev() {
+            raw.push_str(&format!("\r\n--b{n}--\r\n"));
+        }
+        let _ = parse(raw.as_bytes());
+    }
+
+    #[test]
+    fn test_parse_non_utf8_binary_part_does_not_choke() {
+        let raw: &[u8] = b"From: a@b.com\r\nSubject: bin\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"x\"\r\n\r\n--x\r\n\
+Content-Type: application/octet-stream\r\n\
+Content-Disposition: attachment; filename=\"d.bin\"\r\n\r\n\xff\xfe\x00\x01\r\n--x--\r\n";
+        let email = parse(raw).expect("non-utf8 attachment must not fail the parse");
+        if let Some(att) = email.attachments.first() {
+            assert!(att.data.contains(&0xff), "binary bytes should round-trip");
+        }
+    }
+
+    #[test]
+    fn test_parse_from_group_without_bare_address_is_empty() {
+        let raw: &[u8] = b"From: undisclosed-recipients:;\r\nSubject: group\r\n\
+MIME-Version: 1.0\r\nContent-Type: text/plain\r\n\r\nbody\r\n";
+        let email = parse(raw).unwrap();
+        assert!(
+            !email.from.contains('@'),
+            "a group From with no bare address yields no usable address, got {:?}",
+            email.from
+        );
+    }
 }

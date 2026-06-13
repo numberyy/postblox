@@ -121,11 +121,6 @@ impl FileSecretStore {
         }
     }
 
-    /// Filesystem path of the backing store.
-    pub fn path(&self) -> &Path {
-        &self.inner.path
-    }
-
     async fn read_map(&self) -> Result<BTreeMap<AccountId, String>, SecretError> {
         let bytes = match tokio::fs::read(&self.inner.path).await {
             Ok(b) => b,
@@ -173,8 +168,15 @@ impl SecretStore for FileSecretStore {
     }
 
     async fn get(&self, account_id: AccountId) -> Result<Option<Secret>, SecretError> {
-        let map = self.read_map().await?;
-        Ok(map.get(&account_id).map(|s| Zeroizing::new(s.clone())))
+        let mut map = self.read_map().await?;
+        let found = map.get(&account_id).map(|s| Zeroizing::new(s.clone()));
+        // Wipe every decrypted value (including the one we just cloned out)
+        // before the map is freed so plaintext secrets don't linger on the
+        // heap — mirrors the put() path.
+        for v in map.values_mut() {
+            v.zeroize();
+        }
+        Ok(found)
     }
 
     async fn delete(&self, account_id: AccountId) -> Result<(), SecretError> {
@@ -184,6 +186,9 @@ impl SecretStore for FileSecretStore {
         let mut map = self.read_map().await?;
         if map.remove(&account_id).is_some() {
             self.write_map(&map).await?;
+        }
+        for v in map.values_mut() {
+            v.zeroize();
         }
         Ok(())
     }

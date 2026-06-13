@@ -5,8 +5,6 @@
 //! reply headers because [`MimeBuildOptions`] keeps those fields named):
 //!
 //! - [`build_mime`] — text + optional HTML, no attachments.
-//! - [`build_mime_with_attachments`] — deprecated compatibility wrapper
-//!   for `multipart/mixed` parts.
 //! - [`build_mime_full`] — adds attachments and RFC 5322 §3.6.4
 //!   [`ReplyHeaders`] (`In-Reply-To` / `References`) for threaded
 //!   replies through [`MimeBuildOptions`].
@@ -18,6 +16,15 @@ use std::fmt::Write;
 
 use chrono::Utc;
 use uuid::Uuid;
+
+/// `write!` into a `String`, discarding the `fmt::Result`. `fmt::Write`
+/// for `String` is infallible (it never returns `Err`), so the rationale
+/// for dropping the result lives here once rather than at every call.
+macro_rules! w {
+    ($($arg:tt)*) => {{
+        let _ = write!($($arg)*);
+    }};
+}
 
 use base64::Engine;
 
@@ -103,42 +110,11 @@ pub struct MimeBuildOptions<'a> {
     pub reply: ReplyHeaders<'a>,
 }
 
-/// Render a message with attachments using positional arguments.
-///
-/// Deprecated compatibility shim — new callers should use
-/// [`build_mime_full`] with [`MimeBuildOptions`].
-#[deprecated(note = "use build_mime_full(MimeBuildOptions { .. })")]
-#[allow(clippy::too_many_arguments)]
-pub fn build_mime_with_attachments(
-    from: &str,
-    to: &[String],
-    cc: &[String],
-    subject: &str,
-    text_body: Option<&str>,
-    html_body: Option<&str>,
-    message_id: &str,
-    attachments: &[MimeAttachment],
-) -> Vec<u8> {
-    build_mime_full(MimeBuildOptions {
-        from,
-        to,
-        cc,
-        subject,
-        text_body,
-        html_body,
-        message_id,
-        attachments,
-        reply: ReplyHeaders::default(),
-    })
-}
-
 /// Render `options` as an RFC 5322 message and return its bytes.
 ///
 /// Always produces valid UTF-8 output: header values are CRLF-stripped
 /// up front, and attachment bodies are base64-encoded so each line is
-/// pure ASCII. The internal `from_utf8_unchecked` call on the base64
-/// output is sound because base64 Standard alphabet is a subset of
-/// ASCII (see `// SAFETY:` comment at the call site).
+/// pure ASCII.
 pub fn build_mime_full(options: MimeBuildOptions<'_>) -> Vec<u8> {
     let MimeBuildOptions {
         from,
@@ -153,21 +129,20 @@ pub fn build_mime_full(options: MimeBuildOptions<'_>) -> Vec<u8> {
     } = options;
 
     let mut msg = String::new();
-    // write! to String is infallible — fmt::Write for String never returns Err.
-    let _ = write!(msg, "From: {}\r\n", sanitize_header(from));
-    let _ = write!(msg, "To: {}\r\n", sanitize_header(&to.join(", ")));
+    w!(msg, "From: {}\r\n", sanitize_header(from));
+    w!(msg, "To: {}\r\n", sanitize_header(&to.join(", ")));
     if !cc.is_empty() {
-        let _ = write!(msg, "Cc: {}\r\n", sanitize_header(&cc.join(", ")));
+        w!(msg, "Cc: {}\r\n", sanitize_header(&cc.join(", ")));
     }
-    let _ = write!(msg, "Subject: {}\r\n", sanitize_header(subject));
-    let _ = write!(msg, "Message-ID: {}\r\n", sanitize_header(message_id));
+    w!(msg, "Subject: {}\r\n", sanitize_header(subject));
+    w!(msg, "Message-ID: {}\r\n", sanitize_header(message_id));
     if let Some(value) = reply.in_reply_to.filter(|s| !s.is_empty()) {
-        let _ = write!(msg, "In-Reply-To: {}\r\n", sanitize_header(value));
+        w!(msg, "In-Reply-To: {}\r\n", sanitize_header(value));
     }
     if let Some(value) = reply.references.filter(|s| !s.is_empty()) {
-        let _ = write!(msg, "References: {}\r\n", sanitize_header(value));
+        w!(msg, "References: {}\r\n", sanitize_header(value));
     }
-    let _ = write!(
+    w!(
         msg,
         "Date: {}\r\n",
         Utc::now().format("%a, %d %b %Y %H:%M:%S +0000")
@@ -178,18 +153,18 @@ pub fn build_mime_full(options: MimeBuildOptions<'_>) -> Vec<u8> {
         build_body_only(&mut msg, text_body, html_body);
     } else {
         let mixed_boundary = format!("postblox-mixed-{}", Uuid::new_v4().simple());
-        let _ = write!(
+        w!(
             msg,
             "Content-Type: multipart/mixed; boundary=\"{mixed_boundary}\"\r\n"
         );
         msg.push_str("\r\n");
 
-        let _ = write!(msg, "--{mixed_boundary}\r\n");
+        w!(msg, "--{mixed_boundary}\r\n");
         build_body_only(&mut msg, text_body, html_body);
 
         for att in attachments {
-            let _ = write!(msg, "\r\n--{mixed_boundary}\r\n");
-            let _ = write!(
+            w!(msg, "\r\n--{mixed_boundary}\r\n");
+            w!(
                 msg,
                 "Content-Type: {}; name=\"{}\"\r\n",
                 sanitize_header(&att.content_type),
@@ -197,14 +172,14 @@ pub fn build_mime_full(options: MimeBuildOptions<'_>) -> Vec<u8> {
             );
             msg.push_str("Content-Transfer-Encoding: base64\r\n");
             if let Some(cid) = &att.content_id {
-                let _ = write!(msg, "Content-ID: <{}>\r\n", sanitize_header(cid));
-                let _ = write!(
+                w!(msg, "Content-ID: <{}>\r\n", sanitize_header(cid));
+                w!(
                     msg,
                     "Content-Disposition: inline; filename=\"{}\"\r\n",
                     sanitize_header(&att.filename)
                 );
             } else {
-                let _ = write!(
+                w!(
                     msg,
                     "Content-Disposition: attachment; filename=\"{}\"\r\n",
                     sanitize_header(&att.filename)
@@ -212,14 +187,19 @@ pub fn build_mime_full(options: MimeBuildOptions<'_>) -> Vec<u8> {
             }
             msg.push_str("\r\n");
             let encoded = base64::engine::general_purpose::STANDARD.encode(&att.data);
-            // Line-wrap at 76 chars per RFC 2045
-            for chunk in encoded.as_bytes().chunks(76) {
-                // SAFETY: base64 Standard encoding always produces valid ASCII, which is valid UTF-8
-                msg.push_str(unsafe { std::str::from_utf8_unchecked(chunk) });
+            // Line-wrap at 76 chars per RFC 2045. base64 output is ASCII, so
+            // every 76-byte boundary is a char boundary and we can slice the
+            // &str directly — no unsafe needed.
+            let mut rest = encoded.as_str();
+            while !rest.is_empty() {
+                let split = rest.len().min(76);
+                let (line, tail) = rest.split_at(split);
+                msg.push_str(line);
                 msg.push_str("\r\n");
+                rest = tail;
             }
         }
-        let _ = write!(msg, "--{mixed_boundary}--\r\n");
+        w!(msg, "--{mixed_boundary}--\r\n");
     }
 
     msg.into_bytes()
@@ -229,18 +209,18 @@ fn build_body_only(msg: &mut String, text_body: Option<&str>, html_body: Option<
     match (text_body, html_body) {
         (Some(text), Some(html)) => {
             let boundary = format!("postblox-{}", Uuid::new_v4().simple());
-            let _ = write!(
+            w!(
                 msg,
                 "Content-Type: multipart/alternative; boundary=\"{boundary}\"\r\n"
             );
             msg.push_str("\r\n");
-            let _ = write!(msg, "--{boundary}\r\n");
+            w!(msg, "--{boundary}\r\n");
             msg.push_str("Content-Type: text/plain; charset=utf-8\r\n\r\n");
             msg.push_str(text);
-            let _ = write!(msg, "\r\n--{boundary}\r\n");
+            w!(msg, "\r\n--{boundary}\r\n");
             msg.push_str("Content-Type: text/html; charset=utf-8\r\n\r\n");
             msg.push_str(html);
-            let _ = write!(msg, "\r\n--{boundary}--\r\n");
+            w!(msg, "\r\n--{boundary}--\r\n");
         }
         (Some(text), None) => {
             msg.push_str("Content-Type: text/plain; charset=utf-8\r\n\r\n");

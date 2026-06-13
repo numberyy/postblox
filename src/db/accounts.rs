@@ -98,17 +98,6 @@ pub async fn get(pool: &SqlitePool, id: AccountId) -> Result<Option<Account>, Db
     Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
 }
 
-/// Look up an account by email; `Ok(None)` if not present.
-///
-/// # Errors
-///
-/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
-/// row is reported as `Ok(None)`, not an error.
-pub async fn get_by_email(pool: &SqlitePool, email: &str) -> Result<Option<Account>, DbError> {
-    let q = format!("SELECT {SELECT} FROM accounts WHERE email = ?");
-    Ok(sqlx::query_as(&q).bind(email).fetch_optional(pool).await?)
-}
-
 /// Delete an account by id. Returns `true` if a row was removed.
 ///
 /// # Errors
@@ -205,15 +194,6 @@ mod tests {
 
         let got = get(&pool, acc.id).await.unwrap().unwrap();
         assert_eq!(got, acc);
-    }
-
-    #[tokio::test]
-    async fn test_get_by_email_finds() {
-        let pool = crate::db::test_pool().await;
-        create(&pool, &sample("hit@x.com")).await.unwrap();
-        let got = get_by_email(&pool, "hit@x.com").await.unwrap().unwrap();
-        assert_eq!(got.email, "hit@x.com");
-        assert!(get_by_email(&pool, "miss@x.com").await.unwrap().is_none());
     }
 
     #[tokio::test]

@@ -69,9 +69,14 @@ fn is_multiline_wrote_marker(lines: &[&str], i: usize) -> bool {
         return false;
     }
     let end = (i + 4).min(lines.len());
-    lines[i..end]
-        .iter()
-        .any(|line| line.trim().ends_with("wrote:"))
+    let block = &lines[i..end];
+    let ends_with_wrote = block.iter().any(|line| line.trim().ends_with("wrote:"));
+    // Require an address-like token somewhere in the block so a normal
+    // sentence that merely starts with "On " and happens to contain a line
+    // ending in "wrote:" isn't mistaken for an attribution header and the
+    // user's real content trimmed away.
+    let has_address = block.iter().any(|line| line.contains('@'));
+    ends_with_wrote && has_address
 }
 
 fn is_outlook_header_block(lines: &[&str], i: usize) -> bool {
@@ -116,6 +121,15 @@ mod tests {
         let text = "Sounds good!\n\nOn Mon, 1 Jan 2026 at 10:00 AM, Foo Bar <foo@bar.com> wrote:\n> original message";
         let result = extract_reply(text);
         assert_eq!(result, "Sounds good!");
+    }
+
+    #[test]
+    fn test_extract_reply_keeps_prose_starting_with_on_without_address() {
+        // Starts with "On " and a later line ends in "wrote:" but there is
+        // no address token, so it is real content, not an attribution line.
+        let text = "On vacation I read your note.\nNothing else to add, but I wrote:\nthe rest of my actual reply.";
+        let result = extract_reply(text);
+        assert_eq!(result, text);
     }
 
     #[test]

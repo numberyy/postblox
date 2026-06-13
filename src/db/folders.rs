@@ -156,20 +156,6 @@ pub async fn update_uid_state(
     Ok(())
 }
 
-/// Delete a folder by id. Returns `true` if a row was removed.
-///
-/// # Errors
-///
-/// Returns [`DbError::Sqlx`] if the delete fails (FK or IO). A missing
-/// row is reported as `Ok(false)`, not an error.
-pub async fn delete(pool: &SqlitePool, id: FolderId) -> Result<bool, DbError> {
-    let r = sqlx::query("DELETE FROM folders WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(r.rows_affected() > 0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

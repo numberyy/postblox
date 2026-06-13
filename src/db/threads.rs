@@ -43,17 +43,6 @@ pub async fn create(
         .await?)
 }
 
-/// Look up a thread by id; `Ok(None)` if missing.
-///
-/// # Errors
-///
-/// Returns [`DbError::Sqlx`] if the query or row decode fails. A missing
-/// row is reported as `Ok(None)`, not an error.
-pub async fn get(pool: &SqlitePool, id: ThreadId) -> Result<Option<Thread>, DbError> {
-    let q = format!("SELECT {SELECT} FROM threads WHERE id = ?");
-    Ok(sqlx::query_as(&q).bind(id).fetch_optional(pool).await?)
-}
-
 /// Look up a thread by `(account_id, external_id)`; `Ok(None)` if missing.
 ///
 /// # Errors
@@ -146,20 +135,6 @@ pub async fn touch_last_message_at(
     Ok(())
 }
 
-/// Delete a thread by id. Returns `true` if a row was removed.
-///
-/// # Errors
-///
-/// Returns [`DbError::Sqlx`] if the delete fails (FK or IO). A missing
-/// row is reported as `Ok(false)`, not an error.
-pub async fn delete(pool: &SqlitePool, id: ThreadId) -> Result<bool, DbError> {
-    let r = sqlx::query("DELETE FROM threads WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(r.rows_affected() > 0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,17 +159,6 @@ mod tests {
         .await
         .unwrap()
         .id
-    }
-
-    #[tokio::test]
-    async fn test_create_and_get() {
-        let pool = crate::db::test_pool().await;
-        let a = account(&pool).await;
-        let t = create(&pool, a, Some("ext-1"), Some("Hi")).await.unwrap();
-        assert_eq!(t.account_id, a);
-        assert_eq!(t.message_count, 0);
-        let got = get(&pool, t.id).await.unwrap().unwrap();
-        assert_eq!(got, t);
     }
 
     #[tokio::test]
@@ -235,17 +199,23 @@ mod tests {
     async fn test_touch_last_message_at_only_advances() {
         let pool = crate::db::test_pool().await;
         let a = account(&pool).await;
-        let t = create(&pool, a, None, None).await.unwrap();
+        let t = create(&pool, a, Some("touch"), None).await.unwrap();
         let now = Utc::now();
         touch_last_message_at(&pool, t.id, now).await.unwrap();
-        let got = get(&pool, t.id).await.unwrap().unwrap();
+        let got = get_by_external_id(&pool, a, "touch")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got.last_message_at.unwrap().timestamp(), now.timestamp());
 
         // Earlier timestamp must not overwrite.
         touch_last_message_at(&pool, t.id, now - chrono::Duration::days(1))
             .await
             .unwrap();
-        let got = get(&pool, t.id).await.unwrap().unwrap();
+        let got = get_by_external_id(&pool, a, "touch")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(got.last_message_at.unwrap().timestamp(), now.timestamp());
     }
 

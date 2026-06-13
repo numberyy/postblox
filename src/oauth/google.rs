@@ -36,6 +36,10 @@ pub const GMAIL_SCOPE: &str = "https://mail.google.com/";
 /// Default HTTP request timeout used when talking to the Google token endpoint.
 pub const DEFAULT_REQUEST_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 const REFRESH_SKEW_SECONDS: i64 = 60;
+/// Upper bound on a token endpoint's reported `expires_in`. Google's
+/// access tokens live ~1h; capping at 24h keeps a hostile/buggy value
+/// from overflowing chrono arithmetic while never shortening a real one.
+const MAX_EXPIRES_IN_SECONDS: i64 = 24 * 60 * 60;
 
 /// OAuth2 client configuration for the Gmail flow.
 #[derive(Clone, PartialEq, Eq)]
@@ -135,6 +139,16 @@ impl GoogleOAuthToken {
     }
 }
 
+impl Drop for GoogleOAuthToken {
+    fn drop(&mut self) {
+        // Tokens are deserialized into plain Strings; scrub the secret
+        // bytes on drop so access/refresh tokens don't linger on the heap.
+        use zeroize::Zeroize;
+        self.access_token.zeroize();
+        self.refresh_token.zeroize();
+    }
+}
+
 /// Persisted OAuth2 bundle: the client config plus the latest token pair.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredGoogleOAuth {
@@ -148,6 +162,15 @@ pub struct StoredGoogleOAuth {
     pub scopes: Vec<String>,
     /// Most recently obtained access/refresh token pair.
     pub token: GoogleOAuthToken,
+}
+
+impl Drop for StoredGoogleOAuth {
+    fn drop(&mut self) {
+        // Scrub the client secret on drop; the contained token wipes its
+        // own access/refresh bytes via its Drop impl.
+        use zeroize::Zeroize;
+        self.client_secret.zeroize();
+    }
 }
 
 impl std::fmt::Debug for StoredGoogleOAuth {
@@ -405,6 +428,14 @@ impl TokenEndpointResponse {
                 "expires_in must be positive".into(),
             ));
         }
+        // Clamp to a sane ceiling before any chrono arithmetic: a hostile
+        // or buggy token endpoint returning e.g. i64::MAX would otherwise
+        // overflow `Duration::seconds` / `DateTime + Duration` and panic
+        // the daemon task (fatal under `panic = "abort"`).
+        let expires_in = self.expires_in.min(MAX_EXPIRES_IN_SECONDS);
+        let expires_at = Utc::now()
+            .checked_add_signed(Duration::seconds(expires_in))
+            .ok_or_else(|| GoogleOAuthError::InvalidInput("expires_in out of range".into()))?;
         let refresh_token = match (self.refresh_token, existing_refresh_token) {
             (Some(refresh_token), _) if !refresh_token.is_empty() => refresh_token,
             (_, Some(refresh_token)) if !refresh_token.is_empty() => refresh_token.to_string(),
@@ -413,7 +444,7 @@ impl TokenEndpointResponse {
         Ok(GoogleOAuthToken {
             access_token: self.access_token,
             refresh_token,
-            expires_at: Utc::now() + Duration::seconds(self.expires_in),
+            expires_at,
             token_type: self.token_type,
             scope: self.scope,
         })
@@ -628,9 +659,15 @@ mod tests {
         };
         assert!(token.needs_refresh(now));
 
+        // Construct explicitly rather than via `..token`: GoogleOAuthToken
+        // implements Drop (to zeroize tokens), so functional-record-update
+        // can't move the remaining fields out.
         let token = GoogleOAuthToken {
+            access_token: token.access_token.clone(),
+            refresh_token: token.refresh_token.clone(),
             expires_at: now + Duration::seconds(120),
-            ..token
+            token_type: token.token_type.clone(),
+            scope: token.scope.clone(),
         };
         assert!(!token.needs_refresh(now));
     }

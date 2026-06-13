@@ -155,10 +155,22 @@ fn build_envelope(from: &str, recipients: &[String]) -> Result<Envelope, SmtpErr
 fn build_transport(
     request: &SmtpSubmitRequest,
 ) -> Result<AsyncSmtpTransport<Tokio1Executor>, SmtpError> {
-    let tls = match security_for(&request.server)? {
-        SmtpSecurity::Wrapper => Some(Tls::Wrapper(tls_parameters(&request.server.host)?)),
-        SmtpSecurity::StartTls => Some(Tls::Required(tls_parameters(&request.server.host)?)),
-        SmtpSecurity::None => Some(Tls::None),
+    if request.server.host.trim().is_empty() {
+        return Err(SmtpError::InvalidConfig("smtp host is empty".into()));
+    }
+    let security = security_for(&request.server)?;
+    // Never transmit SASL credentials over an unencrypted connection: a
+    // (use_tls=false, starttls=false) misconfiguration would otherwise
+    // send the password / bearer token in cleartext.
+    if security == SmtpSecurity::None && !request.credential.is_empty() {
+        return Err(SmtpError::InvalidConfig(
+            "refusing to send credentials over an unencrypted connection".into(),
+        ));
+    }
+    let tls = match security {
+        SmtpSecurity::Wrapper => Tls::Wrapper(tls_parameters(&request.server.host)?),
+        SmtpSecurity::StartTls => Tls::Required(tls_parameters(&request.server.host)?),
+        SmtpSecurity::None => Tls::None,
     };
 
     let credentials = Credentials::new(
@@ -169,16 +181,22 @@ fn build_transport(
         AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(request.server.host.clone())
             .port(request.server.port)
             .timeout(Some(Duration::from_secs(30)))
-            .credentials(credentials);
-    if request.credential.kind() == CredentialKind::OAuth2Bearer {
-        builder = builder.authentication(vec![Mechanism::Xoauth2]);
-    }
-
-    if let Some(tls) = tls {
-        builder = builder.tls(tls);
+            .credentials(credentials)
+            .tls(tls);
+    if let Some(mechanism) = chosen_mechanism(request.credential.kind()) {
+        builder = builder.authentication(vec![mechanism]);
     }
 
     Ok(builder.build())
+}
+
+/// SASL mechanism to force for a credential kind. `XOAUTH2` for bearer
+/// tokens; `None` lets lettre negotiate `PLAIN`/`LOGIN` for passwords.
+fn chosen_mechanism(kind: CredentialKind) -> Option<Mechanism> {
+    match kind {
+        CredentialKind::OAuth2Bearer => Some(Mechanism::Xoauth2),
+        CredentialKind::Password => None,
+    }
 }
 
 fn tls_parameters(host: &str) -> Result<TlsParameters, SmtpError> {
@@ -187,19 +205,24 @@ fn tls_parameters(host: &str) -> Result<TlsParameters, SmtpError> {
 
 fn map_lettre_error(err: lettre::transport::smtp::Error) -> SmtpError {
     let message = err.to_string();
-    let lower = message.to_ascii_lowercase();
-    let status = err.status().map(u16::from);
-    if status == Some(535)
-        || lower.contains("auth")
-        || lower.contains("credential")
-        || lower.contains("password")
-    {
-        SmtpError::Auth(message)
-    } else if err.is_transient() || err.is_timeout() {
-        SmtpError::Transient(message)
-    } else {
-        SmtpError::Internal(message)
+    // Classify by structured signals first; the SMTP status code and
+    // lettre's typed transient/timeout flags are authoritative. Fall back
+    // to a narrow substring check only when no status code is available,
+    // so an unrelated 5xx mentioning e.g. "password policy" isn't
+    // misfiled as an auth failure.
+    if let Some(code) = err.status().map(u16::from) {
+        // 530 auth required, 534/535/538 SASL mechanism/credential issues.
+        if matches!(code, 530 | 534 | 535 | 538) {
+            return SmtpError::Auth(message);
+        }
     }
+    if err.is_transient() || err.is_timeout() {
+        return SmtpError::Transient(message);
+    }
+    if err.status().is_none() && message.to_ascii_lowercase().contains("authenticat") {
+        return SmtpError::Auth(message);
+    }
+    SmtpError::Internal(message)
 }
 
 #[cfg(test)]
@@ -260,5 +283,53 @@ mod tests {
         let envelope = build_envelope("sender@example.com", &["blind@example.com".into()]).unwrap();
         assert_eq!(envelope.to().len(), 1);
         assert_eq!(envelope.from().unwrap().to_string(), "sender@example.com");
+    }
+
+    fn submit_request(server: SmtpServer, credential: MailCredential) -> SmtpSubmitRequest {
+        SmtpSubmitRequest {
+            server,
+            username: "user@example.com".into(),
+            credential,
+            from: "user@example.com".into(),
+            recipients: vec!["to@example.com".into()],
+            mime: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_build_transport_refuses_credentials_over_plaintext() {
+        let request = submit_request(server(false, false), MailCredential::password("secret"));
+        assert!(matches!(
+            build_transport(&request),
+            Err(SmtpError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn test_build_transport_allows_empty_credential_over_plaintext() {
+        // No-auth relay over plaintext is permitted; only secret-bearing
+        // credentials are refused.
+        let request = submit_request(server(false, false), MailCredential::password(""));
+        assert!(build_transport(&request).is_ok());
+    }
+
+    #[test]
+    fn test_build_transport_rejects_empty_host() {
+        let mut endpoint = server(true, false);
+        endpoint.host = String::new();
+        let request = submit_request(endpoint, MailCredential::password("secret"));
+        assert!(matches!(
+            build_transport(&request),
+            Err(SmtpError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn test_chosen_mechanism_selects_xoauth2_for_bearer_only() {
+        assert!(matches!(
+            chosen_mechanism(CredentialKind::OAuth2Bearer),
+            Some(Mechanism::Xoauth2)
+        ));
+        assert!(chosen_mechanism(CredentialKind::Password).is_none());
     }
 }

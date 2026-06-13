@@ -72,7 +72,7 @@ pub trait SecretStore: sealed::Sealed + Send + Sync {
     ///   (no storage, platform error, attribute too long, ambiguous
     ///   entry, etc.).
     /// - [`SecretError::Backend`] if the configured backend is
-    ///   unavailable (e.g. `UnconfiguredSecretStore`).
+    ///   unavailable (e.g. an unconfigured backend).
     async fn put(&self, account_id: AccountId, secret: Secret) -> Result<(), SecretError>;
 
     /// Read the secret for `account_id`. Missing entries return
@@ -92,7 +92,7 @@ pub trait SecretStore: sealed::Sealed + Send + Sync {
     /// - [`SecretError::Keyring`] if the OS keyring backend reports a
     ///   platform failure or bad encoding.
     /// - [`SecretError::Backend`] if the configured backend is
-    ///   unavailable (e.g. `UnconfiguredSecretStore`).
+    ///   unavailable (e.g. an unconfigured backend).
     async fn get(&self, account_id: AccountId) -> Result<Option<Secret>, SecretError>;
 
     /// Remove the secret for `account_id`. A missing entry is not an
@@ -109,46 +109,13 @@ pub trait SecretStore: sealed::Sealed + Send + Sync {
     /// - [`SecretError::Keyring`] if the OS keyring rejects the delete
     ///   (platform errors; `NoEntry` is treated as success).
     /// - [`SecretError::Backend`] if the configured backend is
-    ///   unavailable (e.g. `UnconfiguredSecretStore`).
+    ///   unavailable (e.g. an unconfigured backend).
     async fn delete(&self, account_id: AccountId) -> Result<(), SecretError>;
 
     /// Stable reference string the daemon stores in `accounts.secret_ref`
-    /// for the given account. Defaults to the canonical
-    /// `account:<uuid>` form returned by [`account_secret_ref`].
+    /// for the given account. Defaults to the canonical `account:<uuid>`
+    /// form.
     fn secret_ref(&self, account_id: AccountId) -> String {
-        account_secret_ref(account_id)
-    }
-}
-
-/// Canonical secret-reference string used by every backend.
-pub fn account_secret_ref(account_id: AccountId) -> String {
-    format!("account:{account_id}")
-}
-
-/// Fallback used when no backend is configured. Every operation
-/// returns a `Backend("not configured")` error; this surfaces
-/// misconfiguration through the IPC layer instead of letting it
-/// silently appear to succeed.
-#[derive(Debug, Default)]
-pub struct UnconfiguredSecretStore;
-
-impl sealed::Sealed for UnconfiguredSecretStore {}
-
-#[async_trait]
-impl SecretStore for UnconfiguredSecretStore {
-    async fn put(&self, _: AccountId, _: Secret) -> Result<(), SecretError> {
-        Err(SecretError::Backend(
-            "secrets backend not configured".into(),
-        ))
-    }
-    async fn get(&self, _: AccountId) -> Result<Option<Secret>, SecretError> {
-        Err(SecretError::Backend(
-            "secrets backend not configured".into(),
-        ))
-    }
-    async fn delete(&self, _: AccountId) -> Result<(), SecretError> {
-        Err(SecretError::Backend(
-            "secrets backend not configured".into(),
-        ))
+        format!("account:{account_id}")
     }
 }

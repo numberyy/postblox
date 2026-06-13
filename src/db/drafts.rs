@@ -12,7 +12,7 @@ use serde::Deserialize;
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::db::DbError;
-use crate::models::{AccountId, AddressList, Draft, DraftId, FolderId, MessageId};
+use crate::models::{AccountId, AddressList, Draft, DraftId, MessageId};
 
 /// Input record for [`create`]: every column needed to insert a new
 /// row into the `drafts` table.
@@ -154,28 +154,6 @@ pub async fn update_tx(
         .await?)
 }
 
-/// Mark a draft as synced to a remote folder/uid pair.
-///
-/// # Errors
-///
-/// Returns [`DbError::Sqlx`] if the update fails (FK violation when
-/// `folder_id` is unknown, or any other SQLite error). A missing
-/// `id` is a silent no-op (rows_affected = 0).
-pub async fn set_remote(
-    pool: &SqlitePool,
-    id: DraftId,
-    folder_id: FolderId,
-    uid: i64,
-) -> Result<(), DbError> {
-    sqlx::query("UPDATE drafts SET remote_folder_id = ?, remote_uid = ? WHERE id = ?")
-        .bind(folder_id)
-        .bind(uid)
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
 /// Look up a draft by id; `Ok(None)` if missing.
 ///
 /// # Errors
@@ -314,29 +292,6 @@ mod tests {
         .await
         .unwrap();
         assert!(res.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_set_remote_marks_synced() {
-        let pool = crate::db::test_pool().await;
-        let a = account(&pool).await;
-        let d = create(&pool, &sample(a)).await.unwrap();
-        let folder = crate::db::folders::create(
-            &pool,
-            &crate::db::folders::NewFolder {
-                account_id: a,
-                name: "Drafts".into(),
-                delimiter: "/".into(),
-                role: crate::models::FolderRole::Drafts,
-                selectable: true,
-            },
-        )
-        .await
-        .unwrap();
-        set_remote(&pool, d.id, folder.id, 17).await.unwrap();
-        let got = get(&pool, d.id).await.unwrap().unwrap();
-        assert_eq!(got.remote_folder_id, Some(folder.id));
-        assert_eq!(got.remote_uid, Some(17));
     }
 
     #[tokio::test]

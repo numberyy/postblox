@@ -7,8 +7,11 @@
 //! 3. LIMIT cap is enforced by SQLite around the user query.
 
 use base64::Engine;
+use futures::TryStreamExt;
 use serde_json::{Map, Value};
 use sqlx::{Column, Row, SqlitePool, TypeInfo, ValueRef};
+use std::collections::HashSet;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -64,6 +67,12 @@ const FORBIDDEN_KEYWORDS: &[&str] = &[
     "PRAGMA",
 ];
 
+/// Set view of [`FORBIDDEN_KEYWORDS`], built once for O(1) token lookups.
+fn forbidden_keyword_set() -> &'static HashSet<&'static str> {
+    static SET: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    SET.get_or_init(|| FORBIDDEN_KEYWORDS.iter().copied().collect())
+}
+
 /// Reject any forbidden keyword that appears as a whole-word token
 /// (case-insensitive). Comments and strings are NOT stripped — this is
 /// defense in depth, not a parser. Combined with the read-only pool,
@@ -92,17 +101,16 @@ pub fn validate_query(sql: &str) -> Result<(), SqlError> {
         });
     }
 
+    let forbidden = forbidden_keyword_set();
     let upper = sql.to_uppercase();
     for token in upper.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
         if token.is_empty() {
             continue;
         }
-        for kw in FORBIDDEN_KEYWORDS {
-            if token == *kw {
-                return Err(SqlError::Rejected {
-                    reason: format!("statement contains forbidden keyword: {kw}"),
-                });
-            }
+        if let Some(kw) = forbidden.get(token) {
+            return Err(SqlError::Rejected {
+                reason: format!("statement contains forbidden keyword: {kw}"),
+            });
         }
     }
 
@@ -137,28 +145,32 @@ pub async fn query(
     validate_query(sql)?;
     let sql = trim_one_trailing_semicolon(sql);
     let cap = limit.clamp(1, MAX_ROWS);
-    let capped_sql = format!("SELECT * FROM ({sql}) AS postblox_agent_query LIMIT ?");
-    let rows = timeout(
-        QUERY_TIMEOUT,
-        sqlx::query(&capped_sql).bind(cap as i64).fetch_all(pool),
-    )
+    // The closing boundary sits on its own line so it still applies when the
+    // user query ends in a `--` line comment.
+    let capped_sql = format!("SELECT * FROM (\n{sql}\n) AS postblox_agent_query LIMIT ?");
+    // Stream rows instead of `fetch_all` so the response-size budget is
+    // enforced as each row arrives; worst-case materialization is one row
+    // rather than the whole capped set.
+    timeout(QUERY_TIMEOUT, async {
+        let mut rows = sqlx::query(&capped_sql).bind(cap as i64).fetch(pool);
+        let mut out = Vec::new();
+        let mut budget = ResponseBudget::default();
+        while let Some(row) = rows.try_next().await? {
+            let mut obj = Map::new();
+            for (i, col) in row.columns().iter().enumerate() {
+                let name = col.name().to_string();
+                let value = sqlite_value_to_json(&row, i, &name)?;
+                budget.account(json_value_bytes(&value))?;
+                obj.insert(name, value);
+            }
+            out.push(obj);
+        }
+        Ok(out)
+    })
     .await
     .map_err(|_| SqlError::Rejected {
         reason: format!("query timed out after {} ms", QUERY_TIMEOUT.as_millis()),
-    })??;
-    let mut out = Vec::with_capacity(rows.len());
-    let mut budget = ResponseBudget::default();
-    for row in rows {
-        let mut obj = Map::new();
-        for (i, col) in row.columns().iter().enumerate() {
-            let name = col.name().to_string();
-            let value = sqlite_value_to_json(&row, i, &name)?;
-            budget.account(json_value_bytes(&value))?;
-            obj.insert(name, value);
-        }
-        out.push(obj);
-    }
-    Ok(out)
+    })?
 }
 
 /// Dump every CREATE statement from `sqlite_master` (tables, views,
@@ -535,6 +547,34 @@ mod tests {
         assert_eq!(rows.len(), 10);
         assert_eq!(rows[0]["value"], Value::Number(1.into()));
         assert_eq!(rows[9]["value"], Value::Number(10.into()));
+    }
+
+    #[tokio::test]
+    async fn test_query_limit_applies_when_query_ends_in_line_comment() {
+        // A trailing `--` line comment must not swallow the injected
+        // `) AS ... LIMIT ?` boundary; the row cap still applies.
+        let pool = test_pool().await;
+        let sql = "WITH RECURSIVE n(x) AS ( \
+                       VALUES(1) \
+                       UNION ALL \
+                       SELECT x + 1 FROM n WHERE x < 20 \
+                   ) \
+                   SELECT x AS value FROM n -- trailing comment";
+        let rows = query(&pool, sql, 5).await.unwrap();
+        assert_eq!(rows.len(), 5, "LIMIT must still cap rows past a -- comment");
+    }
+
+    #[tokio::test]
+    async fn test_query_limit_applies_for_multi_line_query() {
+        let pool = test_pool().await;
+        let sql = "WITH RECURSIVE n(x) AS (\n\
+                       VALUES(1)\n\
+                       UNION ALL\n\
+                       SELECT x + 1 FROM n WHERE x < 20\n\
+                   )\n\
+                   SELECT x AS value FROM n -- final line comment";
+        let rows = query(&pool, sql, 3).await.unwrap();
+        assert_eq!(rows.len(), 3, "LIMIT must apply to a multi-line query");
     }
 
     #[tokio::test]

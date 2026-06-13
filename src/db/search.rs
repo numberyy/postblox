@@ -301,6 +301,40 @@ mod tests {
         assert!(q.contains(r#"a""b"#));
     }
 
+    #[test]
+    fn test_quote_term_wraps_unicode_term_as_phrase() {
+        // Non-ASCII characters pass through unchanged inside the phrase
+        // quotes; only the surrounding double-quotes are added.
+        let q = quote_term("café déjà–vu 日本語");
+        assert_eq!(q, "\"café déjà–vu 日本語\"");
+        assert!(q.starts_with('"') && q.ends_with('"'));
+    }
+
+    #[test]
+    fn test_quote_term_doubles_embedded_double_quotes() {
+        // Every embedded `"` is doubled so it can't terminate the phrase
+        // early; the result is balanced.
+        assert_eq!(quote_term(r#"say "hi""#), "\"say \"\"hi\"\"\"");
+        let q = quote_term(r#""""#);
+        // Two input quotes → each doubled (4) plus the two wrappers = 6.
+        assert_eq!(q, "\"\"\"\"\"\"");
+        assert_eq!(q.matches('"').count(), 6);
+    }
+
+    #[test]
+    fn test_quote_term_neutralizes_fts5_operators_as_literal_phrase() {
+        // FTS5 operators / special tokens must be treated as literal text,
+        // not as query syntax: they survive verbatim inside the phrase
+        // quotes, with no escaping beyond the phrase wrapping.
+        for op in ["*", ":", "NEAR", "^", "OR", "a* OR b:c NEAR/3 ^d"] {
+            let q = quote_term(op);
+            assert_eq!(q, format!("\"{op}\""), "operator {op:?} must round-trip");
+            assert!(q.starts_with('"') && q.ends_with('"'));
+            // No stray quote was introduced (operators contain none here).
+            assert_eq!(q.matches('"').count(), 2);
+        }
+    }
+
     #[tokio::test]
     async fn test_search_finds_subject() {
         let (pool, a, f) = seed().await;
