@@ -7,6 +7,9 @@ postblox.toml
 .env
 HANDOVER.md
 TASKS.md
+# Agent / internal coding-rule docs — not published (rules live in CONTRIBUTING.md)
+CLAUDE.md
+AGENTS.md
 .claude/
 .mcp.json
 docs/book/
