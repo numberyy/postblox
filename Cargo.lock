@@ -169,7 +169,7 @@ checksum = "a78dceaba06f029d8f4d7df20addd4b7370a30206e3926267ecda2915b0f3f66"
 dependencies = [
  "async-channel 2.5.0",
  "async-compression",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "futures",
@@ -303,6 +303,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64ct"
@@ -832,7 +838,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -883,7 +889,7 @@ version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9298e6504d9b9e780ed3f7dfd43a61be8cd0e09eb07f7706a945b0072b6670b6"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "memchr",
 ]
 
@@ -942,7 +948,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1397,7 +1403,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -1620,7 +1626,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1745,7 +1751,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0da65617f6cb926332d039cb578aad56178da86e128db6a1b09f4c94fa5b3349"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "email-encoding",
  "email_address",
  "fastrand",
@@ -2018,7 +2024,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2397,7 +2403,7 @@ dependencies = [
  "argon2",
  "async-imap",
  "async-trait",
- "base64",
+ "base64 0.23.1",
  "chrono",
  "crossterm",
  "dirs",
@@ -2433,7 +2439,7 @@ dependencies = [
 name = "postblox-mail"
 version = "0.1.0"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "chrono",
  "criterion",
  "mail-parser",
@@ -2766,7 +2772,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-core",
  "http",
@@ -2870,7 +2876,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2928,7 +2934,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3289,7 +3295,7 @@ version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6798b1838b6a0f69c007c133b8df5866302197e404e8b6ee8ed3e3a5e68dc6"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "crc",
@@ -3364,7 +3370,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa003f0038df784eb8fecbbac13affe3da23b45194bd57dba231c8f48199c526"
 dependencies = [
  "atoi",
- "base64",
+ "base64 0.22.1",
  "bitflags",
  "byteorder",
  "bytes",
@@ -3408,7 +3414,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db58fcd5a53cf07c184b154801ff91347e4c30d17a3562a635ff028ad5deda46"
 dependencies = [
  "atoi",
- "base64",
+ "base64 0.22.1",
  "bitflags",
  "byteorder",
  "chrono",
@@ -3573,10 +3579,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4277,7 +4283,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

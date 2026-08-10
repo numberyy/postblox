@@ -42,7 +42,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 mail-parser = "0.9"
 thiserror = "2"
-base64 = "0.22"
+base64 = "0.23"
 
 [[bin]]
 name = "postblox"
